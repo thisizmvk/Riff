@@ -21,6 +21,10 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "14.0"
     ENABLE_HARDENED_RUNTIME: YES
     SWIFT_STRICT_CONCURRENCY: complete
+    # Xcode 16 recommended settings — encoded here so xcodegen
+    # regenerate doesn't lose them.
+    DEAD_CODE_STRIPPING: YES
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
 
 targets:
   Riff:
@@ -30,8 +34,9 @@ targets:
       - path: Sources
       - path: Resources
         buildPhase: resources
-    dependencies:
-      - target: RiffWidget
+    # RiffWidget app-extension target is intentionally not declared (and
+    # therefore not depended on) — see the disabled-target comment block
+    # after the test target for the rationale and the steps to re-enable.
     info:
       path: Sources/Info.plist
       properties:
@@ -47,72 +52,40 @@ targets:
         # voice-invocation path consent-clean.
         NSSiriUsageDescription: "Riff uses Siri to play music, skip tracks, and start artist radio stations."
     entitlements:
+      # NOTE: XcodeGen regenerates Sources/Riff.entitlements from
+      # THIS properties block on every `xcodegen generate`. Any hand
+      # edit to the .entitlements file is overwritten — add/remove
+      # capabilities here, not there.
       path: Sources/Riff.entitlements
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.network.client: true
+        # PASSKEY SIGN-IN (WebAuthn in the sign-in WKWebView).
+        # Passkeys are driven by Google's own login page; Riff builds
+        # no passkey UI. For the WKWebView to invoke the platform
+        # authenticator (Touch ID / iCloud Keychain) with google.com
+        # as the relying party, uncomment the capability below.
+        #
+        # Requires a PAID Apple Developer account — like App Groups,
+        # it will NOT provision on a free personal team. Apple gates
+        # this capability (intended for browser apps) and may reject
+        # it for a music client. Test the full Google passkey flow on
+        # a real signed build before relying on it. Without it,
+        # Google's page falls back to password + 2FA, which works.
+        #
+        # com.apple.developer.web-browser.public-key-credential: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.riff.app
         CODE_SIGN_STYLE: Automatic
         CODE_SIGN_ENTITLEMENTS: Sources/Riff.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-    postCompileScripts:
-      # Derive CFBundleVersion from `git rev-list --count HEAD` so each
-      # commit increments the build number — required for TestFlight,
-      # which rejects duplicate (CFBundleShortVersionString, CFBundleVersion)
-      # pairs. Runs *after* Xcode's Info.plist processing copies the
-      # plist into the .app bundle, *before* code signing — so signature
-      # covers our stamp. Falls back to "1" outside a git checkout.
-      - name: Sync CFBundleVersion to git rev-count
-        script: |
-          set -e
-          PLIST="${TARGET_BUILD_DIR}/${INFOPLIST_PATH}"
-          if [ ! -f "${PLIST}" ]; then
-            echo "warning: ${PLIST} not present yet — skipping version stamp"
-            exit 0
-          fi
-          if [ -d "${SRCROOT}/.git" ]; then
-            BUILD_NUMBER=$(cd "${SRCROOT}" && git rev-list --count HEAD)
-          else
-            BUILD_NUMBER=1
-          fi
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${BUILD_NUMBER}" "${PLIST}"
-          echo "Stamped CFBundleVersion=${BUILD_NUMBER}"
-        basedOnDependencyAnalysis: false
-
-  RiffWidget:
-    type: app-extension
-    platform: macOS
-    sources:
-      - path: RiffWidget
-      # Shared snapshot + widget intents — compiled into BOTH the
-      # app (Sources/Widgets is picked up by the app target's
-      # `path: Sources`) AND this widget extension, so the
-      # serialized AppIntent types match across the process
-      # boundary. NowPlayingSnapshotWriter.swift is app-only
-      # (drives WidgetCenter reloads, owns the artwork cache write
-      # path) and is excluded here.
-      - path: Sources/Widgets/NowPlayingSnapshot.swift
-      - path: Sources/Widgets/RiffWidgetIntents.swift
-    info:
-      path: RiffWidget/Info.plist
-      properties:
-        CFBundleName: RiffWidget
-        CFBundleDisplayName: Riff Widget
-        CFBundleShortVersionString: "0.1.0"
-        CFBundleVersion: "1"
-        CFBundlePackageType: XPC!
-        NSExtension:
-          NSExtensionPointIdentifier: com.apple.widgetkit-extension
-    entitlements:
-      path: RiffWidget/RiffWidget.entitlements
-    settings:
-      base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.riff.app.widget
-        CODE_SIGN_STYLE: Automatic
-        CODE_SIGN_ENTITLEMENTS: RiffWidget/RiffWidget.entitlements
-        SKIP_INSTALL: YES
+    # CFBundleVersion git-rev-count stamping is disabled: in practice the
+    # post-compile script runs AFTER Xcode's signing phase, which
+    # invalidates the signature (errSecCS -67030) and prevents standalone
+    # launch + WidgetKit extension registration on free-dev accounts.
+    # Re-enable for TestFlight builds via a CI-only step that re-signs
+    # the bundle after stamping, not as a postCompileScript.
 
   RiffTests:
     type: bundle.unit-test
@@ -126,3 +99,61 @@ targets:
         BUNDLE_LOADER: "$(TEST_HOST)"
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Riff.app/Contents/MacOS/Riff"
         GENERATE_INFOPLIST_FILE: YES
+
+# ─────────────────────────────────────────────────────────────────────────
+# RiffWidget — DISABLED.
+#
+# The Notification Center widget extension target is not declared while
+# the project is on a free Apple Developer account. macOS 27 filters
+# free-team-signed widget extensions out of the System Settings widget
+# gallery, chronod never enumerates them, and WidgetKit Simulator returns
+# error 5 on AppIntent + App-Group widgets — so there is no path to
+# install or even render this widget without a paid team.
+#
+# To re-enable when a paid Developer Program seat is available:
+#   1. Restore the `dependencies: - target: RiffWidget` block under the
+#      Riff target above.
+#   2. Paste this target definition back in, immediately above RiffTests:
+#
+#        RiffWidget:
+#          type: app-extension
+#          platform: macOS
+#          sources:
+#            - path: RiffWidget
+#            - path: Sources/Widgets/NowPlayingSnapshot.swift
+#            - path: Sources/Widgets/RiffWidgetIntents.swift
+#          info:
+#            path: RiffWidget/Info.plist
+#            properties:
+#              CFBundleName: RiffWidget
+#              CFBundleDisplayName: Riff Widget
+#              CFBundleShortVersionString: "0.1.0"
+#              CFBundleVersion: "1"
+#              CFBundlePackageType: XPC!
+#              NSExtension:
+#                NSExtensionPointIdentifier: com.apple.widgetkit-extension
+#          entitlements:
+#            path: RiffWidget/RiffWidget.entitlements
+#          settings:
+#            base:
+#              PRODUCT_BUNDLE_IDENTIFIER: dev.riff.app.widget
+#              CODE_SIGN_STYLE: Automatic
+#              CODE_SIGN_ENTITLEMENTS: RiffWidget/RiffWidget.entitlements
+#              SKIP_INSTALL: YES
+#
+#   3. Add the App Group entitlement back to BOTH Sources/Riff.entitlements
+#      and RiffWidget/RiffWidget.entitlements:
+#
+#        <key>com.apple.security.application-groups</key>
+#        <array>
+#          <string>group.dev.riff.app</string>
+#        </array>
+#
+#   4. `xcodegen generate && xcodebuild -scheme Riff build`
+#
+# The widget source — RiffWidget/, Sources/Widgets/ — stays in the repo
+# unchanged so the diff to re-enable is minimal. The app target still
+# compiles those Sources/Widgets files; the in-app NowPlayingSnapshotWriter
+# keeps calling WidgetCenter.shared.reloadTimelines (which no-ops with no
+# extensions registered), so nothing else needs to change here.
+# ─────────────────────────────────────────────────────────────────────────

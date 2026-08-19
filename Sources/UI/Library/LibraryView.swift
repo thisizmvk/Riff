@@ -228,17 +228,25 @@ struct LibraryView: View {
                     .padding(.bottom, 12)
                 }
                 if items.isEmpty && errorMessage == nil {
-                    Text("Nothing here yet.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.75))
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 60)
+                    EmptyState(
+                        systemImage: sectionEmptyIcon,
+                        title: sectionEmptyTitle,
+                        subtitle: sectionEmptySubtitle,
+                        cta: sectionEmptyCTA
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 40)
                 } else if displayedItems.isEmpty {
-                    Text("No \(section.rawValue.lowercased()) match \"\(filterText)\".")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.75))
-                        .frame(maxWidth: .infinity, alignment: .center)
-                        .padding(.top, 60)
+                    EmptyState(
+                        systemImage: "line.3.horizontal.decrease.circle",
+                        title: "No matches",
+                        subtitle: "No \(section.rawValue.lowercased()) match \u{201C}\(filterText)\u{201D}.",
+                        cta: EmptyState.CTA("Clear filter", systemImage: "xmark") {
+                            filterText = ""
+                        }
+                    )
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 40)
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 16)], spacing: 16) {
                         ForEach(displayedItems) { item in
@@ -285,19 +293,66 @@ struct LibraryView: View {
         }
     }
 
+    private var sectionEmptyIcon: String {
+        switch section {
+        case .liked:     return "heart"
+        case .playlists: return "music.note.list"
+        case .albums:    return "square.stack"
+        case .artists:   return "person.2"
+        case .podcasts:  return "mic"
+        case .history:   return "clock.arrow.circlepath"
+        }
+    }
+
+    private var sectionEmptyTitle: String {
+        switch section {
+        case .liked:     return "No liked songs yet"
+        case .playlists: return "No playlists yet"
+        case .albums:    return "No saved albums"
+        case .artists:   return "No followed artists"
+        case .podcasts:  return "No podcast subscriptions"
+        case .history:   return "No listening history yet"
+        }
+    }
+
+    private var sectionEmptySubtitle: String {
+        switch section {
+        case .liked:     return "Tap the heart on any song to save it here."
+        case .playlists: return "Create one from the current queue, or save one from search."
+        case .albums:    return "Open an album, then choose “Save album” from its menu."
+        case .artists:   return "Follow an artist and their releases show up here."
+        case .podcasts:  return "Subscribe to a podcast to see new episodes here."
+        case .history:   return "Start playing something — the last songs you heard show up here."
+        }
+    }
+
+    private var sectionEmptyCTA: EmptyState.CTA? {
+        switch section {
+        case .liked, .albums, .artists, .podcasts, .history:
+            return EmptyState.CTA("Browse home", systemImage: "house") {
+                env.activeTab = .home
+            }
+        case .playlists:
+            return EmptyState.CTA("New playlist", systemImage: "plus") {
+                env.isNewPlaylistSheetPresented = true
+            }
+        }
+    }
+
     private var anonymousEmptyState: some View {
         VStack(spacing: 16) {
             Spacer()
             Image(systemName: "music.note.list")
                 .font(.system(size: 56))
                 .foregroundStyle(.secondary)
-            Text("Sign in to see your library")
+            Text("Sign in to unlock your library")
                 .font(.system(size: 22, weight: .semibold))
-            Text("Liked songs, playlists, and subscribed podcasts appear here.")
+            Text("Signing in with your Google account brings in your Liked Songs, playlists, and subscriptions — and if you have YouTube Music Premium, removes ads.")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            Button("Sign In…") { env.isSignInSheetPresented = true }
+                .frame(maxWidth: 400)
+            Button("Sign In with Google") { env.isSignInSheetPresented = true }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .padding(.top, 8)

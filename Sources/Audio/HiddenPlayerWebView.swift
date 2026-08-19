@@ -68,19 +68,6 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         }
     }
 
-    /// Re-parent the WKWebView back into the offscreen 1x1 window. Used
-    /// by the audio-to-video toggle on Now Playing: when the user
-    /// dismisses the video pane (or closes Now Playing entirely), the
-    /// SwiftUI host view hands the WebView back to us so playback
-    /// continues from the same video element invisibly.
-    func reattachToOffscreenWindow() {
-        if window.contentView === webView { return }
-        webView.removeFromSuperview()
-        webView.frame = .init(x: 0, y: 0, width: 1, height: 1)
-        window.contentView = webView
-        window.orderOut(nil)
-    }
-
     // MARK: WKScriptMessageHandler
 
     /// WKScriptMessageHandler is delivered on the main thread; decode the

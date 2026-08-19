@@ -35,19 +35,39 @@ final class AppEnvironment {
 
     func refreshSignedInState() {
         let hasToken = OAuthTokens.load() != nil
-        let hasCookie = HTTPCookieStorage.shared.cookies?.contains(where: {
-            ["SAPISID", "__Secure-3PAPISID"].contains($0.name)
+        // Require a NON-EXPIRED session cookie, not merely its
+        // presence. A stale SAPISID / __Secure-3PAPISID left over
+        // from a dead session would otherwise flip us to
+        // "signed in" — hiding the Sign In button and silently
+        // failing every Library / personalized call. A cookie with
+        // no expiresDate is a session cookie (valid for the browser
+        // session); treat that as live too.
+        let now = Date()
+        let hasLiveCookie = HTTPCookieStorage.shared.cookies?.contains(where: { cookie in
+            guard ["SAPISID", "__Secure-3PAPISID"].contains(cookie.name) else { return false }
+            if let expires = cookie.expiresDate { return expires > now }
+            return true  // session cookie — no explicit expiry
         }) ?? false
-        isSignedIn = hasToken || hasCookie
+        isSignedIn = hasToken || hasLiveCookie
     }
 
     /// Sign out clears OAuth tokens + cookies and re-evaluates state.
+    /// `isSignedIn` flips to false SYNCHRONOUSLY (so the UI updates
+    /// immediately), then the WebView session is purged in the
+    /// background so a later re-sign-in actually shows Google's
+    /// login page instead of silently reusing the old account.
     func signOut() {
         OAuthDeviceFlow.signOut()
         HTTPCookieStorage.shared.cookies?
             .filter { $0.domain.contains("youtube.com") || $0.domain.contains("google.com") }
             .forEach { HTTPCookieStorage.shared.deleteCookie($0) }
         refreshSignedInState()
+        // Full WebView session purge — cookies + localStorage +
+        // IndexedDB for Google/YouTube. Backgrounded because
+        // removeData is async; isSignedIn is already false so the
+        // corner button has already flipped to "Sign In".
+        Task { await CookieJar.purgeWebViewSession() }
+        showToast("Signed out.")
     }
 
     /// Drives the manual presentation of the sign-in sheet. Set to true from
@@ -73,6 +93,105 @@ final class AppEnvironment {
     /// the "✨ Build" button in the Up Next pane header. Independent
     /// of `isNewPlaylistSheetPresented` so the two can't collide.
     var isQueueBuilderSheetPresented: Bool = false
+
+    /// Drives the ⌘K command palette. A single fuzzy launcher that
+    /// jumps to tabs, opens sheets, toggles playback modes, and pushes
+    /// discrete sleep-timer / crossfade values without navigating
+    /// through Settings.
+    var isCommandPaletteOpen: Bool = false
+
+    /// Lightweight transient toast for confirming mutations the user
+    /// can't otherwise see (queue additions from Home / Search /
+    /// Library carousels, artist block, sign-out from a nested menu).
+    /// Auto-dismisses after `Toast.duration`; overwriting `currentToast`
+    /// mid-life just cancels the pending dismissal and starts fresh.
+    struct Toast: Identifiable, Equatable {
+        let id = UUID()
+        let message: String
+        /// Optional "Undo" callback surfaced as a tappable pill on the
+        /// right side of the toast. Nil for pure info messages.
+        var undo: (@MainActor () -> Void)? = nil
+        static func == (lhs: Toast, rhs: Toast) -> Bool { lhs.id == rhs.id }
+        static let duration: TimeInterval = 3.0
+    }
+
+    private(set) var currentToast: Toast? = nil
+    @ObservationIgnored private var toastDismissTask: Task<Void, Never>? = nil
+
+    /// Show a toast with optional undo. Overwrites any active toast.
+    func showToast(_ message: String, undo: (@MainActor () -> Void)? = nil) {
+        toastDismissTask?.cancel()
+        let toast = Toast(message: message, undo: undo)
+        currentToast = toast
+        toastDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Toast.duration * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            if self.currentToast?.id == toast.id {
+                self.currentToast = nil
+            }
+        }
+    }
+
+    func dismissToast() {
+        toastDismissTask?.cancel()
+        currentToast = nil
+    }
+
+    /// True on the very first launch (i.e. before the user has
+    /// completed or dismissed the onboarding sheet). Read once at
+    /// init; flipping `markOnboardingComplete()` sets the persisted
+    /// flag so subsequent launches skip the sheet.
+    var isOnboardingSheetPresented: Bool = false
+
+    private static let onboardingCompleteKey = "onboarding.hasCompleted"
+
+    /// Called from OnboardingSheet on any exit (Complete or ✕).
+    /// Persists the flag so we don't re-show. Deliberately marks
+    /// complete on dismiss too — a user who saw the sheet once
+    /// doesn't need to see it again on the next cold start.
+    func markOnboardingComplete() {
+        UserDefaults.standard.set(true, forKey: Self.onboardingCompleteKey)
+        isOnboardingSheetPresented = false
+    }
+
+    /// Bumped by `focusSearchField()` (⌘F). SearchView observes this
+    /// via `.onChange` and pulls focus into its text field on every
+    /// change. Using a UUID rather than a Bool means back-to-back
+    /// ⌘F presses still trigger even when the field is already
+    /// nominally focused (avoids a stuck-toggle race).
+    private(set) var focusSearchToken: UUID = UUID()
+
+    /// Snapshot of `player.isPlaying` captured at `willSleepNotification`.
+    /// Consulted on `didWakeNotification` to reassert the pre-sleep
+    /// state — WKWebView's audio pipeline can auto-resume on wake
+    /// even when we paused it, and this override forces the user's
+    /// intent back.
+    @ObservationIgnored fileprivate var wasPlayingBeforeSleep: Bool = false
+
+    /// The in-flight wake-reassertion task. Held so a bounced
+    /// sleep/wake sequence (double-wake, rapid sleep-again) can
+    /// cancel a pending reassert rather than stacking two 500 ms
+    /// tasks that fight each other for the audio state.
+    @ObservationIgnored private var wakeReassertTask: Task<Void, Never>? = nil
+
+    // Progress-tick throttle state. Track the last dispatch's videoId
+    // + isPlaying so we can detect "same track, still playing, only
+    // elapsed changed" and rate-limit the heavy pipeline
+    // (NowPlayingCenter update, snapshot writer, scrobbler observe)
+    // to 2Hz instead of the JS bridge's ~4Hz timeupdate cadence.
+    // Track / state changes bypass the throttle and fire immediately.
+    @ObservationIgnored private var lastOnUpdateVideoId: String? = nil
+    @ObservationIgnored private var lastOnUpdateIsPlaying: Bool = false
+    @ObservationIgnored private var lastOnUpdateAt: Date = .distantPast
+    private static let progressTickMinInterval: TimeInterval = 0.5
+
+    /// Called by the app-level ⌘F handler. Switches to the Search
+    /// tab and bumps the focus token; SearchView reacts by focusing
+    /// its text field.
+    func focusSearchField() {
+        activeTab = .search
+        focusSearchToken = UUID()
+    }
 
     /// Whether the menu bar mini player (`MenuBarExtra` scene in
     /// `RiffApp`) is inserted into the system menu bar. Defaults to
@@ -174,14 +293,28 @@ final class AppEnvironment {
     /// access in a way that's incompatible with Swift's lazy
     /// initialization). Provider identity never changes anyway,
     /// so nothing to observe.
+    /// Rebuilt on every access so a mid-session provider switch in
+    /// Settings takes effect immediately. Providers are cheap value
+    /// types (they only hold a URLSession reference); no observable
+    /// state, so hopping between them is safe.
     @ObservationIgnored
-    lazy var llmProvider: any LLMProvider = AnthropicProvider()
+    var llmProvider: any LLMProvider {
+        LLMProviderKind.active.makeProvider()
+    }
 
-    /// True when an Anthropic API key is configured. Drives the
-    /// "AI features" visibility in Settings + the Queue Builder
-    /// button affordance in the player.
+    /// The model id to hand to `llmProvider.chat(_:model:)`. Reads
+    /// from the active provider's own storage — Anthropic keychain,
+    /// Groq keychain, or Ollama defaults — so switching backends
+    /// preserves each backend's model choice.
+    var llmModel: String {
+        LLMProviderKind.active.currentModel()
+    }
+
+    /// True when the active provider is configured well enough to
+    /// answer a chat request. Drives every AI-triggering UI's
+    /// disabled state.
     var hasLLMAPIKey: Bool {
-        (AnthropicProvider.storedAPIKey()?.isEmpty == false)
+        LLMProviderKind.active.isConfigured()
     }
 
     /// Lyrics translation engine (B3). Caches per `(videoId, language)`
@@ -436,6 +569,22 @@ final class AppEnvironment {
     }
 
     init() {
+        // Bump URLCache.shared for thumbnail reuse. SwiftUI's
+        // AsyncImage uses URLSession.shared which reads from
+        // URLCache.shared; the system default (~4 MB memory /
+        // ~20 MB disk) is dwarfed by a Riff session — Home +
+        // Search + Library + Up Next carousels can pull hundreds
+        // of covers per hour. A larger disk-backed cache turns
+        // repeat visits into zero-network re-renders. 512 MB disk
+        // is generous but bounded; macOS reclaims it under
+        // pressure.
+        let mem = 64 * 1024 * 1024            // 64 MB in-memory
+        let disk = 512 * 1024 * 1024          // 512 MB on-disk
+        URLCache.shared = URLCache(
+            memoryCapacity: mem,
+            diskCapacity: disk,
+            diskPath: "riff.imageCache"
+        )
         self.innerTube = InnerTubeClient()
         self.player = PlayerBridge(innerTube: innerTube)
         self.nowPlaying = NowPlayingCenter(player: player)
@@ -443,6 +592,12 @@ final class AppEnvironment {
         self.refreshSignedInState()
         self.loadBlockedArtists()
         self.loadPinnedLibrary()
+        // First-run onboarding: raise the sheet once, then never
+        // again (the completion flag is persisted synchronously
+        // on dismiss).
+        if !UserDefaults.standard.bool(forKey: Self.onboardingCompleteKey) {
+            self.isOnboardingSheetPresented = true
+        }
         // Honor the persisted menu-bar-extra toggle. The key defaults to
         // `true` when absent (first launch / never-toggled), preserving
         // the "show by default" behavior. Read via `object(forKey:)` so
@@ -483,6 +638,85 @@ final class AppEnvironment {
             MainActor.assumeIsolated { player.snapshotSession() }
         }
 
+        // Battery: suspend the JS-side safety-poll + normalization
+        // tick when the app loses focus. Playback keeps going
+        // (WebKit's audio pipeline is independent), but we stop
+        // waking the JS runtime every 2s to re-check state that
+        // hasn't changed.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [player] _ in
+            MainActor.assumeIsolated {
+                Task { await player.setBackgrounded(true) }
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self, player] _ in
+            MainActor.assumeIsolated {
+                Task { await player.setBackgrounded(false) }
+                // Re-evaluate sign-in on reactivation: a session
+                // cookie can expire while the app is backgrounded,
+                // and this flips the UI back to signed-out (showing
+                // the Sign In button) instead of leaving a dead
+                // avatar in the corner.
+                self?.refreshSignedInState()
+            }
+        }
+
+        // Sleep / wake handling: WKWebView's <video> element
+        // sometimes auto-resumes on wake even when we paused it
+        // before sleep. macOS fires willSleep + didWake notifications
+        // via NSWorkspace (NOT NSApplication — sleep is a system
+        // event, not an app event). We capture pre-sleep isPlaying,
+        // and on wake force the state back to what the user had.
+        let workspaceCenter = NSWorkspace.shared.notificationCenter
+        workspaceCenter.addObserver(
+            forName: NSWorkspace.willSleepNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // Cancel any pending wake reassertion in-flight —
+                // rapid sleep-wake-sleep sequences would otherwise
+                // stack tasks, each fighting the user's next input.
+                self.wakeReassertTask?.cancel()
+                self.wakeReassertTask = nil
+                self.wasPlayingBeforeSleep = self.player.isPlaying
+            }
+        }
+        workspaceCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                // Cancel a previous wake's reassertion if still
+                // pending (double-wake / sleep-bounce).
+                self.wakeReassertTask?.cancel()
+                self.wakeReassertTask = Task { @MainActor [weak self] in
+                    // 500 ms lets WebKit's own resume attempt fire
+                    // first so our reassertion definitively wins.
+                    try? await Task.sleep(nanoseconds: 500_000_000)
+                    guard let self, !Task.isCancelled else { return }
+                    // Re-read at FIRE time — if the user hit Play
+                    // during the 500 ms window, wasPlayingBeforeSleep
+                    // is still the pre-sleep value but the user's
+                    // action supersedes: leave audio alone.
+                    if !self.wasPlayingBeforeSleep && self.player.isPlaying {
+                        await self.player.togglePlay()
+                    }
+                    self.wakeReassertTask = nil
+                }
+            }
+        }
+
         // Mirror PlayerBridge state into MPNowPlayingInfoCenter on every
         // change. NowPlayingCenter holds a strong ref to player; here we go
         // the other way without retaining nowPlaying strongly inside player.
@@ -495,8 +729,26 @@ final class AppEnvironment {
                 NowPlayingSnapshotWriter.shared.clear()
                 self.scrobbler.reset()
                 self.scrobbleLastSeenVideoId = nil
+                self.lastOnUpdateVideoId = nil
+                self.lastOnUpdateAt = .distantPast
                 return
             }
+            // Throttle: if this is a same-track, same-isPlaying
+            // update (i.e. only elapsed advanced), don't run the
+            // heavy pipeline more than every progressTickMinInterval.
+            // Track/state changes bypass — those need to hit
+            // NowPlayingCenter + widget instantly.
+            let now = Date()
+            let sameTrack = self.lastOnUpdateVideoId == track.videoId
+            let sameState = self.lastOnUpdateIsPlaying == self.player.isPlaying
+            let isProgressOnly = sameTrack && sameState
+            if isProgressOnly,
+               now.timeIntervalSince(self.lastOnUpdateAt) < Self.progressTickMinInterval {
+                return
+            }
+            self.lastOnUpdateVideoId = track.videoId
+            self.lastOnUpdateIsPlaying = self.player.isPlaying
+            self.lastOnUpdateAt = now
             self.nowPlaying.update(
                 title: track.title,
                 artist: track.subtitle,

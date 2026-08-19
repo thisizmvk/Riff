@@ -10,6 +10,11 @@ enum Endpoint: String {
     case editPlaylist = "browse/edit_playlist"
     case createPlaylist = "playlist/create"
     case deletePlaylist = "playlist/delete"
+    /// Account chrome — display name, channel handle, avatar. Works
+    /// with SAPISIDHASH (cookie) auth, so it's the account-details
+    /// source for cookie-import sign-ins where the OAuth userinfo
+    /// endpoint isn't reachable.
+    case accountMenu = "account/account_menu"
 }
 
 /// Well-known browseId values used by InnerTube.

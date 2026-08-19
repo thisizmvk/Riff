@@ -24,5 +24,7 @@
 	<string>public.app-category.music</string>
 	<key>NSHumanReadableCopyright</key>
 	<string>© 2026. AGPL-3.0.</string>
+	<key>NSSiriUsageDescription</key>
+	<string>Riff uses Siri to play music, skip tracks, and start artist radio stations.</string>
 </dict>
 </plist>

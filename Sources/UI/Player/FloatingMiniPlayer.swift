@@ -65,22 +65,39 @@ struct FloatingMiniPlayerView: View {
             // resting tile doesn't intercept window-drag gestures.
             ZStack {
                 Color.black.opacity(0.45)
-                HStack(spacing: 18) {
-                    button(systemName: "backward.fill", size: 16, help: "Previous") {
-                        Task { await env.player.previous() }
+                VStack(spacing: 6) {
+                    Spacer()
+                    HStack(spacing: 18) {
+                        button(systemName: "backward.fill", size: 16, help: "Previous") {
+                            Task { await env.player.previous() }
+                        }
+                        button(
+                            systemName: env.player.isPlaying ? "pause.fill" : "play.fill",
+                            size: 24,
+                            help: env.player.isPlaying ? "Pause" : "Play"
+                        ) {
+                            Task { await env.player.togglePlay() }
+                        }
+                        button(systemName: "forward.fill", size: 16, help: "Next") {
+                            Task { await env.player.next() }
+                        }
                     }
-                    button(
-                        systemName: env.player.isPlaying ? "pause.fill" : "play.fill",
-                        size: 24,
-                        help: env.player.isPlaying ? "Pause" : "Play"
-                    ) {
-                        Task { await env.player.togglePlay() }
+                    // Tune-chip strip. Only rendered when YT gave
+                    // us chips for the current watch context; blank
+                    // in solo-song mode so the tile stays clean.
+                    if !env.player.availableChips.isEmpty {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 4) {
+                                ForEach(env.player.availableChips) { chip in
+                                    miniChip(chip)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                        }
+                        .frame(maxHeight: 20)
                     }
-                    button(systemName: "forward.fill", size: 16, help: "Next") {
-                        Task { await env.player.next() }
-                    }
+                    Spacer().frame(height: 42) // sit above the title block
                 }
-                .padding(.bottom, 44) // sit above the title block
             }
             .opacity(isHovering ? 1 : 0)
             .animation(.easeInOut(duration: 0.15), value: isHovering)
@@ -93,7 +110,7 @@ struct FloatingMiniPlayerView: View {
                         Rectangle().fill(Color.white.opacity(0.06))
                         Rectangle()
                             .fill(Theme.red)
-                            .frame(width: geo.size.width * env.player.progress)
+                            .frame(width: geo.size.width * env.player.progress)     
                     }
                 }
                 .frame(height: 2)
@@ -142,6 +159,24 @@ struct FloatingMiniPlayerView: View {
         }
         .buttonStyle(.plain)
         .help(help)
+        .accessibilityLabel(help)
+    }
+
+    private func miniChip(_ chip: InnerTubeClient.QueueChip) -> some View {
+        let selected = chip.id == env.player.selectedChipId
+        return Button {
+            env.player.applyChip(chip)
+        } label: {
+            Text(chip.label)
+                .font(.system(size: 9, weight: .semibold))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(selected ? Theme.red : Color.white.opacity(0.15))
+                .foregroundStyle(.white)
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("Tune queue: \(chip.label)")
     }
 }
 

@@ -64,8 +64,13 @@ fileprivate func formatDurationLabel(_ totalSeconds: Int) -> String {
 struct SearchResultRow: View {
     @Environment(AppEnvironment.self) private var env
     let item: MediaItem
+    /// Optional focus binding from the parent list. When non-nil,
+    /// the row registers itself under `item.id` so ↑/↓ / ↵ / ⌘↵
+    /// keyboard handlers in SearchView can drive it.
+    var focusBinding: FocusState<String?>.Binding? = nil
 
     @State private var hovering = false
+    @State private var isFocused = false
 
     var body: some View {
         Group {
@@ -85,6 +90,7 @@ struct SearchResultRow: View {
             }
         }
         .onHover { hovering = $0 }
+        .modifier(OptionalFocusModifier(binding: focusBinding, itemId: item.id, isFocused: $isFocused))
     }
 
     private var rowContent: some View {
@@ -135,9 +141,21 @@ struct SearchResultRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(hovering ? Color.white.opacity(0.04) : Color.clear)
+        .background(rowBackground)
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .contentShape(Rectangle())
+    }
+
+    private var rowBackground: some View {
+        Group {
+            if isFocused {
+                Theme.red.opacity(0.18)
+            } else if hovering {
+                Color.white.opacity(0.04)
+            } else {
+                Color.clear
+            }
+        }
     }
 
     /// Artists get a circular thumbnail; everything else stays squared
@@ -320,6 +338,30 @@ struct TopResultCard: View {
         case .playlist:       await env.player.playPlaylist(id: item.id)
         case .artist:         await env.player.playArtistRadio(id: item.id)
         case .podcast:        await env.player.playPodcast(id: item.id)
+        }
+    }
+}
+
+/// Wires an optional `FocusState<String?>.Binding` onto a row and
+/// mirrors its focused state into a local `Bool` so the row can
+/// paint its focused-highlight without every caller having to
+/// duplicate the boolean bookkeeping. When `binding` is nil (row
+/// used outside a keyboard-navigable container) it's a zero-cost
+/// no-op.
+struct OptionalFocusModifier: ViewModifier {
+    let binding: FocusState<String?>.Binding?
+    let itemId: String
+    @Binding var isFocused: Bool
+
+    func body(content: Content) -> some View {
+        if let binding {
+            content
+                .focused(binding, equals: itemId)
+                .onChange(of: binding.wrappedValue) { _, new in
+                    isFocused = new == itemId
+                }
+        } else {
+            content
         }
     }
 }

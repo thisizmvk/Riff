@@ -35,7 +35,7 @@ struct QueueBuilderSheet: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if AnthropicProvider.storedAPIKey() == nil {
+                    if !env.hasLLMAPIKey {
                         notConfiguredHint
                     } else {
                         promptField
@@ -204,8 +204,12 @@ struct QueueBuilderSheet: View {
         resolved = []
         phase = .generating
 
-        let provider = AnthropicProvider()
-        let model = AnthropicProvider.storedModel()
+        // Whichever backend the user picked in Settings — Anthropic,
+        // Groq (free hosted), or Ollama (local). Both `provider` and
+        // `model` come off `env` so a mid-session switch takes effect
+        // immediately.
+        let provider = env.llmProvider
+        let model = env.llmModel
         let messages: [LLMMessage] = [
             .system(QueueBuilder.systemPrompt),
             .user(trimmed),

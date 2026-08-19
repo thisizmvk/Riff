@@ -29,6 +29,13 @@ struct SettingsView: View {
     @State private var aiTestResult: TestResult? = nil
     @State private var aiTestInFlight: Bool = false
 
+    // Groq + Ollama buffers. Loaded on appear; cleared after Save.
+    @State private var activeProvider: LLMProviderKind = .anthropic
+    @State private var groqAPIKey: String = ""
+    @State private var groqModel: String = GroqProvider.defaultModel
+    @State private var ollamaBaseURL: String = OllamaProvider.defaultBaseURL.absoluteString
+    @State private var ollamaModel: String = OllamaProvider.defaultModel
+
     /// Buffer for the lyrics-translation language picker. The picker
     /// selection lives on `env.translationLanguage` (persisted); this
     /// `@State` is the visual selection of the segmented control — we
@@ -59,6 +66,18 @@ struct SettingsView: View {
     @State private var listenBrainzStatus: String? = nil
     @State private var listenBrainzTestInFlight: Bool = false
 
+    @State private var diagnosticsExporting: Bool = false
+    @State private var diagnosticsStatus: String? = nil
+
+    /// Confirms "Clear all overrides" — action is destructive and
+    /// affects every locally-edited track title/artist/album.
+    @State private var confirmClearOverrides: Bool = false
+
+    // Cookie-import (advanced sign-in) state.
+    @State private var showCookieImport: Bool = false
+    @State private var cookiePasteBuffer: String = ""
+    @State private var cookieImportStatus: String? = nil
+
     enum TestResult: Equatable {
         case success
         case failure(String)
@@ -67,6 +86,11 @@ struct SettingsView: View {
     /// (Device-Flow path only — see UserInfoService for the rationale).
     /// Nil while loading or for cookie-based sessions.
     @State private var accountEmail: String? = nil
+    /// Account name + handle from InnerTube account_menu — the source
+    /// that works for cookie-import sessions (accountEmail only
+    /// populates for OAuth Device-Flow sign-ins).
+    @State private var accountName: String? = nil
+    @State private var accountHandle: String? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -106,6 +130,8 @@ struct SettingsView: View {
                         trackOverridesSection
                     }
                     Divider().background(Theme.divider)
+                    diagnosticsSection
+                    Divider().background(Theme.divider)
                     aboutSection
                 }
                 .padding(28)
@@ -126,6 +152,13 @@ struct SettingsView: View {
                 anthropicAPIKey = "" // empty buffer; placeholder hints "already saved"
             }
             anthropicModel = AnthropicProvider.storedModel()
+            // AI backend + per-provider settings — mirror stored
+            // state into the on-screen buffers. Secrets stay empty
+            // (never echo a saved key back into the SecureField).
+            activeProvider = LLMProviderKind.active
+            groqModel = GroqProvider.storedModel()
+            ollamaBaseURL = OllamaProvider.storedBaseURL().absoluteString
+            ollamaModel = OllamaProvider.storedModel()
             // Scrobbling: load enabled toggles + cached usernames so
             // the section renders the user's existing state. Secrets
             // stay in Keychain; buffers stay empty (we never echo a
@@ -143,6 +176,11 @@ struct SettingsView: View {
             // userinfo with). Cached so reopening Settings doesn't
             // re-hit the network.
             if env.isSignedIn {
+                // account_menu (works for cookie sessions) first;
+                // OAuth email as a supplement for Device-Flow.
+                let info = await env.innerTube.fetchAccountInfo()
+                accountName = info?.name
+                accountHandle = info?.handle
                 accountEmail = await UserInfoService.emailIfAvailable()
             }
         }
@@ -163,13 +201,15 @@ struct SettingsView: View {
                             .foregroundStyle(.white)
                     )
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(env.isSignedIn ? "Signed in to YouTube Music" : "Not signed in")
+                    // Prefer the real account display name (works for
+                    // cookie sessions via account_menu); fall back to
+                    // the generic line.
+                    Text(env.isSignedIn ? (accountName ?? "Signed in to YouTube Music") : "Not signed in")
                         .font(.system(size: 13, weight: .semibold))
-                    if let email = accountEmail, env.isSignedIn {
-                        // Real account email — only available when the
-                        // user came in via OAuth Device Flow. Cookie
-                        // sessions skip this.
-                        Text(email)
+                    if env.isSignedIn, let handle = accountHandle ?? accountEmail {
+                        // Channel handle (@name) from account_menu, or
+                        // the OAuth email when that path was used.
+                        Text(handle)
                             .font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(.white.opacity(0.85))
                             .textSelection(.enabled)
@@ -197,6 +237,99 @@ struct SettingsView: View {
                     .tint(Theme.red)
                 }
             }
+
+            // Cookie import — the free-account / passkey-friendly
+            // path. Only offered when signed out (no point pasting a
+            // session over a live one). See CookieJar.importPastedCookies.
+            if !env.isSignedIn {
+                cookieImportBlock
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var cookieImportBlock: some View {
+        DisclosureGroup(isExpanded: $showCookieImport) {
+            VStack(alignment: .leading, spacing: 10) {
+                stepRow(n: 1, title: "Sign in to music.youtube.com in your normal browser (Safari/Chrome). Passkeys, password managers, and 2FA all work there.") { EmptyView() }
+                stepRow(n: 2, title: "Open developer tools (⌥⌘I) on that tab, go to the Console, and run this one-liner:") {
+                    HStack(spacing: 8) {
+                        Text("document.cookie")
+                            .font(.system(size: 11, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.black.opacity(0.4))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .textSelection(.enabled)
+                        Button {
+                            let pb = NSPasteboard.general
+                            pb.clearContents()
+                            pb.setString("document.cookie", forType: .string)
+                            cookieImportStatus = "Copied — paste into the browser console."
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.red)
+                        .help("Copy the console command")
+                    }
+                }
+                stepRow(n: 3, title: "Copy the whole NAME=VALUE; … line it prints, paste it below, and hit Import. (SAPISID is included — that's the one that matters.)") { EmptyView() }
+
+                TextEditor(text: $cookiePasteBuffer)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(height: 72)
+                    .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.white.opacity(0.12)))
+
+                HStack {
+                    Button("Import cookies") { importCookies() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.red)
+                        .disabled(cookiePasteBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Spacer()
+                    if let status = cookieImportStatus {
+                        Text(status)
+                            .font(.system(size: 12))
+                            .foregroundStyle(status.hasPrefix("Imported") ? .green : .orange)
+                            .lineLimit(2)
+                    }
+                }
+                Text("Riff never sees your password — only the resulting session cookie, stored in your local keychain. This is the recommended path if passkey / 2FA won't complete in the in-app window.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 6)
+        } label: {
+            Text("Sign in by pasting browser cookies (advanced)")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.75))
+        }
+    }
+
+    private func importCookies() {
+        let raw = cookiePasteBuffer
+        Task {
+            let result = await CookieJar.importPastedCookies(raw)
+            await MainActor.run {
+                switch result {
+                case .success(let count):
+                    env.refreshSignedInState()
+                    cookiePasteBuffer = ""
+                    if env.isSignedIn {
+                        cookieImportStatus = "Imported \(count) cookies — signed in."
+                        env.showToast("Signed in via cookie import.")
+                        dismiss()
+                    } else {
+                        cookieImportStatus = "Imported, but session didn't validate. Re-copy from a fresh login."
+                    }
+                case .missingAuthCookie:
+                    cookieImportStatus = "No SAPISID cookie found — make sure you copied it."
+                case .empty:
+                    cookieImportStatus = "Couldn't parse any cookies from that text."
+                }
+            }
         }
     }
 
@@ -213,8 +346,12 @@ struct SettingsView: View {
             shortcutRow("Toggle like",     keys: "⌘ L")
             shortcutRow("Toggle shuffle",  keys: "⇧ ⌘ S")
             shortcutRow("Cycle repeat",    keys: "⇧ ⌘ R")
-            shortcutRow("Switch tabs",     keys: "⌘ 1 / 2 / 3")
+            shortcutRow("Switch tabs",     keys: "⌘ 1 / 2 / 3 / 4")
+            shortcutRow("Command palette", keys: "⌘ K")
+            shortcutRow("Focus search",    keys: "⌘ F")
             shortcutRow("Mini Player",     keys: "⌥ ⌘ M")
+            shortcutRow("Open Stats",      keys: "⇧ ⌘ Y")
+            shortcutRow("Sign in",         keys: "⇧ ⌘ L")
             shortcutRow("Settings",        keys: "⌘ ,")
             shortcutRow("Close player",    keys: "⎋")
             shortcutRow("Quit",            keys: "⌘ Q")
@@ -224,6 +361,24 @@ struct SettingsView: View {
     private var playbackSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("Playback")
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Autoplay")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                    Text("Keep playing similar music when your queue ends. Turn off to stop at the end of the current queue or album.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 16)
+                Toggle("", isOn: Binding(
+                    get: { env.player.autoplayEnabled },
+                    set: { env.player.setAutoplayEnabled($0) }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+            }
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Volume normalization")
@@ -331,10 +486,18 @@ struct SettingsView: View {
                     .labelsHidden()
                     .disabled(LastFmScrobbler.storedCredentials() == nil)
                 }
-                Text("Register an API account at last.fm/api/account/create, then run the one-off Approve flow below to grant Riff scrobble permission.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.65))
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Register an API account (link below), then run the one-off Approve flow to grant Riff scrobble permission.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let url = URL(string: "https://www.last.fm/api/account/create") {
+                        Link("last.fm/api/account/create", destination: url)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.red.opacity(0.85))
+                            .underline()
+                    }
+                }
 
                 Group {
                     labeledField("Username", text: $lastFmUsernameBuffer, placeholder: "your-lastfm-name")
@@ -399,10 +562,18 @@ struct SettingsView: View {
                     .labelsHidden()
                     .disabled(ListenBrainzScrobbler.storedToken() == nil)
                 }
-                Text("Grab your user-token from listenbrainz.org/profile and paste it below. No additional setup needed.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.65))
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Grab your user-token from your ListenBrainz profile and paste it below. No additional setup needed.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.65))
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let url = URL(string: "https://listenbrainz.org/profile") {
+                        Link("listenbrainz.org/profile", destination: url)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.red.opacity(0.85))
+                            .underline()
+                    }
+                }
 
                 labeledSecureField(
                     "User token",
@@ -581,83 +752,60 @@ struct SettingsView: View {
     private var aiFeaturesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("AI features")
-            Text("Bring your own Anthropic API key to unlock the Queue Builder — describe a vibe (\u{201C}rainy Sunday morning, mellow indie folk\u{201D}) and Riff turns it into a real queue. The key is stored in macOS Keychain and used directly from your Mac to api.anthropic.com — Riff never sees it.")
+            Text("Pick a model backend — paid (Anthropic), free hosted (Groq), or fully local (Ollama). Whichever you pick powers the Queue Builder, lyrics translation, and X-Ray context cards. Keys live in Keychain and requests go straight from your Mac to the provider — Riff never proxies.")
                 .font(.system(size: 12))
                 .foregroundStyle(.white.opacity(0.65))
                 .fixedSize(horizontal: false, vertical: true)
 
+            // Backend picker. Segmented so all three options are
+            // visible at a glance; the tagline below reads out of
+            // whichever is currently selected.
             VStack(alignment: .leading, spacing: 6) {
-                Text("Anthropic API key")
+                Text("Backend")
                     .font(.system(size: 12, weight: .semibold))
-                SecureField(
-                    AnthropicProvider.storedAPIKey() == nil
-                        ? "sk-ant-…"
-                        : "•••• saved — paste a new key to replace",
-                    text: $anthropicAPIKey
-                )
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, design: .monospaced))
-                .onSubmit(saveAnthropicKey)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Model")
-                    .font(.system(size: 12, weight: .semibold))
-                Picker("", selection: $anthropicModel) {
-                    ForEach(AnthropicProvider.availableModels, id: \.self) { id in
-                        Text(modelDisplayName(id)).tag(id)
+                Picker("", selection: $activeProvider) {
+                    ForEach(LLMProviderKind.allCases) { kind in
+                        Text(kind.displayName).tag(kind)
                     }
                 }
-                .pickerStyle(.menu)
+                .pickerStyle(.segmented)
                 .labelsHidden()
-                .onChange(of: anthropicModel) { _, new in
-                    AnthropicProvider.setModel(new)
+                .onChange(of: activeProvider) { _, new in
+                    LLMProviderKind.active = new
+                    // Any provider swap invalidates translations /
+                    // X-Ray cards produced under the old backend —
+                    // different model = different output, better to
+                    // regenerate than to serve stale mixed-source
+                    // content.
+                    env.lyricsTranslator.clearCache()
+                    env.xrayCardsService.clearCache()
+                    aiTestResult = nil
                 }
+                Text(activeProvider.tagline)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.55))
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            // Translation language picker (B3). The toggle that
-            // actually flips translation on/off lives on the Now
-            // Playing lyrics tab — this picker just sets the *target*
-            // so the user's choice persists across tracks.
+            // Only the selected backend's credential/model block is
+            // rendered — reduces cognitive load and keeps the
+            // Save/Test/Clear buttons in one place.
+            switch activeProvider {
+            case .anthropic: anthropicCredentialBlock
+            case .groq:      groqCredentialBlock
+            case .ollama:    ollamaCredentialBlock
+            }
+
             translationLanguagePicker
 
             HStack {
-                Button("Save key") { saveAnthropicKey() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.red)
-                    .disabled(anthropicAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                Button {
-                    testAnthropicConnection()
-                } label: {
-                    if aiTestInFlight {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Text("Test connection")
-                    }
-                }
-                .buttonStyle(.bordered)
-                .disabled(aiTestInFlight || AnthropicProvider.storedAPIKey() == nil)
-
-                if AnthropicProvider.storedAPIKey() != nil {
-                    Button("Clear") {
-                        AnthropicProvider.clearAPIKey()
-                        // Dropping the key also invalidates any
-                        // translations made under it — a fresh key may
-                        // be a different account / model, and we don't
-                        // want stale cached output bleeding into the
-                        // new session.
-                        env.lyricsTranslator.clearCache()
-                        env.xrayCardsService.clearCache()
-                        anthropicAPIKey = ""
-                        aiSaveStatus = "Key removed."
-                        aiTestResult = nil
-                    }
+                Button("Test connection") { testActiveProvider() }
                     .buttonStyle(.bordered)
+                    .disabled(aiTestInFlight || !activeProvider.isConfigured())
+                if aiTestInFlight {
+                    ProgressView().controlSize(.small)
                 }
-
                 Spacer()
-
                 Group {
                     if case .success = aiTestResult {
                         HStack(spacing: 4) {
@@ -670,12 +818,133 @@ struct SettingsView: View {
                             Text(msg).font(.system(size: 12)).foregroundStyle(.red).lineLimit(2)
                         }
                     } else if let status = aiSaveStatus {
-                        Text(status)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.green)
+                        Text(status).font(.system(size: 12)).foregroundStyle(.green)
                     }
                 }
             }
+        }
+    }
+
+    // MARK: - Per-provider credential blocks
+
+    @ViewBuilder
+    private var anthropicCredentialBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Anthropic API key").font(.system(size: 12, weight: .semibold))
+            SecureField(
+                AnthropicProvider.storedAPIKey() == nil ? "sk-ant-…" : "•••• saved — paste to replace",
+                text: $anthropicAPIKey
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 12, design: .monospaced))
+            .onSubmit(saveAnthropicKey)
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Model").font(.system(size: 12, weight: .semibold))
+            Picker("", selection: $anthropicModel) {
+                ForEach(AnthropicProvider.availableModels, id: \.self) { id in
+                    Text(modelDisplayName(id)).tag(id)
+                }
+            }
+            .pickerStyle(.menu).labelsHidden()
+            .onChange(of: anthropicModel) { _, new in AnthropicProvider.setModel(new) }
+        }
+        HStack {
+            Button("Save key") { saveAnthropicKey() }
+                .buttonStyle(.borderedProminent).tint(Theme.red)
+                .disabled(anthropicAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if AnthropicProvider.storedAPIKey() != nil {
+                Button("Clear") {
+                    AnthropicProvider.clearAPIKey()
+                    env.lyricsTranslator.clearCache()
+                    env.xrayCardsService.clearCache()
+                    anthropicAPIKey = ""
+                    aiSaveStatus = "Anthropic key removed."
+                    aiTestResult = nil
+                }
+                .buttonStyle(.bordered)
+            }
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private var groqCredentialBlock: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Groq API key").font(.system(size: 12, weight: .semibold))
+            SecureField(
+                GroqProvider.storedAPIKey() == nil ? "gsk_…" : "•••• saved — paste to replace",
+                text: $groqAPIKey
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 12, design: .monospaced))
+            .onSubmit(saveGroqKey)
+            Text("Free key at the Groq console — API Keys page. No credit card needed.")
+                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.55))
+            if let url = URL(string: "https://console.groq.com/keys") {
+                Link("console.groq.com/keys", destination: url)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.red.opacity(0.85))
+                    .underline()
+            }
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Model").font(.system(size: 12, weight: .semibold))
+            Picker("", selection: $groqModel) {
+                ForEach(GroqProvider.availableModels, id: \.self) { id in Text(id).tag(id) }
+            }
+            .pickerStyle(.menu).labelsHidden()
+            .onChange(of: groqModel) { _, new in GroqProvider.setModel(new) }
+        }
+        HStack {
+            Button("Save key") { saveGroqKey() }
+                .buttonStyle(.borderedProminent).tint(Theme.red)
+                .disabled(groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if GroqProvider.storedAPIKey() != nil {
+                Button("Clear") {
+                    GroqProvider.clearAPIKey()
+                    env.lyricsTranslator.clearCache()
+                    env.xrayCardsService.clearCache()
+                    groqAPIKey = ""
+                    aiSaveStatus = "Groq key removed."
+                    aiTestResult = nil
+                }
+                .buttonStyle(.bordered)
+            }
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private var ollamaCredentialBlock: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Ollama host").font(.system(size: 12, weight: .semibold))
+            TextField("Default host", text: $ollamaBaseURL)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+                .onSubmit(saveOllamaSettings)
+            Text("Start the Ollama daemon on this Mac and paste its base URL. Default works for a stock install.")
+                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.55))
+            if let url = URL(string: "https://ollama.com/download") {
+                Link("ollama.com/download", destination: url)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.red.opacity(0.85))
+                    .underline()
+            }
+        }
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Model").font(.system(size: 12, weight: .semibold))
+            TextField(OllamaProvider.defaultModel, text: $ollamaModel)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+                .onSubmit(saveOllamaSettings)
+            Text("Any model you've pulled locally. Small + capable picks: qwen2.5:3b, gemma2:2b, llama3.2:3b.")
+                .font(.system(size: 11)).foregroundStyle(.white.opacity(0.55))
+        }
+        HStack {
+            Button("Save") { saveOllamaSettings() }
+                .buttonStyle(.borderedProminent).tint(Theme.red)
+            Spacer()
         }
     }
 
@@ -781,17 +1050,21 @@ struct SettingsView: View {
         }
     }
 
-    private func testAnthropicConnection() {
+    private func testAnthropicConnection() { testActiveProvider() }
+
+    /// Round-trips a one-word prompt against whichever backend is
+    /// currently selected. Cheap smoke-test — all three providers
+    /// return in <500ms on a healthy setup and cost effectively
+    /// nothing (Anthropic: <5 output tokens; Groq/Ollama: free).
+    private func testActiveProvider() {
         aiTestInFlight = true
         aiTestResult = nil
         aiSaveStatus = nil
-        let provider = AnthropicProvider()
-        let model = AnthropicProvider.storedModel()
+        let kind = activeProvider
+        let provider = kind.makeProvider()
+        let model = kind.currentModel()
         Task {
             do {
-                // Tiny prompt — we just want to confirm the key works.
-                // Anthropic charges by token; this round-trips in
-                // <50 input + <5 output tokens.
                 _ = try await provider.chat([.user("Reply with the single word: ok")], model: model)
                 await MainActor.run {
                     aiTestResult = .success
@@ -799,16 +1072,57 @@ struct SettingsView: View {
                 }
             } catch let err as LLMError {
                 await MainActor.run {
-                    aiTestResult = .failure(err.errorDescription ?? "Couldn't reach Anthropic.")
+                    aiTestResult = .failure(err.errorDescription ?? "Couldn't reach \(kind.displayName).")
                     aiTestInFlight = false
                 }
             } catch {
                 await MainActor.run {
-                    aiTestResult = .failure("Couldn't reach Anthropic.")
+                    aiTestResult = .failure("Couldn't reach \(kind.displayName).")
                     aiTestInFlight = false
                 }
             }
         }
+    }
+
+    private func saveGroqKey() {
+        let trimmed = groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            try GroqProvider.setAPIKey(trimmed)
+            groqAPIKey = ""
+            aiSaveStatus = "Groq key saved to Keychain."
+            aiTestResult = nil
+        } catch {
+            aiSaveStatus = "Couldn't save Groq key."
+        }
+    }
+
+    private func exportDiagnostics() {
+        diagnosticsExporting = true
+        diagnosticsStatus = nil
+        Task {
+            let result = await DiagnosticsExporter.exportDiagnostics()
+            await MainActor.run {
+                diagnosticsExporting = false
+                switch result {
+                case .success(let url):
+                    diagnosticsStatus = "Saved to \(url.lastPathComponent) — revealed in Finder."
+                case .failure(let msg):
+                    diagnosticsStatus = msg
+                }
+            }
+        }
+    }
+
+    private func saveOllamaSettings() {
+        OllamaProvider.setBaseURL(ollamaBaseURL)
+        OllamaProvider.setModel(ollamaModel)
+        // Re-hydrate the buffers from the store so the user sees the
+        // normalized values (trimmed / defaulted) rather than raw input.
+        ollamaBaseURL = OllamaProvider.storedBaseURL().absoluteString
+        ollamaModel = OllamaProvider.storedModel()
+        aiSaveStatus = "Ollama settings saved."
+        aiTestResult = nil
     }
 
     /// "Blocked artists" — manage the list the user built via the
@@ -896,12 +1210,65 @@ struct SettingsView: View {
             HStack {
                 Spacer()
                 Button("Clear all overrides", role: .destructive) {
-                    env.trackOverrides.clearAll()
+                    confirmClearOverrides = true
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .confirmationDialog(
+                    "Clear all track overrides?",
+                    isPresented: $confirmClearOverrides,
+                    titleVisibility: .visible
+                ) {
+                    Button("Clear all overrides", role: .destructive) {
+                        env.trackOverrides.clearAll()
+                        env.showToast("All track overrides cleared.")
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This removes every locally-edited title, artist, and album name. This action can't be undone.")
+                }
             }
             .padding(.top, 4)
+        }
+    }
+
+    /// "Export diagnostics" — writes a folder to ~/Downloads with
+    /// the last 24 h of Riff's os_log entries + the played-history
+    /// journal + a small manifest (app + macOS version). No API
+    /// keys, no cookies, no OAuth tokens. Reveals the folder in
+    /// Finder so the user can attach it to a bug report in one
+    /// gesture.
+    private var diagnosticsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Diagnostics")
+            Text("Export a folder to ~/Downloads with recent Riff logs, your played-history journal, and version info. Useful when filing a bug report. Contains no API keys, cookies, or account identifiers.")
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.65))
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button {
+                    exportDiagnostics()
+                } label: {
+                    if diagnosticsExporting {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Exporting…")
+                        }
+                    } else {
+                        Label("Export diagnostics", systemImage: "square.and.arrow.up")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.red)
+                .disabled(diagnosticsExporting)
+                Spacer()
+                if let msg = diagnosticsStatus {
+                    Text(msg)
+                        .font(.system(size: 12))
+                        .foregroundStyle(msg.hasPrefix("Saved") ? .green : .red)
+                        .lineLimit(2)
+                }
+            }
         }
     }
 

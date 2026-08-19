@@ -84,3 +84,6 @@ release/
 # Sparkle private signing key — public key is in Info.plist (and is
 # meant to be public); the private key NEVER goes near the repo.
 sparkle_eddsa_priv*
+
+# Agent worktrees
+.claude/worktrees/

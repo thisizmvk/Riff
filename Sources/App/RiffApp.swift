@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 @main
 struct RiffApp: App {
@@ -16,12 +17,7 @@ struct RiffApp: App {
         .windowToolbarStyle(.unifiedCompact)
         .commands {
             CommandGroup(after: .appInfo) {
-                if environment.isSignedIn {
-                    Button("Sign Out") { environment.signOut() }
-                } else {
-                    Button("Sign In…") { environment.isSignInSheetPresented = true }
-                        .keyboardShortcut("L", modifiers: [.command, .shift])
-                }
+                AccountCommandItems()
                 Button("Settings…") { environment.isSettingsSheetPresented = true }
                     .keyboardShortcut(",", modifiers: .command)
             }
@@ -123,6 +119,28 @@ private struct RecapMenuItem: View {
     }
 }
 
+/// Sign In / Sign Out menu-bar item. Extracted into its own View —
+/// reading the env via `@FocusedValue` — so it participates in
+/// SwiftUI's observation graph and flips label immediately when
+/// `isSignedIn` changes. Inlining the `if environment.isSignedIn`
+/// check directly in the `CommandGroup` builder snapshotted the
+/// value and left the menu item stale until relaunch. ⇧⌘L keeps
+/// working as the Sign In shortcut when signed out.
+private struct AccountCommandItems: View {
+    @FocusedValue(\.appEnvironment) private var env
+
+    var body: some View {
+        if env?.isSignedIn == true {
+            Button("Sign Out") { env?.signOut() }
+                .disabled(env == nil)
+        } else {
+            Button("Sign In…") { env?.isSignInSheetPresented = true }
+                .keyboardShortcut("L", modifiers: [.command, .shift])
+                .disabled(env == nil)
+        }
+    }
+}
+
 /// Re-usable menu item that opens the Mini Player window. Lives in its
 /// own struct so it can use `@Environment(\.openWindow)`.
 private struct MiniPlayerMenuItem: View {
@@ -140,6 +158,13 @@ private struct TabSwitchMenuItems: View {
     @FocusedValue(\.appEnvironment) private var env
 
     var body: some View {
+        Button("Command Palette…") { env?.isCommandPaletteOpen = true }
+            .keyboardShortcut("K", modifiers: .command)
+            .disabled(env == nil)
+        Button("Find (Search)") { env?.focusSearchField() }
+            .keyboardShortcut("F", modifiers: .command)
+            .disabled(env == nil)
+        Divider()
         Button("Home") { env?.activeTab = .home }
             .keyboardShortcut("1", modifiers: .command)
             .disabled(env == nil)
@@ -259,6 +284,7 @@ extension FocusedValues {
 
 struct RootView: View {
     @Environment(AppEnvironment.self) private var env
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         @Bindable var env = env
@@ -282,6 +308,19 @@ struct RootView: View {
         .animation(.easeInOut(duration: 0.25), value: env.player.isFullPlayerOpen)
         .background(Color.black.ignoresSafeArea())
         .focusedSceneValue(\.appEnvironment, env)
+        .overlay(alignment: .bottom) {
+            // Toast overlay. Slides in above the mini-player when
+            // env.currentToast is non-nil; auto-dismisses via the
+            // env-side timer or on Undo tap.
+            if let toast = env.currentToast {
+                ToastBanner(toast: toast) { env.dismissToast() }
+                    .padding(.bottom, env.player.hasTrack ? 88 : 20)
+                    .padding(.horizontal, 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .accessibilityAddTraits(.isModal)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: env.currentToast)
         .sheet(isPresented: $env.isSignInSheetPresented) {
             SignInView()
         }
@@ -300,6 +339,13 @@ struct RootView: View {
         .sheet(isPresented: $env.isQueueBuilderSheetPresented) {
             QueueBuilderSheet()
         }
+        .sheet(isPresented: $env.isCommandPaletteOpen) {
+            CommandPalette()
+                .presentationBackground(.clear)
+        }
+        .sheet(isPresented: $env.isOnboardingSheetPresented) {
+            OnboardingSheet()
+        }
         // D2 — Edit-metadata sheet. `item:` binding mode so the sheet
         // is parameterized by the row the user opened it from.
         .sheet(item: Binding(
@@ -307,6 +353,9 @@ struct RootView: View {
             set: { env.trackBeingEdited = $0 }
         )) { item in
             EditMetadataSheet(item: item)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .riffOpenMiniPlayerWindow)) { _ in
+            openWindow(id: "mini-player")
         }
     }
 }
@@ -366,6 +415,11 @@ struct TopTabBar: View {
                 .foregroundStyle(env.activeTab == value ? .white : .secondary)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(title) tab")
+        .accessibilityHint(env.activeTab == value
+                           ? "Selected. Double tap to return to top."
+                           : "Double tap to switch tabs.")
+        .accessibilityAddTraits(env.activeTab == value ? [.isButton, .isSelected] : .isButton)
     }
 }
 
@@ -376,12 +430,32 @@ private struct AccountMenu: View {
     @Environment(AppEnvironment.self) private var env
 
     var body: some View {
-        if env.isSignedIn {
-            Menu {
+        // Always a Menu with a STABLE identity — the label + items
+        // vary by sign-in state, but the view itself is never
+        // swapped for a different type. Swapping Menu ⇄ Button in
+        // this slot caused the corner to go empty after Sign Out:
+        // SwiftUI tore down the Menu mid-action and didn't render
+        // the replacement Button until a later layout pass.
+        Menu {
+            if env.isSignedIn {
                 Button("Settings…") { env.isSettingsSheetPresented = true }
                 Divider()
+                Button("Switch Account…") {
+                    // Sign out (clears cookies + purges WebView),
+                    // then open a fresh Google login so the user
+                    // can switch accounts without hunting for two
+                    // separate actions.
+                    env.signOut()
+                    env.isSignInSheetPresented = true
+                }
                 Button("Sign Out") { env.signOut() }
-            } label: {
+            } else {
+                Button("Sign In with Google") { env.isSignInSheetPresented = true }
+                Divider()
+                Button("Settings…") { env.isSettingsSheetPresented = true }
+            }
+        } label: {
+            if env.isSignedIn {
                 Circle()
                     .fill(Theme.red)
                     .frame(width: 28, height: 28)
@@ -390,15 +464,62 @@ private struct AccountMenu: View {
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.white)
                     )
+            } else {
+                HStack(spacing: 5) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("Sign In")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Theme.red)
+                .foregroundStyle(.white)
+                .clipShape(Capsule())
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: 28, height: 28)
-        } else {
-            Button("Sign In") { env.isSignInSheetPresented = true }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.red)
-                .controlSize(.small)
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(env.isSignedIn ? "Account" : "Sign in")
+    }
+}
+
+/// Transient toast banner. Renders a rounded pill with the message
+/// on the left and an optional "Undo" button on the right. Sits
+/// above the mini-player when one is present; over the tab bar
+/// otherwise. Auto-dismisses via the AppEnvironment-side timer;
+/// tapping Undo runs the callback and dismisses immediately.
+private struct ToastBanner: View {
+    let toast: AppEnvironment.Toast
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(toast.message)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+            Spacer(minLength: 12)
+            if let undo = toast.undo {
+                Button("Undo") {
+                    undo()
+                    onDismiss()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.red)
+                .accessibilityHint("Undoes the last action.")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(white: 0.15))
+                .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+        )
+        .frame(maxWidth: 480)
+        .accessibilityElement(children: .combine)
     }
 }

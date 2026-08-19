@@ -33,13 +33,48 @@ struct SignInView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Sign in to YouTube Music")
-                    .font(.system(size: 16, weight: .semibold))
-                Spacer()
-                Button("Close") { dismiss() }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Sign in with Google")
+                            .font(.system(size: 16, weight: .semibold))
+                        // Framed around the concrete benefit rather
+                        // than "create an account" language — Riff
+                        // has no accounts of its own; signing in is
+                        // just handing Google's cookie to the WebView
+                        // so its own paid tier takes over.
+                        Text("With YouTube Music Premium: no ads. Also unlocks your Liked Songs, playlists, and subscriptions.")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button("Close") { dismiss() }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.secondary)
+                }
+                // Escape hatch: recovery / 2FA / passkey / security-key
+                // steps often can't complete inside a WKWebView (no SMS
+                // autofill, no USB security keys, flaky passkey support).
+                // This hands the sign-in off to real Safari where all of
+                // that works. Safari's cookies can't be read back into
+                // Riff (sandbox), so after signing in there the user
+                // returns via Settings → "Paste browser cookies".
+                Button {
+                    if let url = URL(string: "https://music.youtube.com") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "safari")
+                            .font(.system(size: 11))
+                        Text("Trouble signing in? Open in Safari")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(Theme.red)
+                }
+                .buttonStyle(.plain)
+                .help("Opens Google sign-in in your default browser — use this if passkey, 2FA, or account recovery won't complete here. After signing in there, return to Riff and use Settings → Account → Paste browser cookies.")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -50,6 +85,12 @@ struct SignInView: View {
                     Task {
                         await CookieJar.syncFromWebView()
                         env.refreshSignedInState()
+                        // Confirm the outcome — the sheet is about to
+                        // dismiss, so a toast on the main window is the
+                        // only place the user sees "it worked."
+                        if env.isSignedIn {
+                            env.showToast("Signed in — your library is loading.")
+                        }
                         try? await Task.sleep(nanoseconds: 400_000_000)
                         dismiss()
                     }

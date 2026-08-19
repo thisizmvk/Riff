@@ -4,6 +4,12 @@ struct SearchView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var query: String = ""
     @State private var filter: SearchFilter = .all
+    @FocusState private var searchFieldFocused: Bool
+    /// Focused videoId in the result list, or nil when no row is
+    /// focused. Enables keyboard traversal: ↑/↓ move, ↵ plays, ⌘↵
+    /// adds to queue. Bound onto each SearchResultRow via
+    /// `.focused($focusedResultId, equals: item.id)`.
+    @FocusState private var focusedResultId: String?
     @State private var yearFilter: YearFilter = .any
     @State private var durationFilter: DurationFilter = .any
     @State private var results: [MediaItem] = []
@@ -164,6 +170,16 @@ struct SearchView: View {
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 24)
                 .padding(.top, 8)
+                .focused($searchFieldFocused)
+                .onAppear { searchFieldFocused = true }
+                .onChange(of: env.focusSearchToken) { _, _ in
+                    // ⌘F handler in RiffApp bumps this token; grab
+                    // focus into the field on every bump. Runs on
+                    // the next runloop tick so the tab switch that
+                    // typically precedes the focus request completes
+                    // first (SearchView may have been off-screen).
+                    Task { @MainActor in searchFieldFocused = true }
+                }
 
             // Pill-style filter row mirroring YT Music's chips. Horizontal
             // scroll keeps it from clipping when the user resizes the
@@ -263,12 +279,21 @@ struct SearchView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.top, 60)
                 } else if query.isEmpty && results.isEmpty {
-                    // Pre-search empty state. Without this the user sees
-                    // an unstyled blank surface the moment they wipe the
-                    // field, which reads as "broken". The prompt mirrors
-                    // YT Music's "Find your music" rest state.
+                    // Pre-search empty state. Renders recent
+                    // searches (if any) as one-tap chips above the
+                    // illustrated empty prompt. Users end up
+                    // re-searching the same handful of queries most
+                    // days; this collapses the ~4 keystrokes of a
+                    // typical repeat search to a single click.
+                    let recents = SearchView.loadRecentSearches()
+                    if !recents.isEmpty {
+                        RecentSearchesRow(recents: recents) { term in
+                            query = term
+                        }
+                        .padding(.top, 24)
+                    }
                     InitialSearchState()
-                        .padding(.top, 80)
+                        .padding(.top, recents.isEmpty ? 80 : 24)
                 } else if results.isEmpty, !query.isEmpty {
                     EmptySearchState(query: query)
                         .padding(.top, 80)
@@ -314,6 +339,25 @@ struct SearchView: View {
             }
         }
         .navigationDestination(for: MediaItem.self) { DetailView(item: $0) }
+        // Keyboard navigation across the result list. Live at the
+        // container level so the shortcuts fire whenever this pane
+        // is on-screen; up/down aren't caret nav for a single-line
+        // TextField, so they bubble past the focused search field.
+        .onKeyPress(.downArrow) {
+            moveFocus(1)
+            return .handled
+        }
+        .onKeyPress(.upArrow) {
+            moveFocus(-1)
+            return .handled
+        }
+        .onKeyPress(.return) {
+            if let id = focusedResultId, let item = displayedResults.first(where: { $0.id == id }) {
+                Task { await play(item) }
+                return .handled
+            }
+            return .ignored
+        }
     }
 
     /// "Top result" hero card + list rows for the rest. Mirrors YT
@@ -322,6 +366,33 @@ struct SearchView: View {
     /// rows. We also break the list at the kind boundary (Songs /
     /// Albums / Artists / etc.) under the "All" filter so users can
     /// scan by category, the way YT Music does.
+    private func moveFocus(_ delta: Int) {
+        let ids = displayedResults.map(\.id)
+        guard !ids.isEmpty else { return }
+        // Steal focus from the search text field on first ↓ so
+        // typing doesn't fight the traversal. Users can hit Esc or
+        // click the field to return to typing.
+        searchFieldFocused = false
+        if let current = focusedResultId, let idx = ids.firstIndex(of: current) {
+            let next = ((idx + delta) % ids.count + ids.count) % ids.count
+            focusedResultId = ids[next]
+        } else {
+            focusedResultId = delta >= 0 ? ids.first : ids.last
+        }
+    }
+
+    /// Play any MediaItem — mirrors the row's own play() but usable
+    /// from the keyboard handler that lives at container level.
+    private func play(_ item: MediaItem) async {
+        switch item.kind {
+        case .song, .episode: await env.player.play(item: item)
+        case .album:          await env.player.playAlbum(id: item.id)
+        case .playlist:       await env.player.playPlaylist(id: item.id)
+        case .artist:         await env.player.playArtistRadio(id: item.id)
+        case .podcast:        await env.player.playPodcast(id: item.id)
+        }
+    }
+
     @ViewBuilder
     private var resultList: some View {
         if let top = displayedResults.first {
@@ -343,7 +414,7 @@ struct SearchView: View {
                                     .padding(.bottom, 8)
                             }
                             ForEach(group.items) { item in
-                                SearchResultRow(item: item)
+                                SearchResultRow(item: item, focusBinding: $focusedResultId)
                             }
                         }
                         loadMoreFooter
@@ -449,39 +520,80 @@ struct SearchView: View {
     /// they've cleared the field). A blank scroll surface reads as
     /// "broken" — the icon + prompt signal that the input is the next
     /// action.
+    /// Horizontal chip row of the user's last N successful search
+    /// terms. Tapping a chip re-runs that search (via the parent's
+    /// `onPick` closure, which just assigns the query string; the
+    /// existing `.task(id:)` debounces the network fetch). Header
+    /// row includes a "Clear" affordance that wipes the persisted
+    /// list — matches the affordance users expect from Chrome /
+    /// Safari's own recent-search UI.
+    private struct RecentSearchesRow: View {
+        let recents: [String]
+        let onPick: (String) -> Void
+        var body: some View {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Recent searches")
+                        .font(.system(size: 11, weight: .semibold))
+                        .textCase(.uppercase)
+                        .tracking(1.2)
+                        .foregroundStyle(.white.opacity(0.55))
+                    Spacer()
+                    Button("Clear") {
+                        SearchView.clearRecentSearches()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.55))
+                }
+                .padding(.horizontal, 24)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(recents, id: \.self) { term in
+                            Button {
+                                onPick(term)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "clock.arrow.circlepath")
+                                        .font(.system(size: 11, weight: .medium))
+                                    Text(term)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(Color.white.opacity(0.06))
+                                .foregroundStyle(.white.opacity(0.85))
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                }
+            }
+        }
+    }
+
     private struct InitialSearchState: View {
         var body: some View {
-            VStack(spacing: 12) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 40))
-                    .foregroundStyle(.white.opacity(0.4))
-                Text("Find your music")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                Text("Search for songs, albums, artists, playlists, or podcasts.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .multilineTextAlignment(.center)
-            }
+            EmptyState(
+                systemImage: "magnifyingglass",
+                title: "Find your music",
+                subtitle: "Search for songs, albums, artists, playlists, or podcasts."
+            )
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 32)
         }
     }
 
     private struct EmptySearchState: View {
         let query: String
         var body: some View {
-            VStack(spacing: 12) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 40))
-                    .foregroundStyle(.white.opacity(0.4))
-                Text("No results for \u{201C}\(query)\u{201D}")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                Text("Try a different keyword or filter.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.75))
-            }
+            EmptyState(
+                systemImage: "questionmark.circle",
+                title: "No results for \u{201C}\(query)\u{201D}",
+                subtitle: "Try a different keyword, or remove a filter."
+            )
             .frame(maxWidth: .infinity)
         }
     }
@@ -550,11 +662,52 @@ struct SearchView: View {
             nextPageToken = page.continuation
             loadMoreError = nil
             errorMessage = nil
+            // Persist to the recent-searches ring only on a
+            // SUCCESSFUL non-empty result — no point remembering
+            // typos that returned nothing. Runs on the trimmed
+            // query so "  hits" and "hits" don't dedupe as
+            // separate entries.
+            if !page.items.isEmpty {
+                Self.rememberRecentSearch(query.trimmingCharacters(in: .whitespaces))
+            }
         } catch {
             results = []
             nextPageToken = nil
             errorMessage = LoadErrorPresenter.message(for: error, env: env)
         }
+    }
+
+    // MARK: - Recent searches
+
+    private static let recentSearchesKey = "search.recentQueries"
+    private static let recentSearchesLimit = 10
+
+    /// Prepend `query` to the persisted ring buffer of recent
+    /// searches. Dedupes case-insensitively — searching "abba" then
+    /// "ABBA" collapses to one entry (most-recent form kept).
+    /// Skips empty / whitespace-only strings. Runs synchronously
+    /// against UserDefaults — the array is at most 10 short
+    /// strings, ~200 bytes total.
+    static func rememberRecentSearch(_ query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        var current = UserDefaults.standard.stringArray(forKey: recentSearchesKey) ?? []
+        // Case-insensitive dedupe: drop any prior entry that
+        // matches the incoming query.
+        current.removeAll { $0.lowercased() == trimmed.lowercased() }
+        current.insert(trimmed, at: 0)
+        if current.count > recentSearchesLimit {
+            current.removeLast(current.count - recentSearchesLimit)
+        }
+        UserDefaults.standard.set(current, forKey: recentSearchesKey)
+    }
+
+    static func loadRecentSearches() -> [String] {
+        UserDefaults.standard.stringArray(forKey: recentSearchesKey) ?? []
+    }
+
+    static func clearRecentSearches() {
+        UserDefaults.standard.removeObject(forKey: recentSearchesKey)
     }
 
     /// Fetch the next page when the user scrolls near the bottom. We

@@ -16,8 +16,6 @@ struct HomeView: View {
         NavigationStack(path: $env.homeNavPath) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 32) {
-                    GreetingHeader()
-                        .padding(.bottom, 4)
                     if let errorMessage {
                         ErrorBanner(message: errorMessage) {
                             Task { await load() }
@@ -35,6 +33,15 @@ struct HomeView: View {
                     if loading && sections.isEmpty {
                         HomeSkeleton()
                     } else {
+                        // Personalized shelves — derived purely from
+                        // local play history (no network). Rendered
+                        // above browse-home so the user's own listening
+                        // is the first thing they see when they return
+                        // to the app. Empty until the user has played
+                        // ~1 track; below-the-fold sections still show.
+                        ForEach(personalizedShelves) { section in
+                            HomeSectionRow(section: section)
+                        }
                         ForEach(sections) { section in
                             HomeSectionRow(section: section)
                         }
@@ -49,8 +56,54 @@ struct HomeView: View {
         }
     }
 
+    /// Reads directly off the live played-history journal — no
+    /// caching, no debouncing. Recomputes every render because the
+    /// underlying arithmetic is cheap (a couple of dictionary passes
+    /// over ~500 entries), and this way a track that lands mid-view
+    /// updates the shelf without a manual refresh.
+    ///
+    /// Blocked artists are filtered out of the top-artists list so
+    /// unfollowing someone via the context menu instantly hides
+    /// their tile too.
+    private var personalizedShelves: [HomeSection] {
+        var out: [HomeSection] = []
+        let entries = env.player.playedEntries
+        let topArtists = PersonalizedShelves.topArtists(from: entries)
+            .filter { !env.isBlocked(artistId: $0.id) }
+        if !topArtists.isEmpty {
+            out.append(HomeSection(
+                id: "personal.topArtists",
+                title: "Your top artists this month",
+                items: topArtists
+            ))
+        }
+        let topTracks = PersonalizedShelves.topTracks(from: entries)
+            .filter { entry in
+                guard let artistId = entry.artistId else { return true }
+                return !env.isBlocked(artistId: artistId)
+            }
+        if !topTracks.isEmpty {
+            out.append(HomeSection(
+                id: "personal.topTracks",
+                title: "You've been playing",
+                items: topTracks
+            ))
+        }
+        return out
+    }
+
     private func load() async {
-        loading = true
+        // Cache-first render: paint the last successful feed
+        // instantly, then fetch fresh in parallel. `loading` only
+        // flips true when we have NOTHING to paint (cold cache),
+        // so the skeleton disappears from repeat visits.
+        if sections.isEmpty, let cached = HomeFeedCache.load() {
+            chips = cached.chips
+            sections = Self.filterBlocked(cached.sections, env: env)
+            loading = false
+        } else if sections.isEmpty {
+            loading = true
+        }
         defer { loading = false }
         do {
             let feed = try await env.innerTube.browseHome()
@@ -61,6 +114,13 @@ struct HomeView: View {
             sections = Self.filterBlocked(feed.sections, env: env)
             activeChip = nil
             errorMessage = nil
+            // Persist the un-filtered feed to disk — blocked
+            // artists is a live preference that can change; we
+            // want the cache to hold the raw response and re-filter
+            // on read.
+            HomeFeedCache.save(
+                .init(chips: feed.chips, sections: feed.sections, savedAt: Date())
+            )
         } catch {
             errorMessage = LoadErrorPresenter.message(for: error, env: env)
             // Keep stale sections visible (if any) so the user can still
@@ -165,38 +225,10 @@ private struct MoodChipPill: View {
     }
 }
 
-struct HomeSection: Identifiable, Hashable, Sendable {
+struct HomeSection: Identifiable, Hashable, Sendable, Codable {
     let id: String
     let title: String
     let items: [MediaItem]
-}
-
-/// "Good morning" / "Good afternoon" / "Good evening" header — adds the
-/// touch of personality that YT Music iOS opens with. Falls back to the
-/// generic "Welcome back" line when we don't have time data (we always do,
-/// but the fallback keeps the view total in case Date misbehaves).
-private struct GreetingHeader: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(timeOfDayGreeting())
-                .font(.system(size: 28, weight: .bold))
-                .foregroundStyle(.white)
-            Text("Listen to anything, anywhere.")
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.75))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func timeOfDayGreeting() -> String {
-        let hour = Calendar.current.component(.hour, from: Date())
-        switch hour {
-        case 5..<12:  return "Good morning"
-        case 12..<17: return "Good afternoon"
-        case 17..<22: return "Good evening"
-        default:      return "Late night listening"
-        }
-    }
 }
 
 /// Skeleton rows shown while `browseHome()` is in flight. Two carousels'
@@ -248,34 +280,11 @@ struct HomeSectionRow: View {
         return lower.contains("quick picks") || lower == "quick picks"
     }
 
-    /// Friendly subtitles for known section titles, mirroring YT Music iOS
-    /// micro-copy. Falls through to nil for sections we don't recognise.
-    private var subtitle: String? {
-        switch section.title.lowercased() {
-        case "listen again":         return "Hits you've had on repeat"
-        case "quick picks":          return "Tap to play"
-        case "mixed for you":        return "Personal mixes refreshed daily"
-        case "new releases for you": return "From artists you follow"
-        case "trending":             return "Popular right now"
-        case "forgotten favorites":  return "From your library, rediscovered"
-        case "shows for you":        return "Podcasts we think you'll like"
-        case "recommended for you":  return "Picked just for you"
-        default:                     return nil
-        }
-    }
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(section.title)
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(.white)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.75))
-                }
-            }
+        VStack(alignment: .leading, spacing: 16) {
+            Text(section.title)
+                .font(.system(size: 28, weight: .bold))
+                .foregroundStyle(.white)
 
             if renderAsQuickPicks {
                 quickPicksGrid

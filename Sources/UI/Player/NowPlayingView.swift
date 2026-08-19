@@ -34,6 +34,21 @@ struct NowPlayingView: View {
     @State private var xrayLoading: Bool = false
     @State private var xrayError: String? = nil
 
+    /// The videoId currently being dragged-over inside the Up Next
+    /// list. Drives the 2pt red insertion indicator above the target
+    /// row. Nil when no drag is in flight.
+    @State private var dragHoverTargetId: String? = nil
+
+    /// Adaptive backdrop accent color extracted from the current
+    /// track's artwork (Apple Music-style). Nil until extracted;
+    /// the backdrop falls back to the plain blurred art + black.
+    @State private var backdropColor: Color? = nil
+
+    /// Fullscreen lyrics mode — hides the art + side pane and fills
+    /// the player with large, centered (synced) lyrics over the
+    /// adaptive backdrop. Apple Music's dedicated lyrics view.
+    @State private var lyricsFullscreen: Bool = false
+
     enum BottomTab: String, CaseIterable, Identifiable {
         case upNext = "Up Next"
         case lyrics = "Lyrics"
@@ -66,17 +81,27 @@ struct NowPlayingView: View {
         // without inflating the foreground's frame.
         VStack(spacing: 0) {
             topBar
-            HStack(alignment: .top, spacing: 16) {
-                leftPlayer
+            if lyricsFullscreen {
+                fullscreenLyricsView
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                sidePane
-                    .frame(width: 380)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 24)
+                    .transition(.opacity)
+            } else {
+                HStack(alignment: .top, spacing: 16) {
+                    leftPlayer
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    sidePane
+                        .frame(width: 380)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
+                .transition(.opacity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.horizontal, 24)
-            .padding(.bottom, 24)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.25), value: lyricsFullscreen)
         .background {
             // Backdrops as a background stack — entirely behind the
             // foreground; their sizes have no effect on the foreground's
@@ -92,25 +117,47 @@ struct NowPlayingView: View {
                                        startPoint: .top, endPoint: .bottom)
                     }
                 }
+                // Adaptive accent wash (Apple Music signature): a
+                // top-anchored gradient of the artwork's dominant
+                // color, fading to black. Layered OVER the blurred
+                // art so the hue reads clearly, UNDER the darkening
+                // gradient so foreground text stays legible.
+                // Cross-fades when the track (and thus color) changes.
+                if let backdropColor {
+                    LinearGradient(
+                        colors: [backdropColor.opacity(0.55), backdropColor.opacity(0.12), .clear],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .transition(.opacity)
+                }
                 LinearGradient(
                     colors: [Color.black.opacity(0.45), Color.black.opacity(0.78)],
                     startPoint: .top, endPoint: .bottom
                 )
             }
             .ignoresSafeArea()
+            .animation(.easeInOut(duration: 0.6), value: backdropColor)
+        }
+        .task(id: track?.videoId) {
+            // Extract the accent color when the track changes. Runs
+            // off the URLCache (warmed by the artwork AsyncImage), so
+            // it's usually instant. nil clears the wash to the plain
+            // black+blur fallback.
+            guard let url = track?.thumbnailURL else {
+                backdropColor = nil
+                return
+            }
+            backdropColor = await DominantColor.extract(from: url)
         }
         .preferredColorScheme(.dark)
         .onExitCommand {
-            // Closing Now Playing must drop video back to audio-only so
-            // the architectural rule holds by default on next open.
-            env.player.isVideoVisible = false
-            env.player.isFullPlayerOpen = false
-        }
-        .onDisappear {
-            // Belt-and-suspenders: if we're being dismissed by some
-            // path other than the close button / ESC (e.g. the parent
-            // ZStack switching branches), still drop the video pane.
-            env.player.isVideoVisible = false
+            // Esc is layered: exit fullscreen lyrics first if it's
+            // up, otherwise close the whole player.
+            if lyricsFullscreen {
+                lyricsFullscreen = false
+            } else {
+                env.player.isFullPlayerOpen = false
+            }
         }
         .onChange(of: bottomTab) { _, newTab in
             if newTab == .lyrics { env.player.loadLyricsIfNeeded() }
@@ -140,7 +187,6 @@ struct NowPlayingView: View {
     private var topBar: some View {
         HStack {
             Button {
-                env.player.isVideoVisible = false
                 env.player.isFullPlayerOpen = false
             } label: {
                 HStack(spacing: 6) {
@@ -159,49 +205,9 @@ struct NowPlayingView: View {
             .keyboardShortcut(.cancelAction)
 
             Spacer()
-            audioVideoToggle
-            Spacer()
-            // Symmetry placeholder, sized like the Close button so the
-            // toggle reads centered.
-            Color.clear.frame(width: 88, height: 32)
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 14)
-    }
-
-    /// Pill toggle that swaps the left column between the static
-    /// artwork (Song) and the live music video (Video). The scoped
-    /// exception to the WebView-never-visible rule lives here — see
-    /// the leftPlayer comments and CLAUDE.md.
-    private var audioVideoToggle: some View {
-        HStack(spacing: 0) {
-            toggleSegment(label: "Song", on: !env.player.isVideoVisible) {
-                env.player.isVideoVisible = false
-            }
-            toggleSegment(label: "Video", on: env.player.isVideoVisible) {
-                env.player.isVideoVisible = true
-            }
-        }
-        .background(Color.white.opacity(0.08))
-        .clipShape(Capsule())
-        .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
-        .help(env.player.isVideoVisible
-              ? "Switch to audio-only artwork view"
-              : "Show the official music video")
-    }
-
-    private func toggleSegment(label: String, on: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(on ? .white : .white.opacity(0.6))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                .background(on ? Theme.red : Color.clear)
-                .clipShape(Capsule())
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Left column (artwork + title + scrubber + transport)
@@ -246,39 +252,50 @@ struct NowPlayingView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Hero media — either the static artwork (default) or the live
-    /// WKWebView showing the music video. The toggle is the one scoped
-    /// exception to CLAUDE.md's WebView-never-visible rule: video lives
-    /// only inside this Now Playing pane, only when the user opts in,
-    /// and reverts to artwork on dismiss. Sized at 16:9 when video is
-    /// on (matching the YT player aspect), square when on artwork.
-    @ViewBuilder
+    /// Hero artwork. Riff intentionally does NOT surface the music video —
+    /// see CLAUDE.md's "WKWebView is never visible after sign-in" rule.
+    /// The earlier audio↔video toggle was the scoped exception and it
+    /// caused architectural drift (chrome leakage, MSE stream switching,
+    /// reparenting bugs); now removed. The "Watch music video" button
+    /// in the corner of the hero replaces it — hands the URL off to
+    /// the system browser so the video plays in a real browser tab
+    /// instead of an embedded WebView Riff has to reparent.
     private func heroMedia(track: PlayerBridge.Track?) -> some View {
-        if env.player.isVideoVisible {
-            VideoPaneView(
-                webView: env.player.hostedWebView,
-                onDismantle: { [env] in env.player.reattachWebViewOffscreen() }
-            )
-            .frame(width: 480, height: 270)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .shadow(color: .black.opacity(0.6), radius: 26, y: 10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
-            )
-            .contextMenu { nowPlayingMenuItems }
-        } else {
-            AsyncImage(url: track?.thumbnailURL) { phase in
-                switch phase {
-                case .success(let img): img.resizable().aspectRatio(contentMode: .fit)
-                default: Color.white.opacity(0.06)
-                }
+        AsyncImage(url: track?.thumbnailURL) { phase in
+            switch phase {
+            case .success(let img): img.resizable().aspectRatio(contentMode: .fit)
+            default: Color.white.opacity(0.06)
             }
-            .frame(width: 320, height: 320)
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .shadow(color: .black.opacity(0.6), radius: 26, y: 10)
-            .contextMenu { nowPlayingMenuItems }
         }
+        .frame(width: 320, height: 320)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.6), radius: 26, y: 10)
+        .overlay(alignment: .bottomTrailing) {
+            if let track, !track.videoId.isEmpty {
+                Button {
+                    if let url = URL(string: "https://music.youtube.com/watch?v=\(track.videoId)") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "play.rectangle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Watch video")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.75))
+                    .foregroundStyle(.white)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .padding(10)
+                .help("Open the music video in your browser")
+            }
+        }
+        .contextMenu { nowPlayingMenuItems }
     }
 
     // MARK: - Right column (Up Next / Lyrics / Related side pane)
@@ -307,7 +324,13 @@ struct NowPlayingView: View {
 
             Divider().background(Color.white.opacity(0.15))
 
-            // Selected tab content fills remaining height.
+            // Selected tab content fills remaining height. Plain
+            // ScrollView — UP NEXT renders first, so it's naturally
+            // at the top on open; Recently Played sits below it, so
+            // history is a scroll-DOWN away. (An earlier version
+            // pinned UP NEXT via a ScrollViewReader while history
+            // rendered above; the forced scroll landed at odd
+            // positions — removed.)
             ScrollView {
                 Group {
                     switch bottomTab {
@@ -324,11 +347,15 @@ struct NowPlayingView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // .regularMaterial = macOS native frosted-glass surface. Reads as
-        // a clearly distinct panel against the dark blurred backdrop —
-        // previous solid Color(white: 0.16) blended in too much. The
-        // brand-red top edge is an unmistakable visual landmark.
+        // Frost over a DARK base, not straight over the backdrop.
+        // The adaptive color wash (F1) is saturated at the top; a
+        // bare `.regularMaterial` picked that up and tinted the whole
+        // Up Next pane the album's color, which read as "off". The
+        // dark fill underneath keeps the frost neutral while still
+        // giving the subtle translucency that separates the pane
+        // from the artwork behind it.
         .background(.regularMaterial)
+        .background(Color(white: 0.09))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(alignment: .top) {
             Rectangle()
@@ -439,6 +466,8 @@ struct NowPlayingView: View {
             }
             .onTapGesture { Task { await env.player.togglePlay() } }
             .help(env.player.isPlaying ? "Pause" : "Play")
+            .accessibilityLabel(env.player.isPlaying ? "Pause" : "Play")
+            .accessibilityAddTraits(.isButton)
             controlButton(systemName: "forward.fill", size: 22, tint: .white, help: "Next") {
                 Task { await env.player.next() }
             }
@@ -510,6 +539,12 @@ struct NowPlayingView: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help(sleepTimerHelp)
+        // VoiceOver: read the mode + remaining as a single label,
+        // and mark the value as updates-frequently so the countdown
+        // ticks don't spam-announce every second. (U6)
+        .accessibilityLabel("Sleep timer")
+        .accessibilityValue(sleepTimerHelp)
+        .accessibilityAddTraits(.updatesFrequently)
     }
 
     /// Whether the sleep-timer affordance should render in its
@@ -667,6 +702,12 @@ struct NowPlayingView: View {
     /// Playback-speed picker. 1× by default; useful for podcasts at 1.25–2×.
     /// Replaces the inert shuffle button which we don't have a real backend
     /// for yet (YT Music's shuffle is server-driven inside the queue).
+    ///
+    /// Podcast pill variant: when the current track's kind is spoken
+    /// (podcast episode), a single tap cycles through the common
+    /// podcast speeds (1×→1.25×→1.5×→1.75×→2×→1×), Overcast-style,
+    /// so the user doesn't have to open a menu for the primary
+    /// action. Right-click / long-press keeps the full menu.
     private var playbackRateMenu: some View {
         Menu {
             ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], id: \.self) { rate in
@@ -690,7 +731,30 @@ struct NowPlayingView: View {
         }
         .menuStyle(.borderlessButton)
         .frame(width: 60, height: 40)
-        .help("Playback speed")
+        .help(env.player.currentKind == .spoken
+              ? "Playback speed (tap to cycle)"
+              : "Playback speed")
+        .overlay {
+            // When podcast mode is active, layer an invisible tap
+            // handler that runs FIRST — SwiftUI hit-tests overlays
+            // above the labeled Menu, so this catches primary
+            // clicks. Right-click still opens the Menu (SwiftUI's
+            // built-in behavior) because it goes through the
+            // Menu's own contextual handler, not this button.
+            if env.player.currentKind == .spoken {
+                Button {
+                    let presets: [Double] = [1.0, 1.25, 1.5, 1.75, 2.0]
+                    let currentRate = env.player.playbackRate
+                    let nextIdx = (presets.firstIndex { abs($0 - currentRate) < 0.01 } ?? -1) + 1
+                    let next = presets[nextIdx % presets.count]
+                    Task { await env.player.setPlaybackRate(next) }
+                } label: {
+                    Color.clear
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 
     private static func formatRate(_ rate: Double) -> String {
@@ -709,6 +773,13 @@ struct NowPlayingView: View {
         }
         .buttonStyle(.plain)
         .help(help ?? "")
+        // Route the help tooltip into VoiceOver too — every
+        // transport button call site already passes a meaningful
+        // `help` string ("Play", "Previous", "Skip forward 30s",
+        // etc.), so mirror it into the accessibility label so
+        // VoiceOver reads the same intent, not the raw SF Symbol
+        // name.
+        .accessibilityLabel(help ?? systemName)
     }
 
     private func format(time: Double) -> String {
@@ -720,11 +791,12 @@ struct NowPlayingView: View {
     // MARK: - Tab content
 
     @State private var tunePopoverOpen: Bool = false
-    /// "Recently played" only shows the most-recent few rows by default;
-    /// scrolling back through every track played in the session was making
-    /// the Up Next pane feel like a log file. Flips to true on "Show more".
+    /// "Recently played" (rendered below Up Next) shows the last few
+    /// rows by default; "Show all" expands the full session log.
+    /// Keeps the pane from feeling like a log file while still
+    /// giving access to everything.
     @State private var historyExpanded: Bool = false
-    private static let historyDefaultLimit: Int = 3
+    private static let historyDefaultLimit = 4
 
     private var upNextContent: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -819,25 +891,28 @@ struct NowPlayingView: View {
             // sections. The "upcoming" list source switches based on the
             // selected mode pill (see QueueMode docs).
             let currentId = env.player.currentTrack?.videoId
-            let history = env.player.playedHistory.filter { $0.id != currentId }
-            let upcoming = upcomingList(currentId: currentId)
+            // Blank-row guard applied to BOTH lists: entries archived
+            // (or queued) before metadata landed have an empty title
+            // and no artwork — they render as anonymous slots. Drop
+            // them everywhere so neither section shows visual noise.
+            let history = env.player.playedHistory.filter { entry in
+                entry.id != currentId
+                    && !entry.title.trimmingCharacters(in: .whitespaces).isEmpty
+                    && entry.thumbnailURL != nil
+            }
+            let upcoming = upcomingList(currentId: currentId).filter {
+                !$0.title.trimmingCharacters(in: .whitespaces).isEmpty
+            }
             if history.isEmpty && upcoming.isEmpty {
                 emptyHint(emptyHintText)
             } else {
+                // Recently played ABOVE — standard queue layout
+                // (YT Music / Apple Music): history at the top, the
+                // most-recent track adjacent to the Up Next divider,
+                // then Up Next below. Capped by default; "Show all"
+                // reveals the full session log. Only in the default
+                // lens (a tuned variant's curation isn't a history).
                 if !history.isEmpty, isDefaultLens {
-                    // Recently played only makes sense in the default
-                    // (Related / "All") lens — it's a chronological log
-                    // of THIS session, not part of a tuned variant's
-                    // curation.
-                    //
-                    // We cap the visible rows at `historyDefaultLimit`
-                    // (currently 3) to keep the Up Next pane focused
-                    // on what's coming next rather than dominating the
-                    // viewport with session history. The cap shows the
-                    // tail (most-recent N), since that's the part the
-                    // user actually needs as quick rewind context. A
-                    // "Show all / Show fewer" button reveals the full
-                    // log on demand.
                     HStack(spacing: 6) {
                         Text("Recently played")
                             .font(.system(size: 10, weight: .semibold))
@@ -846,25 +921,23 @@ struct NowPlayingView: View {
                             .foregroundStyle(.white.opacity(0.45))
                         Spacer()
                         if history.count > Self.historyDefaultLimit {
-                            Button {
+                            Button(historyExpanded ? "Show fewer" : "Show all (\(history.count))") {
                                 historyExpanded.toggle()
-                            } label: {
-                                Text(historyExpanded
-                                     ? "Show fewer"
-                                     : "Show all (\(history.count))")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .textCase(.uppercase)
-                                    .tracking(1.2)
-                                    .foregroundStyle(.white.opacity(0.75))
                             }
                             .buttonStyle(.plain)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.7))
                         }
                     }
                     .padding(.horizontal, 4)
-                    let visibleHistory: [MediaItem] = historyExpanded
+                    // Chronological (oldest → newest) so the most
+                    // recently-played track sits at the BOTTOM of the
+                    // section, right above "Up next". Capped view keeps
+                    // the last N (closest to now).
+                    let shown = historyExpanded
                         ? history
                         : Array(history.suffix(Self.historyDefaultLimit))
-                    queueList(visibleHistory, faded: true)
+                    queueList(shown, faded: true)
                     Divider().background(Color.white.opacity(0.08))
                         .padding(.vertical, 4)
                 }
@@ -875,7 +948,7 @@ struct NowPlayingView: View {
                         .tracking(1.2)
                         .foregroundStyle(.white.opacity(0.45))
                         .padding(.horizontal, 4)
-                    queueList(upcoming, faded: false)
+                    queueList(upcoming, faded: false, reorderable: true)
                 }
             }
         }
@@ -968,6 +1041,15 @@ struct NowPlayingView: View {
                 HStack(spacing: 12) {
                     translationToolbar
                     Spacer()
+                    Button {
+                        lyricsFullscreen = true
+                    } label: {
+                        Label("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .help("Show lyrics fullscreen")
                     Button {
                         env.isLyricCardSheetPresented = true
                     } label: {
@@ -1360,6 +1442,53 @@ struct NowPlayingView: View {
         }
     }
 
+    /// Fullscreen lyrics layout — reuses the synced/plain lyric
+    /// renderers (so karaoke fill + auto-scroll work identically) but
+    /// centered in a wide column over the adaptive backdrop, with an
+    /// exit control. Apple Music's dedicated lyrics screen.
+    private var fullscreenLyricsView: some View {
+        VStack(spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(env.player.currentTrack?.title ?? "")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(env.player.currentTrack?.subtitle ?? "")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.7))
+                        .lineLimit(1)
+                }
+                Spacer()
+                Button {
+                    lyricsFullscreen = false
+                } label: {
+                    Label("Exit fullscreen", systemImage: "arrow.down.right.and.arrow.up.left")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+                .buttonStyle(.borderless)
+                .help("Exit fullscreen lyrics (Esc)")
+            }
+            ScrollView(showsIndicators: false) {
+                Group {
+                    if env.player.lyricsTimed && !env.player.lyricsLines.isEmpty {
+                        syncedLyrics
+                    } else if let text = env.player.lyrics, !text.isEmpty {
+                        plainLyricsWithTranslation(text)
+                    } else {
+                        emptyHint("Lyrics not available for this track.")
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 80)
+                    }
+                }
+                .frame(maxWidth: 640)
+                .frame(maxWidth: .infinity)   // center the 640 column
+                .padding(.vertical, 24)
+            }
+        }
+    }
+
     /// Synced lyrics view — highlights the line whose time-range covers
     /// `env.player.elapsed` and auto-scrolls it into view as playback
     /// advances. Within the active line, words fill left-to-right via
@@ -1567,18 +1696,54 @@ struct NowPlayingView: View {
         }
     }
 
-    private func queueList(_ items: [MediaItem], faded: Bool = false) -> some View {
+    private func queueList(_ items: [MediaItem], faded: Bool = false, reorderable: Bool = false) -> some View {
         let currentId = env.player.currentTrack?.videoId
+        let visibleIds = items.map(\.id)
         return LazyVStack(alignment: .leading, spacing: 4) {
             ForEach(items) { item in
                 let isCurrent = item.id == currentId
+                let isDropTarget = dragHoverTargetId == item.id
                 Button {
-                    Task { await env.player.play(item: item) }
+                    // `skipTo` (not `play`) preserves rows above the
+                    // tap. Jump-to-row should behave as "skip forward
+                    // to N", not "clear queue and play N with fresh
+                    // radio around it". `skipTo` pre-removes the
+                    // item from the queue so the trackChanged
+                    // `consumeUpTo` becomes a no-op. (C1)
+                    Task { await env.player.skipTo(item: item) }
                 } label: {
                     queueRow(item: item, isCurrent: isCurrent)
                         .opacity(faded ? 0.6 : 1.0)
+                        .overlay(alignment: .top) {
+                            // Insertion indicator when a drag is
+                            // hovering above this row. 2pt red bar
+                            // matches the brand accent and reads
+                            // clearly against the dark background.
+                            if reorderable && isDropTarget {
+                                Rectangle()
+                                    .fill(Theme.red)
+                                    .frame(height: 2)
+                                    .offset(y: -3)
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
+                .modifier(QueueDragReorderModifier(
+                    enabled: reorderable && !isCurrent,
+                    itemId: item.id,
+                    hoverTargetId: $dragHoverTargetId,
+                    onDrop: { droppedId in
+                        performReorder(dropped: droppedId, before: item.id, visibleIds: visibleIds)
+                    }
+                ))
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    isCurrent
+                        ? "Now playing: \(item.title) by \(item.subtitle)"
+                        : "\(item.title) by \(item.subtitle)"
+                )
+                .accessibilityHint(isCurrent ? "" : "Double tap to jump to this track.")
+                .accessibilityAddTraits(isCurrent ? [.isButton, .isSelected] : .isButton)
                 .contextMenu {
                     // Full track menu plus queue-specific reorder/remove
                     // operations underneath. omitPrimaryPlay because the
@@ -1599,6 +1764,24 @@ struct NowPlayingView: View {
         }
     }
 
+    /// Compute a drop destination index and hand it to the bridge.
+    /// The caller has already validated `dropped != nil` (drop
+    /// modifier only fires with a non-empty payload). "Before" the
+    /// target row places the dropped item at that row's index; if
+    /// the dropped item was previously above the target, SwiftUI's
+    /// `Array.move(fromOffsets:toOffset:)` semantics handle the
+    /// offset shift so no manual adjustment is needed here.
+    private func performReorder(dropped: String, before targetId: String, visibleIds: [String]) {
+        guard dropped != targetId,
+              let sourceIdx = visibleIds.firstIndex(of: dropped),
+              let targetIdx = visibleIds.firstIndex(of: targetId) else { return }
+        env.player.reorderQueue(
+            visibleIds: visibleIds,
+            from: IndexSet(integer: sourceIdx),
+            to: targetIdx
+        )
+    }
+
     private func queueRow(item: MediaItem, isCurrent: Bool) -> some View {
         // B5: rows that came from /related via Smart Shuffle get a
         // "+" badge so the user can tell at a glance that this slot
@@ -1610,7 +1793,16 @@ struct NowPlayingView: View {
                     if case .success(let img) = phase {
                         img.resizable().aspectRatio(contentMode: .fill)
                     } else {
-                        Color.white.opacity(0.06)
+                        // Placeholder — an SF Symbol on a subtle
+                        // fill reads as "no artwork yet" instead
+                        // of "broken/missing tile". Cheaper than
+                        // a shimmer and unambiguous.
+                        ZStack {
+                            Color.white.opacity(0.06)
+                            Image(systemName: "music.note")
+                                .font(.system(size: 14, weight: .light))
+                                .foregroundStyle(.white.opacity(0.35))
+                        }
                     }
                 }
                 .frame(width: 36, height: 36)
@@ -1731,8 +1923,50 @@ private struct ScrubberSlider: View {
                     }
                     .onEnded { _ in onCommit(value) }
             )
+            // Keyboard seek: left/right arrows nudge by 5 seconds.
+            // Only fires when the scrubber has focus (Tab into it).
+            .focusable(true)
+            .onKeyPress(.leftArrow) {
+                nudge(by: -5)
+                return .handled
+            }
+            .onKeyPress(.rightArrow) {
+                nudge(by: 5)
+                return .handled
+            }
+            // VoiceOver: expose as an adjustable value so the user
+            // can swipe up/down (or arrow ±) to seek. Reads out as
+            // "Playback position, 1:23 of 3:45" — mm:ss format.
+            .accessibilityElement()
+            .accessibilityLabel("Playback position")
+            .accessibilityValue("\(formatted(value)) of \(formatted(range.upperBound))")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: nudge(by: 5)
+                case .decrement: nudge(by: -5)
+                @unknown default: break
+                }
+            }
         }
         .frame(height: 18)
+    }
+
+    /// Move the scrubber by `seconds` (positive = forward) and
+    /// commit — used by both keyboard arrows and VoiceOver
+    /// adjustable action.
+    private func nudge(by seconds: Double) {
+        let next = max(range.lowerBound, min(range.upperBound, value + seconds))
+        value = next
+        onCommit(next)
+    }
+
+    /// mm:ss formatter — mirrors NowPlayingView.format(time:) so
+    /// VoiceOver reads "1:23 of 3:45" instead of raw seconds.
+    private func formatted(_ time: Double) -> String {
+        guard time.isFinite, time >= 0 else { return "0:00" }
+        let total = Int(time)
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 

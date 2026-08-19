@@ -37,16 +37,18 @@ struct TrackContextMenu: View {
                 Task { await env.player.play(item: item) }
             }
         }
-        Button("Start radio") {
+        Button(item.kind == .song || item.kind == .episode ? "Start song radio" : "Start radio") {
             Task { await env.player.startRadio(for: item) }
         }
         Divider()
         Button("Play next") {
             env.player.playNext(item: item)
+            env.showToast("Playing next: \(item.title)")
         }
         .disabled(!env.player.hasTrack)
         Button("Add to queue") {
             env.player.addToQueueEnd(item: item)
+            env.showToast("Added to queue: \(item.title)")
         }
         .disabled(!env.player.hasTrack)
         if item.albumId != nil || item.artistId != nil {
@@ -84,6 +86,14 @@ struct TrackContextMenu: View {
                         nameGuess = firstSegment
                     }
                     env.blockArtist(id: artistId, name: nameGuess)
+                    // Undo toast — blocking is easy to trigger by
+                    // accident and hard to reverse (Settings → Blocked
+                    // artists is buried); a one-tap undo keeps the
+                    // action safe. (U2)
+                    env.showToast("Blocked \(nameGuess)") {
+                        env.unblockArtist(id: artistId)
+                        env.showToast("Unblocked \(nameGuess)")
+                    }
                 }
             }
         }
@@ -98,6 +108,18 @@ struct TrackContextMenu: View {
         // isn't really a thing).
         if item.kind == .song || item.kind == .episode {
             Divider()
+            // "Watch music video" — replaces the in-app audio↔video
+            // toggle that kept re-leaking the WKWebView into the main
+            // window (violating CLAUDE.md's load-bearing rule). YT
+            // Music renders the video correctly in a normal browser
+            // tab, so we hand the URL off to the system default
+            // browser instead of hosting the WebView ourselves. Same
+            // videoId, same experience, zero WKWebView surfacing.
+            Button("Watch music video") {
+                if let url = URL(string: "https://music.youtube.com/watch?v=\(item.id)") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
             Button("Copy share link") {
                 let url = "https://music.youtube.com/watch?v=\(item.id)"
                 let pb = NSPasteboard.general

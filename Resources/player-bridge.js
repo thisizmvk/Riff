@@ -177,6 +177,39 @@
             window.__riffPendingNextUrl = url || null;
         },
 
+        // Battery: called from Swift when the app is deactivated
+        // (window loses focus / miniaturized). Suspends the
+        // safety-poll (2s interval, cheap but noticeable in Activity
+        // Monitor on long-idle sessions) and the normalization tick
+        // (10Hz during measurement, off outside it). Resumed on the
+        // reverse notification. The playerApi event bus keeps
+        // firing, so real state changes still land — this just
+        // stops us waking the WebView on every tick to re-check
+        // stable state.
+        setBackgrounded(isBackgrounded) {
+            if (isBackgrounded) {
+                if (window.__riffSafetyPollId) {
+                    clearInterval(window.__riffSafetyPollId);
+                    window.__riffSafetyPollId = null;
+                    window.__riffSafetyPollPaused = true;
+                }
+                if (window.__riffNorm && window.__riffNorm.tickIntervalId !== null) {
+                    clearInterval(window.__riffNorm.tickIntervalId);
+                    window.__riffNorm.tickIntervalId = null;
+                    window.__riffNorm.tickPaused = true;
+                }
+            } else {
+                if (window.__riffSafetyPollPaused && !window.__riffSafetyPollId) {
+                    window.__riffSafetyPollId = setInterval(() => emitTrackChanged("safety-poll"), 2000);
+                    window.__riffSafetyPollPaused = false;
+                }
+                if (window.__riffNorm && window.__riffNorm.tickPaused && window.__riffNorm.measuring) {
+                    window.__riffNorm.startTickInterval();
+                    window.__riffNorm.tickPaused = false;
+                }
+            }
+        },
+
         /**
          * Attempt to inject a track into YT Music's own queue via
          * direct Redux dispatch. If it works, YT's natural autoplay
@@ -290,6 +323,13 @@
 
     let lastVideoId = "";
     let lastEmittedHadTitle = false;
+    // C4: also key dedup by playlistId so a same-videoId replay from
+    // a different playlist (e.g. user re-navigated to the same
+    // track via a different `list=`) re-emits and Swift updates
+    // currentPlaylistId. Prior dedup was videoId-only, which
+    // silently swallowed playlist-context changes and left
+    // autoplay-next scoped to the stale playlist.
+    let lastEmittedPlaylistId = null;
     let stickyPlaylistId = null;
 
     function findPlaylistId() {
@@ -346,9 +386,18 @@
         // change just landed, getVideoData still empty) and now has
         // populated data — so Swift never gets stuck with a blank
         // title row.
-        if (vd.video_id === lastVideoId && lastEmittedHadTitle && reason !== "force") return;
+        // Dedup key: (videoId, playlistId). The prior gate ignored
+        // playlist changes entirely; a same-videoId replay from a
+        // different `list=` was silently swallowed. (C4)
+        if (vd.video_id === lastVideoId
+            && playlistId === lastEmittedPlaylistId
+            && lastEmittedHadTitle
+            && reason !== "force") {
+            return
+        }
         const videoIdChanged = vd.video_id !== lastVideoId;
         lastVideoId = vd.video_id;
+        lastEmittedPlaylistId = playlistId;
         lastEmittedHadTitle = title !== "";
         // Re-arm normalization measurement on a real track switch.
         // The dedup gate above prevents this from firing on the
@@ -600,6 +649,21 @@
         onTimeUpdate(currentTime, duration) {
             const n = this.seconds;
             if (!n || !isFinite(duration) || duration <= 0) return;
+            // Repeat-one: the browser loops the source without ever
+            // firing `ended`, so a crossfade tail-ramp would dip
+            // volume to silence at every loop boundary and snap back
+            // to 1.0 on wrap. Skip the ramp entirely while looping;
+            // also make sure factor is pinned at 1.0 so a factor left
+            // over from a pre-loop tail-fade doesn't stick.
+            const v = videoEl();
+            if (v && v.loop) {
+                if (this.tailFading || this.factor !== 1.0) {
+                    this.tailFading = false;
+                    this.factor = 1.0;
+                    this.applyVolume();
+                }
+                return;
+            }
             const remaining = duration - currentTime;
             // Tail window: when remaining < n, start ramping.
             // Guard against the early-seek case where currentTime

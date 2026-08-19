@@ -300,27 +300,20 @@ struct DetailView: View {
     /// album responses where YT omits per-track artwork because every
     /// track shares the album cover.
     private func tracklist(_ tracks: [MediaItem], fallbackArtwork: URL?) -> some View {
-        LazyVStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
-                // Backfill missing track artwork with the album/playlist
-                // cover so the now-playing strip and lock screen show
-                // *something* rather than a black square.
-                let resolved = MediaItem(
-                    id: track.id,
-                    kind: track.kind,
-                    title: track.title,
-                    subtitle: track.subtitle,
-                    thumbnailURL: track.thumbnailURL ?? fallbackArtwork,
-                    albumId: track.albumId,
-                    artistId: track.artistId,
-                    setVideoId: track.setVideoId
-                )
+        // Use the same backfill as the play/shuffle paths so the row
+        // display, the mini-player, the lock-screen widget, and the
+        // scrobbler payload all agree on artwork + artist. The `page`
+        // handoff is safe here because tracklist(...) is only ever
+        // called from inside signedInBody where `page` is non-nil.
+        let backfilled: [MediaItem] = page.map { p in tracks.map { backfillMetadata($0, page: p) } } ?? tracks
+        return LazyVStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(backfilled.enumerated()), id: \.element.id) { index, track in
                 TrackRow(
                     index: index,
-                    item: resolved,
+                    item: track,
                     isUserOwnedPlaylist: isUserOwnedPlaylist,
                     onRemoveFromPlaylist: isUserOwnedPlaylist
-                        ? { setId in await removeFromCurrentPlaylist(track: resolved, setVideoId: setId) }
+                        ? { setId in await removeFromCurrentPlaylist(track: track, setVideoId: setId) }
                         : nil
                 )
             }
@@ -353,13 +346,19 @@ struct DetailView: View {
         let visible = runs.filter { !$0.text.isEmpty }
 
         if visible.isEmpty {
-            // OST and various-artists albums often come back with an
+            // OST and single-song albums often come back with an
             // empty subtitle — YT has no single "album artist" to
-            // surface. Leaving the header blank reads as broken;
-            // fall back to the kind label so the user gets at least
-            // "Album" / "Playlist" / etc.
-            Text(kindLabel)
-                .foregroundStyle(.white.opacity(0.7))
+            // surface. Try the same fallback the tracklist uses
+            // (first track's own artist) before dropping down to
+            // the kind label; showing "Album" alone reads like the
+            // data is broken.
+            if let derived = albumArtistFallback(page: page), !derived.isEmpty {
+                Text(derived)
+                    .foregroundStyle(.white.opacity(0.75))
+            } else {
+                Text(kindLabel)
+                    .foregroundStyle(.white.opacity(0.7))
+            }
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 0) {
                 ForEach(Array(visible.enumerated()), id: \.offset) { _, run in
@@ -478,7 +477,9 @@ struct DetailView: View {
         if !page.tracks.isEmpty {
             let ordered = sortedTracks(page.tracks)
             let backfilled = ordered.map { backfillArtwork($0, page: page) }
-            await env.player.playTracks(backfilled)
+            // Thread the album/playlist ID so /next auto-extension
+            // stays in-context when the user region drains. (C5)
+            await env.player.playTracks(backfilled, playlistId: page.playablePlaylistId)
         } else if let plid = page.playablePlaylistId {
             // Empty tracklist — fall back to YT's playlist endpoint.
             // Reaches here only for entities where we couldn't parse
@@ -525,7 +526,7 @@ struct DetailView: View {
         // playTracks so the entire shuffle chains via the queue.
         guard !page.tracks.isEmpty else { return }
         let shuffled = page.tracks.shuffled().map { backfillArtwork($0, page: page) }
-        await env.player.playTracks(shuffled)
+        await env.player.playTracks(shuffled, playlistId: page.playablePlaylistId)
     }
 
     /// Returns `track` with its missing thumbnail filled from the
@@ -534,16 +535,72 @@ struct DetailView: View {
     /// from showing a black square for tracks that didn't carry their
     /// own artwork in the InnerTube response.
     private func backfillArtwork(_ track: MediaItem, page: InnerTubeClient.DetailPage) -> MediaItem {
-        guard track.thumbnailURL == nil else { return track }
+        backfillMetadata(track, page: page)
+    }
+
+    /// Fill in missing artwork AND missing artist subtitle from the
+    /// album/playlist page header. YT's album detail response often
+    /// leaves the per-track `subtitle` (flexColumn[1]) empty for OST
+    /// / single-song / various-artists releases — the web app derives
+    /// the artist from the page header instead. Doing the same here
+    /// keeps track rows, the mini-player, the lock screen, and the
+    /// scrobbler payload all showing a real artist name instead of a
+    /// blank line.
+    private func backfillMetadata(_ track: MediaItem, page: InnerTubeClient.DetailPage) -> MediaItem {
+        let needsArtwork = track.thumbnailURL == nil
+        let needsSubtitle = track.subtitle.isEmpty
+        guard needsArtwork || needsSubtitle else { return track }
+        let filledSubtitle = needsSubtitle ? (albumArtistFallback(page: page) ?? track.subtitle) : track.subtitle
+        let filledThumb = track.thumbnailURL ?? page.artworkURL ?? item.thumbnailURL
         return MediaItem(
             id: track.id,
             kind: track.kind,
             title: track.title,
-            subtitle: track.subtitle,
-            thumbnailURL: page.artworkURL ?? item.thumbnailURL,
+            subtitle: filledSubtitle,
+            thumbnailURL: filledThumb,
             albumId: track.albumId,
-            artistId: track.artistId
+            artistId: track.artistId,
+            setVideoId: track.setVideoId,
+            durationSeconds: track.durationSeconds,
+            year: track.year
         )
+    }
+
+    /// The best guess at an "album artist" for backfilling per-track
+    /// subtitles. Prefers, in order:
+    ///
+    ///   1. The first `.artist`-kind run of the header's subtitleRuns
+    ///      — that's YT's canonical album artist.
+    ///   2. The first non-empty plain run from the header subtitle,
+    ///      dropped if it's just the kind label ("Album") — some
+    ///      responses ship a single un-annotated artist text run.
+    ///   3. Any track in the same page that has a non-empty subtitle
+    ///      of its own — for various-artists albums where the header
+    ///      really has no artist to name, at least one track usually
+    ///      does, and that's better than showing blanks everywhere.
+    ///
+    /// Returns nil when nothing usable is found. The caller then
+    /// leaves the row's subtitle empty rather than substituting
+    /// "Album" (which reads as data corruption to the user).
+    private func albumArtistFallback(page: InnerTubeClient.DetailPage) -> String? {
+        if let artistRun = page.subtitleRuns.first(where: { $0.kind == .artist && !$0.text.isEmpty }) {
+            return artistRun.text
+        }
+        // First non-empty run that isn't a separator. YT uses " • "
+        // and " · " between runs; those show up as their own runs.
+        let separators: Set<String> = [" • ", " · ", " - "]
+        if let firstText = page.subtitleRuns.first(where: {
+            !$0.text.isEmpty && !separators.contains($0.text) && $0.text != kindLabel
+        }) {
+            return firstText.text
+        }
+        // Fall through to any track's own subtitle. Uses the first
+        // non-empty entry, not a majority vote — an album where one
+        // track happens to carry its artist is enough of a signal.
+        if let hint = page.tracks.first(where: { !$0.subtitle.isEmpty })?.subtitle {
+            return hint
+        }
+        return nil
     }
 }
 

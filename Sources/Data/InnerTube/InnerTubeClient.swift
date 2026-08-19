@@ -83,7 +83,7 @@ final class InnerTubeClient: @unchecked Sendable {
     /// `chipCloudRenderer` at the top of `FEmusic_home`; each chip
     /// carries a `browseEndpoint` whose `params` re-filter Home to that
     /// vibe when sent on a second `/browse` call.
-    struct HomeChip: Sendable, Identifiable, Hashable {
+    struct HomeChip: Sendable, Identifiable, Hashable, Codable {
         /// Display label ("Workout", "Sleep", …).
         let label: String
         /// `browseEndpoint.params` blob — opaque protobuf YT echoes back
@@ -955,15 +955,23 @@ final class InnerTubeClient: @unchecked Sendable {
             ?? (Parsing.dig(body, ["header", "musicImmersiveHeaderRenderer"]) as? [String: Any])
 
         let title = Parsing.runs(header, "title") ?? ""
-        let subtitle = Parsing.runs(header, "subtitle") ?? Parsing.runs(header, "straplineTextOne") ?? ""
-        // Walk the subtitle runs once to preserve YT's nav endpoints.
-        // Two-row header layouts use `subtitle`; immersive (artist
-        // page) layouts use `straplineTextOne`. Try subtitle first;
-        // fall back so artist pages get parsed too.
-        let rawRuns: [[String: Any]] =
-            (Parsing.dig(header, ["subtitle", "runs"]) as? [[String: Any]])
-            ?? (Parsing.dig(header, ["straplineTextOne", "runs"]) as? [[String: Any]])
-            ?? []
+        // Album/playlist headers put the ARTIST in straplineTextOne
+        // (with its own browse endpoint) and only "Album • 2024" in
+        // subtitle. The old code preferred subtitle and dropped the
+        // strapline whenever subtitle existed, so every album showed
+        // a bare "Album" line and blank track-row artists. Combine
+        // both, strapline first, so the artist run survives and
+        // renders; DetailView's albumArtistFallback then backfills
+        // blank track rows from the first artist run.
+        let straplineRuns = (Parsing.dig(header, ["straplineTextOne", "runs"]) as? [[String: Any]]) ?? []
+        let plainSubtitleRuns = (Parsing.dig(header, ["subtitle", "runs"]) as? [[String: Any]]) ?? []
+        var rawRuns: [[String: Any]] = straplineRuns
+        if !straplineRuns.isEmpty && !plainSubtitleRuns.isEmpty {
+            rawRuns.append(["text": " • "])
+        }
+        rawRuns.append(contentsOf: plainSubtitleRuns)
+        let subtitle = (Parsing.runs(header, "straplineTextOne").map { $0 + " • " } ?? "")
+            + (Parsing.runs(header, "subtitle") ?? "")
         let subtitleRuns: [AnnotatedRun] = rawRuns.map { run in
             let text = (run["text"] as? String) ?? ""
             if let endpoint = run["navigationEndpoint"] as? [String: Any],
@@ -1103,6 +1111,32 @@ final class InnerTubeClient: @unchecked Sendable {
     func playlistDetail(playlistId: String) async throws -> DetailPage {
         // Playlist browseId is "VL" + playlistId.
         try await detail(forBrowseId: "VL" + playlistId)
+    }
+
+    /// Signed-in account chrome for the Settings "Account" card.
+    struct AccountInfo: Sendable {
+        let name: String?
+        let handle: String?
+    }
+
+    /// Fetch the signed-in account's display name + handle via
+    /// InnerTube's account_menu — the one account source that works
+    /// with SAPISIDHASH (cookie) auth. (The OAuth userinfo path only
+    /// works for Device-Flow sign-ins, so cookie-import sessions had
+    /// nothing to show.) Returns nil when anonymous or on parse
+    /// failure; the Settings card falls back to a generic "Signed
+    /// in" line.
+    func fetchAccountInfo() async -> AccountInfo? {
+        guard let body = try? await postRaw(.accountMenu, body: [:]) else { return nil }
+        let header = Parsing.dig(body, [
+            "actions", "0", "openPopupAction", "popup",
+            "multiPageMenuRenderer", "header", "activeAccountHeaderRenderer",
+        ]) as? [String: Any]
+        guard let header else { return nil }
+        let name = Parsing.runs(header, "accountName")
+        let handle = Parsing.runs(header, "channelHandle")
+        if name == nil && handle == nil { return nil }
+        return AccountInfo(name: name, handle: handle)
     }
 
     /// Like the given video. Requires SAPISID cookie auth — anonymous calls
