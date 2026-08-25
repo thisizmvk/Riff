@@ -431,6 +431,18 @@
         // dedup gate as normalization above.
         if (videoIdChanged) {
             try { window.__riffXfade.onTrackChange(); } catch (_) {}
+            // Re-mirror the page queue IMMEDIATELY on a real track
+            // switch instead of waiting for the next 2s poll tick —
+            // YT's radio can reshape its upcoming rows at each advance,
+            // and the poll-lag window is exactly when the displayed
+            // "up next" reads stale ("not true to what plays").
+            // setTimeout(0) lets the store finish its own update first,
+            // with a 600ms second shot for stores that settle late; the
+            // sig dedup makes both free when nothing changed.
+            try {
+                setTimeout(emitQueueSnapshot, 0);
+                setTimeout(emitQueueSnapshot, 600);
+            } catch (_) {}
         }
         let artwork = null;
         if (md && md.artwork && md.artwork.length > 0) {

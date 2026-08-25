@@ -2066,7 +2066,9 @@ final class PlayerBridge {
             // stale injection ids so no mirrored row whose id happens to
             // match an old injection wears a false "+" badge.
             if !smartShuffleInjectedIds.isEmpty { smartShuffleInjectedIds = [] }
-            Log.bridge.debug("queueSnapshot → mirrored \(mapped.count) upcoming radio rows (of \(items.count) total)")
+            // head3: the first shown rows, by id — lets a log capture
+            // verify WYSIWYG (next trackChanged id should equal head3[0]).
+            Log.bridge.debug("queueSnapshot → mirrored \(mapped.count) rows (of \(items.count)); head3=\(mapped.prefix(3).map(\.id).joined(separator: ","), privacy: .public)")
         case .progress(let t, let d):
             // Filter stale events that arrive in the window right after a
             // track change. YT Music's SPA can keep firing `timeupdate`
@@ -2160,6 +2162,13 @@ final class PlayerBridge {
             // the current track (late-title re-emit, "force" after player
             // re-subscription), and an ungated consume would silently eat
             // a "Play Next" of the currently-playing song.
+            if !sameVideoId {
+                // WYSIWYG audit line: arrived vs the head we were
+                // showing. "match" is the healthy case; "MISMATCH" in a
+                // log capture pinpoints display-vs-playback divergence.
+                let shownHead = upNext.first(where: { $0.id != currentTrack?.videoId })?.id ?? "nil"
+                Log.bridge.debug("advance arrived=\(id, privacy: .public) shownHead=\(shownHead, privacy: .public) \(shownHead == id ? "match" : "MISMATCH", privacy: .public)")
+            }
             if !sameVideoId, upNext.contains(where: { $0.id == id }) {
                 _ = queue.consumeUpTo(videoId: id)
             }
