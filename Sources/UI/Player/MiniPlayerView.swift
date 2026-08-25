@@ -24,14 +24,21 @@ struct MiniPlayerView: View {
                 // Click (or drag-release) to seek — desktop players all
                 // treat the bottom-bar progress line as a scrubber.
                 // contentShape widens the 2pt line's hit area.
+                // highPriorityGesture, NOT .gesture: the whole mini
+                // player carries an onTapGesture that opens the full
+                // player, and a plain gesture lost to it — clicking the
+                // bar opened the full screen instead of seeking.
                 .contentShape(Rectangle())
-                .gesture(
+                .highPriorityGesture(
                     DragGesture(minimumDistance: 0)
                         .onEnded { value in
                             let fraction = min(max(value.location.x / max(geo.size.width, 1), 0), 1)
                             Task { await env.player.seek(to: fraction) }
                         }
                 )
+                .onHover { inside in
+                    if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
             }
             .frame(height: 6)
             .accessibilityLabel("Playback progress")

@@ -85,6 +85,14 @@
             v.paused ? v.play() : v.pause();
         },
 
+        // Unconditional pause — no toggle semantics. Used by Swift's
+        // pause-enforcement (sleep end-of-track / autoplay-off stop) so
+        // a repeated enforcement call can never accidentally resume.
+        pause() {
+            const v = videoEl();
+            if (v && !v.paused) v.pause();
+        },
+
         setPlaybackRate(rate) {
             const v = videoEl();
             if (v) v.playbackRate = rate;

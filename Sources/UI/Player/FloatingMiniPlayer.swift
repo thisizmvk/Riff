@@ -122,6 +122,9 @@ struct FloatingMiniPlayerView: View {
                                 Task { await env.player.seek(to: fraction) }
                             }
                     )
+                    .onHover { inside in
+                        if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                    }
                 }
                 .frame(height: 5)
                 Spacer(minLength: 0)

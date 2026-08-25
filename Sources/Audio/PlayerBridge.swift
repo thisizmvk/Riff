@@ -308,6 +308,23 @@ final class PlayerBridge {
     /// when the queue drains at end-of-track, everything played in
     /// this context (plus the finishing track) is re-queued in order.
     @ObservationIgnored private var contextStartHistoryIndex: Int = 0
+    /// The track ids belonging to the current deterministic context
+    /// (album / playTracks list), plus its playlist id. Used by the
+    /// advance logic: a queued head that belongs to this context should
+    /// play IN the context (page-native advance, or a `list=<context>`
+    /// navigation to restore it) — NOT via a per-track RDAMVM radio URL.
+    /// Per-track radio navigation was re-seeding a fresh page radio on
+    /// every album track: the mirror then painted that radio's rows
+    /// under the album ("queue changes dynamically") and at album end
+    /// the page radio took over ("returns to a new radio").
+    @ObservationIgnored private var contextTracksIds: Set<String> = []
+    @ObservationIgnored private var contextPlaylistId: String? = nil
+    /// Wall-clock deadline for pause enforcement. After a sleep-timer
+    /// end-of-track or an autoplay-off end-of-queue pause, the page can
+    /// still natively start the next track; any `stateChanged(playing)`
+    /// before this deadline is force-paused. Cleared on user-initiated
+    /// togglePlay so the user can always override.
+    @ObservationIgnored private var pauseEnforceUntil: Date = .distantPast
     private(set) var shuffleEnabled: Bool = false
     /// B5 Smart Shuffle. When ON *together with* `shuffleEnabled`, the
     /// visible Up Next gets interleaved with /related recommendations
@@ -512,9 +529,12 @@ final class PlayerBridge {
         }
         // Fresh watch context → new Repeat All cycle boundary. Marked
         // AFTER archiving the outgoing track so the old track belongs
-        // to the OLD context's cycle.
+        // to the OLD context's cycle. Single-song play = a radio
+        // context with no deterministic tracklist.
         if clearQueue {
             contextStartHistoryIndex = queue.playedEntries.count
+            contextTracksIds = [item.id]
+            contextPlaylistId = nil
         }
         // A pending resume from restoreLastSession only applies to the
         // very first play. An explicit click of a different song
@@ -1037,6 +1057,10 @@ final class PlayerBridge {
         // Fresh watch context — full queue reset + Repeat All boundary.
         queue.replaceQueue([])
         contextStartHistoryIndex = queue.playedEntries.count
+        // Deterministic tracklist context: these ids advance IN this
+        // context (page-native / list=<plid>), never via per-track radio.
+        contextTracksIds = Set(tracks.map(\.id))
+        contextPlaylistId = playlistId
         // Seed the user region with the tail of the album in order.
         for track in rest {
             queue.addToEnd(track)
@@ -1084,6 +1108,11 @@ final class PlayerBridge {
         // random recommendations. Seeding + the "don't clobber with
         // nil" guard in handle(trackChanged:) keeps the context.
         currentPlaylistId = cleaned
+        // Playlist context: the tracklist is server-driven (no local
+        // ids), but the context playlist id still anchors advances.
+        contextTracksIds = []
+        contextPlaylistId = cleaned
+        contextStartHistoryIndex = queue.playedEntries.count
         await navigate(watchURL(videoId: nil, playlistId: cleaned))
     }
 
@@ -1149,7 +1178,18 @@ final class PlayerBridge {
         await eval("window.musicBridge.navigate(\(url.jsonQuoted))")
     }
 
+    /// Pause without toggle semantics — used by the pause-enforcement
+    /// window (sleep end-of-track, autoplay-off end-of-queue) so an
+    /// enforcement pause can't accidentally RESUME a paused player.
+    /// Deliberately does NOT clear `pauseEnforceUntil`.
+    func forcePause() async {
+        await eval("window.musicBridge.pause()")
+    }
+
     func togglePlay() async {
+        // User intent overrides any pause-enforcement window: pressing
+        // play after a sleep-timer stop should actually play.
+        pauseEnforceUntil = .distantPast
         // Consume a pending resume from the restored session: the
         // WebView hasn't navigated to the saved track yet, so a plain
         // togglePlay would target an empty <video>. Instead navigate
@@ -1446,38 +1486,62 @@ final class PlayerBridge {
     /// construction, so "head = user's next intent" is baked in).
     /// Empty string means "no queue — let YT autoplay do whatever
     /// it wants."
+    /// How the NEXT advance to `head` should happen. Central decision
+    /// shared by syncPendingNextURL and the .ended fallback so they
+    /// can't disagree.
+    ///
+    ///   - .native: the page's own advance already plays `head` (it's
+    ///     the next row of the context the page is in) — arm nothing;
+    ///     forcing location.href would reload the page per track and
+    ///     re-seed a fresh radio (the exact bug behind "album shows 49
+    ///     random rows then falls into radio").
+    ///   - .navigate(url): Swift must force the advance (true Play-Next
+    ///     injections, context restoration after an interlude,
+    ///     deterministic server heads).
+    private enum AdvancePlan { case native, navigate(String) }
+    private func advancePlan(to head: MediaItem) -> AdvancePlan {
+        let headIsUserQueued = queue.isUserQueued(videoId: head.id)
+        if contextTracksIds.contains(head.id),
+           let ctx = contextPlaylistId, !ctx.isEmpty {
+            // Context track (album / playTracks list): keep it IN its
+            // context. If the page is already there, its native advance
+            // plays exactly this head — don't reload. Otherwise (an
+            // interlude pulled the page into some other list) navigate
+            // back into the context at this track.
+            if currentPlaylistId == ctx { return .native }
+            return .navigate(watchURL(videoId: head.id, playlistId: ctx))
+        }
+        if headIsUserQueued {
+            // Play-Next / Add-to-queue injection from outside the
+            // context: per-track auto-radio avoids navigating into a
+            // wrong list=.
+            return .navigate(watchURL(videoId: head.id, playlistId: Self.radioPlaylistId(for: head.id)))
+        }
+        if !isPageDrivenContext {
+            // Deterministic server head (album continuation fetched via
+            // /next): keep the real context list.
+            let plid: String
+            if let ctx = currentPlaylistId, !ctx.isEmpty, !ctx.hasPrefix("RDAMVM") {
+                plid = ctx
+            } else {
+                plid = Self.radioPlaylistId(for: head.id)
+            }
+            return .navigate(watchURL(videoId: head.id, playlistId: plid))
+        }
+        // Mirrored radio row — the page plays it natively.
+        return .native
+    }
+
     private func syncPendingNextURL() async {
         let curId = currentTrack?.videoId
         let head = upNext.first { $0.id != curId }
         let url: String
-        if let chosen = head, queue.isUserQueued(videoId: chosen.id) || !isPageDrivenContext {
-            // Playlist selection for the pending-next URL:
-            //   - Head is user-queued (in the top region): they may
-            //     have queued a song from an unrelated album; use
-            //     per-track auto-radio to avoid navigating into the
-            //     wrong list=.
-            //   - Head is a server item (album continuation, radio):
-            //     preserve `currentPlaylistId` when it's a real
-            //     album/user playlist so YT keeps playing IN the
-            //     album. RDAMVM per-track radio broke album chain
-            //     play in a prior iteration.
-            let headIsUserQueued = queue.isUserQueued(videoId: chosen.id)
-            let plid: String
-            if !headIsUserQueued,
-               let ctx = currentPlaylistId,
-               !ctx.isEmpty,
-               !ctx.hasPrefix("RDAMVM") {
-                plid = ctx
-            } else {
-                plid = Self.radioPlaylistId(for: chosen.id)
+        if let chosen = head {
+            switch advancePlan(to: chosen) {
+            case .native:             url = ""
+            case .navigate(let dest): url = dest
             }
-            url = watchURL(videoId: chosen.id, playlistId: plid)
         } else {
-            // No head, OR the head is a mirrored radio row (Phase 2):
-            // the page's native autoplay will play that exact row on
-            // its own — arming a forced location.href navigation would
-            // reload the page on every track for zero gain (and race
-            // the native advance). Clear and let the page drive.
             url = ""
         }
         Log.bridge.debug("syncPendingNextURL → \(url, privacy: .public)")
@@ -1852,6 +1916,16 @@ final class PlayerBridge {
             }
         case .stateChanged(let playing):
             isPlaying = playing
+            // Pause enforcement: after a sleep-timer end-of-track or an
+            // autoplay-off end-of-queue pause, the page can natively
+            // start the next track anyway. Any playback that starts
+            // before the deadline is force-paused (forcePause, not
+            // togglePlay — user-initiated togglePlay CLEARS the window,
+            // so the user can always override by pressing play).
+            if playing, Date() < pauseEnforceUntil {
+                Log.bridge.debug("stateChanged(playing) inside pause-enforce window → forcing pause")
+                Task { [weak self] in await self?.forcePause() }
+            }
         case .ended:
             // Track reached end-of-stream. If an `endOfTrack` sleep
             // timer is armed, pause now and short-circuit the normal
@@ -1870,7 +1944,10 @@ final class PlayerBridge {
             if endOfTrackArmed {
                 Task { [weak self] in
                     guard let self else { return }
-                    if self.isPlaying { await self.togglePlay() }
+                    await self.forcePause()
+                    // The page may still natively advance and start the
+                    // next track; enforce silence for the next 12s.
+                    self.pauseEnforceUntil = Date().addingTimeInterval(12)
                     self.clearSleepTimerState()
                 }
             } else {
@@ -1902,16 +1979,27 @@ final class PlayerBridge {
                         return
                     }
                 }
+                // Autoplay OFF + nothing left → stop, matching the
+                // Settings copy ("stop at the end of the current queue
+                // or album"). Without this the page drifts into its own
+                // radio at album end regardless of the setting.
+                if !autoplayEnabled, head == nil {
+                    Log.bridge.debug(".ended → autoplay off, queue drained → pausing")
+                    Task { [weak self] in
+                        guard let self else { return }
+                        await self.forcePause()
+                        self.pauseEnforceUntil = Date().addingTimeInterval(12)
+                    }
+                    return
+                }
                 if !pendingNextURLArmed {
-                    // JS had nothing armed — YT's own autoplay is about
-                    // to fire. Fallback-play the head ONLY when it's an
-                    // explicit user-queued item or a deterministic
-                    // (album/playlist) row. A mirrored radio row (Phase
-                    // 2) is deliberately un-armed: the page's native
-                    // autoplay is about to play that exact row itself,
-                    // and a Swift force-play would reload the page for
-                    // zero gain.
-                    if let head, queue.isUserQueued(videoId: head.id) || !isPageDrivenContext {
+                    // JS had nothing armed. Either the page's native
+                    // advance covers the head (.native — album context /
+                    // mirrored radio row: force-playing would reload the
+                    // page per track), or Swift must drive (.navigate).
+                    // Same advancePlan as syncPendingNextURL so the two
+                    // paths can't disagree.
+                    if let head, case .navigate = advancePlan(to: head) {
                         Task { [weak self] in
                             await self?.play(item: head, clearQueue: false)
                             Log.bridge.debug(".ended → Swift fallback played head=\(head.id, privacy: .public)")
@@ -1940,6 +2028,12 @@ final class PlayerBridge {
             // the /next fetch, whose rows are richer (album/artist ids),
             // and chip-tuned queues are Riff-curated (page-unaware).
             guard isPageDrivenContext else { break }
+            // While the user region has items, the USER'S list is the
+            // queue — repainting radio filler beneath it on every poll
+            // is churn ("queue changes dynamically"), and those rows
+            // wouldn't play until the user region drains anyway. The
+            // mirror resumes automatically once it does.
+            guard queue.userQueueCount == 0 else { break }
             let curId = currentTrack?.videoId
             // Staleness gate: a snapshot posted by the OLD page can be
             // delivered after a navigation reset the queue — mirroring it
