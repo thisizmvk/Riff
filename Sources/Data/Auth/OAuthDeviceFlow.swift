@@ -125,8 +125,10 @@ final class OAuthDeviceFlow {
         ])
         let (data, response) = try await URLSession.shared.data(for: req)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        let preview = String(data: data, encoding: .utf8) ?? ""
-        Log.oauth.debug("device/code status=\(status) body=\(preview, privacy: .public)")
+        // Body deliberately not logged (codes are short-lived, but the
+        // token-endpoint sibling below must never log bodies — keep the
+        // whole flow consistent so a future copy-paste can't regress it).
+        Log.oauth.debug("device/code status=\(status)")
 
         if status != 200 {
             if let err = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
@@ -183,8 +185,12 @@ final class OAuthDeviceFlow {
                 continue
             }
 
-            let preview = String(data: data, encoding: .utf8) ?? ""
-            Log.oauth.debug("poll status=\(status) body=\(preview, privacy: .public)")
+            // SECURITY: never log the token-endpoint body — on 200 it
+            // contains the access token AND the long-lived refresh token,
+            // and a `privacy: .public` os_log line is readable by anyone
+            // on the machine (Console.app, `log stream`, sysdiagnose) and
+            // can ride along in a diagnostics dump. Status code only.
+            Log.oauth.debug("poll status=\(status)")
 
             if status == 200 {
                 do {

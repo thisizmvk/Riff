@@ -89,8 +89,9 @@ enum DiagnosticsExporter {
         lines.append("  riff.log             — os_log entries from the last 24 hours (Riff subsystem only)")
         lines.append("  played-history.json  — timestamped playback journal (up to 500 items)")
         lines.append("")
-        lines.append("This dump contains no API keys, no OAuth tokens, no cookies,")
-        lines.append("and no personal identifiers beyond played videoIds.")
+        lines.append("This dump contains no API keys, no OAuth tokens, and no cookies.")
+        lines.append("played-history.json includes your listening history (track titles,")
+        lines.append("artists, artwork URLs, and timestamps) — review before sharing.")
         try? lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
@@ -119,6 +120,15 @@ enum DiagnosticsExporter {
         var out: [String] = []
         for entry in entries {
             guard let logEntry = entry as? OSLogEntryLog else { continue }
+            // SECURITY: exclude debug/info-level lines. Whether the
+            // OSLogStore persists them is environment-dependent, and
+            // debug lines are exactly where verbose bodies (event
+            // payloads, response previews) live — the manifest promises
+            // this dump carries no secrets, so only notice+ may ride.
+            switch logEntry.level {
+            case .notice, .error, .fault: break
+            default: continue
+            }
             let ts = ISO8601DateFormatter().string(from: logEntry.date)
             out.append("[\(ts)] [\(logEntry.category)] \(logEntry.composedMessage)")
         }

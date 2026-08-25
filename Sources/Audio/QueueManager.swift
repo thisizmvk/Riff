@@ -98,7 +98,13 @@ final class QueueManager {
     func replaceServerRegion(_ serverItems: [MediaItem]) {
         let userRegion = Array(upNext.prefix(userQueueCount))
         let userIds = Set(userRegion.map(\.id))
-        let filteredServer = serverItems.filter { !userIds.contains($0.id) }
+        // Dedupe against the user region AND within serverItems itself:
+        // playlistDetail fallbacks (playlists legitimately repeat songs)
+        // and the page-queue mirror (items ∪ automixItems can overlap)
+        // both deliver internal duplicates, and duplicate ids downstream
+        // trap `reorder`'s uniqueKeysWithValues dictionary.
+        var seen = userIds
+        let filteredServer = serverItems.filter { seen.insert($0.id).inserted }
         upNext = userRegion + filteredServer
         // userQueueCount unchanged by definition.
     }
@@ -218,7 +224,11 @@ final class QueueManager {
         // Rebuild upNext preserving items not in visibleIds (e.g.
         // the currently-playing track filtered out by the view) at
         // their original positions.
-        let byId: [String: MediaItem] = Dictionary(uniqueKeysWithValues: upNext.map { ($0.id, $0) })
+        // uniquingKeysWith rather than uniqueKeysWithValues: the latter
+        // TRAPS on duplicate ids, and while replaceServerRegion now
+        // dedupes, a duplicate that slips in via any other path must
+        // degrade gracefully instead of crashing a drag gesture.
+        let byId: [String: MediaItem] = Dictionary(upNext.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let visibleSet = Set(visibleIds)
         var out: [MediaItem] = []
         var reorderedIter = visible.makeIterator()

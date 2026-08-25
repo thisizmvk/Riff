@@ -62,9 +62,20 @@ struct OAuthTokens: Codable, Sendable {
             UserDefaults.standard.removeObject(forKey: Self.storageKey)
             Self.log.debug("tokens saved to Keychain")
         } catch {
-            // Fall back to UserDefaults — see policy comment at top.
+            #if DEBUG
+            // Dev-build convenience only: ad-hoc-signed debug builds
+            // re-prompt Keychain on every rebuild and commonly fail.
             UserDefaults.standard.set(data, forKey: Self.storageKey)
-            Self.log.error("Keychain save failed (\(String(describing: error), privacy: .public)); fell back to UserDefaults")
+            Self.log.error("Keychain save failed (\(String(describing: error), privacy: .public)); fell back to UserDefaults (DEBUG only)")
+            #else
+            // SECURITY: in release, never write a long-lived refresh
+            // token to a cleartext preferences plist (readable by any
+            // process running as the user; included in unencrypted
+            // backups). Surface the failure instead of silently
+            // downgrading storage.
+            Self.log.error("Keychain save failed (\(String(describing: error), privacy: .public)); tokens NOT persisted")
+            throw error
+            #endif
         }
     }
 

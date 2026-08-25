@@ -382,6 +382,19 @@ final class PlayerBridge {
         let serverStart = queue.userQueueCount
         let currentServer = Array(queue.upNext.dropFirst(serverStart))
         let baseServer = currentServer.filter { !injectedNow.contains($0.id) }
+        // Page-driven radio: the server region mirrors the page's own
+        // queue, and enforcement/pending-URL are deliberately off — an
+        // injected row would be DISPLAYED as next but the page plays its
+        // own row (WYSIWYG violation), then the next snapshot silently
+        // strips the injection. Smart Shuffle only makes sense where
+        // Riff controls the advance (albums/playlists/chip queues).
+        guard !isPageDrivenContext else {
+            if !injectedNow.isEmpty {
+                queue.replaceServerRegion(baseServer)
+                smartShuffleInjectedIds = []
+            }
+            return
+        }
         guard smartShuffleEnabled, shuffleEnabled, !related.isEmpty, !baseServer.isEmpty else {
             if !injectedNow.isEmpty {
                 queue.replaceServerRegion(baseServer)
@@ -675,7 +688,12 @@ final class PlayerBridge {
     /// browse IDs for lyrics + related which are loaded on demand.
     /// Pass `playlistId` when known so /next returns the playlist's track
     /// list instead of generic radio suggestions.
-    private func refreshNextQueueAndIds(forVideoId id: String, playlistId: String?) {
+    /// - parameter updateQueue: when false, only track metadata is
+    ///   applied (like state, lyrics/related browse ids, chips) and the
+    ///   queue regions are left untouched. Used on page-driven radio
+    ///   advances, where the server region mirrors the page's own queue
+    ///   and a /next-driven replace would wipe it for ~2s per track.
+    private func refreshNextQueueAndIds(forVideoId id: String, playlistId: String?, updateQueue: Bool = true) {
         // Cancel-and-replace: clicking 5 tracks in 2 seconds shouldn't fan out
         // 5 concurrent `/next` requests where the last-to-complete wins.
         nextQueueTask?.cancel()
@@ -760,18 +778,28 @@ final class PlayerBridge {
                 // (the page doesn't know the chip); only plain radio
                 // defers to the page mirror.
                 let isRadio = chip == nil && (playlistId?.hasPrefix("RD") ?? true)
-                let serverItems: [MediaItem] = isRadio ? [] : fetched.filter { item in
-                    item.id != curId && !self.shouldBlock(item)
+                // Exclude tracks already played this session. /next (and
+                // the playlistDetail fallback, which returns the FULL
+                // tracklist) includes tracks BEFORE the current one; the
+                // auto-extension refetch fires on every advance once the
+                // server region runs low, so without this filter played
+                // album tracks re-accumulate below the remaining ones and
+                // the album loops back to track 1 instead of ending.
+                let playedIds = Set(self.queue.playedEntries.suffix(200).map { $0.item.id })
+                if updateQueue {
+                    let serverItems: [MediaItem] = isRadio ? [] : fetched.filter { item in
+                        item.id != curId && !playedIds.contains(item.id) && !self.shouldBlock(item)
+                    }
+                    self.queue.replaceServerRegion(serverItems)
+                    // Push the new visible head into JS's pending-next URL
+                    // so the next end-of-stream intercepts YT's autoplay
+                    // with our choice. Without this, YT picks the next
+                    // track from its internal queue — which can diverge
+                    // from upNext after a related-songs fallback or block
+                    // filter. Fire-and-forget; the JS bridge tolerates
+                    // out-of-order updates.
+                    Task { [weak self] in await self?.syncPendingNextURL() }
                 }
-                self.queue.replaceServerRegion(serverItems)
-                // Push the new visible head into JS's pending-next URL
-                // so the next end-of-stream intercepts YT's autoplay
-                // with our choice. Without this, YT picks the next
-                // track from its internal queue — which can diverge
-                // from upNext after a related-songs fallback or block
-                // filter. Fire-and-forget; the JS bridge tolerates
-                // out-of-order updates.
-                Task { [weak self] in await self?.syncPendingNextURL() }
                 // Backfill the current track's album/artist IDs if /next
                 // returned them and the track we have on screen is missing
                 // them — common when the user clicks a carousel tile whose
@@ -989,6 +1017,16 @@ final class PlayerBridge {
         if let playlistId, !playlistId.isEmpty {
             currentPlaylistId = playlistId
             refreshNextQueueAndIds(forVideoId: first.id, playlistId: playlistId)
+        } else {
+            // No playlist context (e.g. AI queue builder hands a bare
+            // tracklist). Reset to the FIRST track's auto-radio — the
+            // follow-up play(clearQueue: false) deliberately preserves
+            // context, so without this a stale RDAMVM<oldTrack> from the
+            // previous session would (a) navigate the page into the OLD
+            // song's radio and (b) keep isPageDrivenContext true, letting
+            // the page mirror append that old radio under the hand-built
+            // queue.
+            currentPlaylistId = Self.radioPlaylistId(for: first.id)
         }
         await syncPendingNextURL()
         await play(item: first, clearQueue: false)
@@ -1147,7 +1185,16 @@ final class PlayerBridge {
         // 4. Nothing surfaced — let YT's autoplay continue.
         await eval("window.musicBridge.next()")
     }
-    func previous()   async { await eval("window.musicBridge.previous()") }
+    func previous()   async {
+        // The incoming trackChanged (the PRIOR track) is the user's own
+        // navigation — its videoId is never in upNext (already consumed),
+        // so without the click-grace the WYSIWYG enforcement would read
+        // it as autoplay divergence and snap FORWARD to the shown head,
+        // making Previous jump the wrong way. Arm the grace like every
+        // other user-intent transport.
+        userClickedAt = Date()
+        await eval("window.musicBridge.previous()")
+    }
     func seek(to fraction: Double) async {
         await eval("window.musicBridge.seek(\(fraction))")
     }
@@ -1569,6 +1616,14 @@ final class PlayerBridge {
             // "ending after track" rather than pretending we're idle.
             endOfTrackArmed = true
             sleepTimerRemaining = nil
+            // Disarm the JS pending-next URL: its onStateChange handler
+            // navigates SYNCHRONOUSLY on ended — before our .ended pause
+            // can land — so an armed URL would start the next track and
+            // the "stop after this track" timer would play all night.
+            // If the timer is cancelled, syncPendingNextURL re-arms on
+            // the next queue mutation / track change.
+            pendingNextURLArmed = false
+            await eval("window.musicBridge.setPendingNextURL(\"\")")
         }
     }
 
@@ -1593,10 +1648,16 @@ final class PlayerBridge {
     /// (user-initiated) and at the tail of `fireSleepTimer` (timer
     /// completed naturally).
     private func clearSleepTimerState() {
+        let wasEndOfTrack = endOfTrackArmed
         sleepTimerTask = nil
         sleepTimerRemaining = nil
         sleepTimerMode = nil
         endOfTrackArmed = false
+        // endOfTrack arming disarmed the JS pending-next URL; restore it
+        // so a cancelled timer doesn't leave queued songs un-enforced.
+        if wasEndOfTrack {
+            Task { [weak self] in await self?.syncPendingNextURL() }
+        }
     }
 
     func cancelSleepTimer() {
@@ -1821,6 +1882,16 @@ final class PlayerBridge {
             // and chip-tuned queues are Riff-curated (page-unaware).
             guard isPageDrivenContext else { break }
             let curId = currentTrack?.videoId
+            // Staleness gate: a snapshot posted by the OLD page can be
+            // delivered after a navigation reset the queue — mirroring it
+            // would fill the fresh context with the previous radio's rows.
+            // The page's queue always contains its own current track, so
+            // a snapshot that doesn't know our current track is not from
+            // our page: drop it (the new page emits within ~2s).
+            if let curId, !items.contains(where: { $0.videoId == curId }) {
+                Log.bridge.debug("queueSnapshot: dropped stale snapshot (no \(curId, privacy: .public) among \(items.count) rows)")
+                break
+            }
             // Upcoming = rows after the page's selected row; fall back
             // to slicing after the current videoId when no row is
             // marked (briefly true right after a navigation).
@@ -1838,6 +1909,10 @@ final class PlayerBridge {
                 }
                 .filter { !shouldBlock($0) }
             queue.replaceServerRegion(mapped)
+            // Mirrored rows are the page's, not Smart Shuffle's — clear
+            // stale injection ids so no mirrored row whose id happens to
+            // match an old injection wears a false "+" badge.
+            if !smartShuffleInjectedIds.isEmpty { smartShuffleInjectedIds = [] }
             Log.bridge.debug("queueSnapshot → mirrored \(mapped.count) upcoming radio rows (of \(items.count) total)")
         case .progress(let t, let d):
             // Filter stale events that arrive in the window right after a
@@ -1928,7 +2003,11 @@ final class PlayerBridge {
             // if the user tapped a row to skip ahead within click-grace).
             // Pop it AND everything above it — matching YT Music's
             // "jump to row" semantic where skipped rows are discarded.
-            if upNext.contains(where: { $0.id == id }) {
+            // Gated on !sameVideoId: the JS bridge legitimately re-emits
+            // the current track (late-title re-emit, "force" after player
+            // re-subscription), and an ungated consume would silently eat
+            // a "Play Next" of the currently-playing song.
+            if !sameVideoId, upNext.contains(where: { $0.id == id }) {
                 _ = queue.consumeUpTo(videoId: id)
             }
             // Always resync the pending URL after a track change: page
@@ -2037,7 +2116,15 @@ final class PlayerBridge {
                 // out and stops at the end (Spotify/Apple Music
                 // "Autoplay" behavior).
                 let serverCount = upNext.count - queue.userQueueCount
-                if autoplayEnabled, serverCount <= Self.serverRegionRefetchThreshold {
+                if isPageDrivenContext {
+                    // Page-driven radio: the queue is mirrored from the
+                    // page (never /next), but per-track METADATA still
+                    // needs a refresh — without it the heart shows the
+                    // previous track's like state, the Lyrics tab serves
+                    // the previous track's lyrics, and chips go stale on
+                    // every native advance.
+                    refreshNextQueueAndIds(forVideoId: id, playlistId: effectivePlid, updateQueue: false)
+                } else if autoplayEnabled, serverCount <= Self.serverRegionRefetchThreshold {
                     refreshNextQueueAndIds(forVideoId: id, playlistId: effectivePlid)
                 }
                 // New track → snapshot now (rather than waiting for

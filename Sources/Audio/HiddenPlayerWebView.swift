@@ -90,12 +90,35 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
     /// `{event, …}` payload posted from player-bridge.js and forward to
     /// `onEvent`.
     func userContentController(_ uc: WKUserContentController, didReceive message: WKScriptMessage) {
+        // SECURITY: WebKit exposes window.webkit.messageHandlers.bridge to
+        // EVERY frame in the WebView — including cross-origin ad iframes
+        // music.youtube.com loads — not just the main frame our script is
+        // injected into. Reject anything that isn't the main frame on a
+        // YouTube host so an iframe can't forge trackChanged/queueSnapshot
+        // events (queue spoofing + attacker-URL artwork beacons).
+        guard message.frameInfo.isMainFrame,
+              let host = message.frameInfo.securityOrigin.host as String?,
+              host == "music.youtube.com" || host.hasSuffix(".youtube.com")
+        else { return }
         guard let body = message.body as? [String: Any],
               let name = body["event"] as? String,
               let event = Self.decode(eventName: name, body: body)
         else { return }
 
-        Log.bridge.debug("\(name, privacy: .public) \(String(describing: body), privacy: .public)")
+        // PERF: os_log interpolations are evaluated eagerly — a
+        // String(describing:) of the body dictionary runs even when no
+        // one is collecting debug logs, at 4Hz for progress and with an
+        // 80-row payload for queueSnapshot. Log the name always; dump
+        // bodies only in debug builds and never for the two hot events.
+        #if DEBUG
+        if name != "progress", name != "queueSnapshot" {
+            Log.bridge.debug("\(name, privacy: .public) \(String(describing: body), privacy: .public)")
+        } else {
+            Log.bridge.debug("\(name, privacy: .public)")
+        }
+        #else
+        Log.bridge.debug("\(name, privacy: .public)")
+        #endif
         onEvent?(event)
     }
 
