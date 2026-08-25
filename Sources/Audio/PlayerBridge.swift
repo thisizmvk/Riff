@@ -516,6 +516,10 @@ final class PlayerBridge {
     ///   filter). Used by skip-from-queue / autoplay-from-queue paths
     ///   where the user expects the existing list to stay stable.
     func play(item: MediaItem, clearQueue: Bool = true) async {
+        // Attribution line: every play() is a page NAVIGATION (reload).
+        // In a log capture, a reload-per-advance pattern traces back to
+        // whoever called this — pair with the "ready" events.
+        Log.bridge.debug("play(item:) id=\(item.id, privacy: .public) clearQueue=\(clearQueue, privacy: .public)")
         // Archive the outgoing track before we overwrite `currentTrack`.
         // Without this, an explicit click (search row, home carousel,
         // Up Next row) never reaches the archive branch in
@@ -1248,8 +1252,25 @@ final class PlayerBridge {
             }
         }
 
-        // 3. Plain head of upNext (shuffle off / no server shuffle
-        //    candidate). clearQueue:false keeps the rest stable.
+        // 3a. Page-driven radio with a mirrored head → advance via the
+        //     PAGE's own next control. A play(item:) here would
+        //     location.href-navigate: a full page reload that
+        //     RE-ROLLS the radio (non-deterministic per fetch), so
+        //     every Next press rebuilt a brand-new queue — "queue
+        //     playback looks odd". Native next advances within the
+        //     exact queue we're mirroring: no reload, no re-seed, and
+        //     the mirrored head is what plays.
+        if isPageDrivenContext,
+           let head = upNext.first(where: { $0.id != currentId }),
+           !queue.isUserQueued(videoId: head.id) {
+            Log.bridge.debug("next() → page-native advance (mirrored head=\(head.id, privacy: .public))")
+            userClickedAt = Date()   // user intent; don't let enforcement misread the jump
+            await eval("window.musicBridge.next()")
+            return
+        }
+
+        // 3b. Plain head of upNext (deterministic contexts).
+        //     clearQueue:false keeps the rest stable.
         if let head = upNext.first(where: { $0.id != currentId }) {
             await play(item: head, clearQueue: false)
             return
