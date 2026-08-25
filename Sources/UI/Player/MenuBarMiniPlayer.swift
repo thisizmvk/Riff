@@ -89,6 +89,30 @@ struct MenuBarMiniPlayer: View {
                 Spacer()
             }
 
+            // Volume — compact slider so the menu-bar popover can adjust
+            // loudness without opening the main window.
+            HStack(spacing: 8) {
+                Image(systemName: env.player.volume == 0 ? "speaker.slash.fill"
+                                   : env.player.volume < 0.5 ? "speaker.wave.1.fill"
+                                   : "speaker.wave.2.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14)
+                Slider(
+                    value: Binding(
+                        get: { env.player.volume },
+                        set: { v in Task { await env.player.setVolume(v) } }
+                    ),
+                    in: 0...1
+                )
+                .controlSize(.mini)
+                Image(systemName: "speaker.wave.3.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 14)
+            }
+            .accessibilityLabel("Volume")
+
             // Chip strip (Tune / mood chips returned by /next). Only
             // rendered when YT sent chips for the current watch
             // context. Compact horizontal scroll so a large cloud

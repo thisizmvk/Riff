@@ -48,6 +48,10 @@ struct NowPlayingView: View {
     /// the player with large, centered (synced) lyrics over the
     /// adaptive backdrop. Apple Music's dedicated lyrics view.
     @State private var lyricsFullscreen: Bool = false
+    /// Hover state for the now-playing artist link (subtitle).
+    @State private var artistLinkHover: Bool = false
+    /// Volume level to restore when the speaker icon un-mutes.
+    @State private var preMuteVolume: Double = 1.0
 
     enum BottomTab: String, CaseIterable, Identifiable {
         case upNext = "Up Next"
@@ -234,10 +238,22 @@ struct NowPlayingView: View {
                             .accessibilityLabel("Metadata edited")
                     }
                 }
-                Text(displayedSubtitle(track: track))
-                    .font(.system(size: 14))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .lineLimit(1)
+                Button {
+                    env.navigateToArtist(
+                        name: artistName(track: track),
+                        artistId: track?.artistId
+                    )
+                } label: {
+                    Text(displayedSubtitle(track: track))
+                        .font(.system(size: 14))
+                        .foregroundStyle(.white.opacity(artistLinkHover ? 1.0 : 0.7))
+                        .underline(artistLinkHover)
+                        .lineLimit(1)
+                }
+                .buttonStyle(.plain)
+                .onHover { artistLinkHover = $0 }
+                .help("Go to artist")
+                .accessibilityLabel("Go to artist \(artistName(track: track))")
             }
             .padding(.horizontal, 32)
             .contextMenu { nowPlayingMenuItems }
@@ -246,6 +262,9 @@ struct NowPlayingView: View {
                 .frame(maxWidth: 480)
             playbackControls
                 .padding(.top, 4)
+            volumeBar
+                .frame(maxWidth: 300)
+                .padding(.top, 2)
 
             Spacer()
         }
@@ -374,8 +393,15 @@ struct NowPlayingView: View {
     // MARK: - Scrubber
 
     private var scrubber: some View {
-        let duration = max(env.player.duration, 0.001)
-        let displayed = scrubbing ?? env.player.elapsed
+        // Sanitize against NaN/±inf. `<video>.duration` is NaN until a new
+        // track's metadata loads, and Swift's `max(NaN, x)` returns NaN
+        // (NaN fails every comparison) — so `0...duration` would trap with
+        // "Range requires lowerBound <= upperBound". Never let a non-finite
+        // value reach the Range or the Slider binding.
+        let rawDuration = env.player.duration
+        let duration = (rawDuration.isFinite && rawDuration > 0) ? rawDuration : 0.001
+        let rawElapsed = scrubbing ?? env.player.elapsed
+        let displayed = min(max(rawElapsed.isFinite ? rawElapsed : 0, 0), duration)
         return VStack(spacing: 6) {
             ScrubberSlider(
                 value: Binding(
@@ -491,6 +517,46 @@ struct NowPlayingView: View {
             addToPlaylistMenu
             moreMenu
         }
+    }
+
+    /// Volume bar under the transport controls — the full player had no
+    /// in-window volume control (only the mini-player slider and the
+    /// ⌘↑/⌘↓ nudge shortcuts). Speaker icon click toggles mute,
+    /// restoring the pre-mute level rather than snapping to 100%.
+    private var volumeBar: some View {
+        HStack(spacing: 8) {
+            Button {
+                if env.player.volume > 0 {
+                    preMuteVolume = env.player.volume
+                    Task { await env.player.setVolume(0) }
+                } else {
+                    Task { await env.player.setVolume(preMuteVolume > 0 ? preMuteVolume : 1.0) }
+                }
+            } label: {
+                Image(systemName: env.player.volume == 0 ? "speaker.slash.fill"
+                                   : env.player.volume < 0.5 ? "speaker.wave.1.fill"
+                                   : "speaker.wave.2.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .frame(width: 18)
+            }
+            .buttonStyle(.plain)
+            .help(env.player.volume == 0 ? "Unmute" : "Mute")
+            Slider(
+                value: Binding(
+                    get: { env.player.volume },
+                    set: { v in Task { await env.player.setVolume(v) } }
+                ),
+                in: 0...1
+            )
+            .controlSize(.mini)
+            .tint(.white.opacity(0.8))
+            Image(systemName: "speaker.wave.3.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(.white.opacity(0.45))
+                .frame(width: 18)
+        }
+        .accessibilityLabel("Volume")
     }
 
     /// Sleep-timer menu. Shows the running countdown when armed (mm:ss),
@@ -834,6 +900,30 @@ struct NowPlayingView: View {
                     .buttonStyle(.plain)
                     .help("Save these tracks as a new playlist")
                 }
+                // "Clear" — empties Up Next (user + server regions).
+                // The playing track is unaffected; for radio, YT's
+                // autoplay continues, matching YT Music's own
+                // clear-queue behavior.
+                if !env.player.upNext.isEmpty {
+                    Button {
+                        Task { await env.player.clearUpNext() }
+                        env.showToast("Queue cleared")
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "xmark.circle")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("Clear")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color.white.opacity(0.06))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove all upcoming tracks")
+                }
                 // "✨ Build" — opens the AI Queue Builder sheet.
                 // Discoverable but unobtrusive: same chip shape as
                 // Save / Tune, sparkles icon hints at the AI nature.
@@ -903,55 +993,100 @@ struct NowPlayingView: View {
             let upcoming = upcomingList(currentId: currentId).filter {
                 !$0.title.trimmingCharacters(in: .whitespaces).isEmpty
             }
-            if history.isEmpty && upcoming.isEmpty {
-                emptyHint(emptyHintText)
-            } else {
-                // Recently played ABOVE — standard queue layout
-                // (YT Music / Apple Music): history at the top, the
-                // most-recent track adjacent to the Up Next divider,
-                // then Up Next below. Capped by default; "Show all"
-                // reveals the full session log. Only in the default
-                // lens (a tuned variant's curation isn't a history).
-                if !history.isEmpty, isDefaultLens {
-                    HStack(spacing: 6) {
-                        Text("Recently played")
-                            .font(.system(size: 10, weight: .semibold))
-                            .textCase(.uppercase)
-                            .tracking(1.2)
-                            .foregroundStyle(.white.opacity(0.45))
-                        Spacer()
-                        if history.count > Self.historyDefaultLimit {
-                            Button(historyExpanded ? "Show fewer" : "Show all (\(history.count))") {
-                                historyExpanded.toggle()
-                            }
-                            .buttonStyle(.plain)
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.7))
-                        }
-                    }
-                    .padding(.horizontal, 4)
-                    // Chronological (oldest → newest) so the most
-                    // recently-played track sits at the BOTTOM of the
-                    // section, right above "Up next". Capped view keeps
-                    // the last N (closest to now).
-                    let shown = historyExpanded
-                        ? history
-                        : Array(history.suffix(Self.historyDefaultLimit))
-                    queueList(shown, faded: true)
-                    Divider().background(Color.white.opacity(0.08))
-                        .padding(.vertical, 4)
-                }
-                if !upcoming.isEmpty {
-                    Text(upcomingHeader)
+            let showRadioHint = upcoming.isEmpty
+                && env.player.isRadioContext
+                && currentId != nil
+            // Radio: anchor the compact autoplay banner at the TOP of the
+            // pane (where a queue would be) so it reads as the "up next"
+            // state, instead of floating in the gap under a short
+            // Recently Played list. Recently Played follows beneath it.
+            if showRadioHint {
+                radioAutoplayHint
+            }
+            // Recently played — the session log. Capped by default;
+            // "Show all" reveals the rest. Default lens only (a tuned
+            // variant's curation isn't a history).
+            if !history.isEmpty, isDefaultLens {
+                HStack(spacing: 6) {
+                    Text("Recently played")
                         .font(.system(size: 10, weight: .semibold))
                         .textCase(.uppercase)
                         .tracking(1.2)
                         .foregroundStyle(.white.opacity(0.45))
-                        .padding(.horizontal, 4)
-                    queueList(upcoming, faded: false, reorderable: true)
+                    Spacer()
+                    if history.count > Self.historyDefaultLimit {
+                        Button(historyExpanded ? "Show fewer" : "Show all (\(history.count))") {
+                            historyExpanded.toggle()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.7))
+                    }
+                }
+                .padding(.horizontal, 4)
+                // Chronological (oldest → newest) so the most
+                // recently-played track sits at the BOTTOM of the
+                // section, right above "Up next". Capped view keeps
+                // the last N (closest to now).
+                let shown = historyExpanded
+                    ? history
+                    : Array(history.suffix(Self.historyDefaultLimit))
+                queueList(shown, faded: true)
+                // Divider only when an Up Next list follows — otherwise a
+                // trailing divider dangles under radio/empty states.
+                if !upcoming.isEmpty {
+                    Divider().background(Color.white.opacity(0.08))
+                        .padding(.vertical, 4)
                 }
             }
+            if !upcoming.isEmpty {
+                Text(upcomingHeader)
+                    .font(.system(size: 10, weight: .semibold))
+                    .textCase(.uppercase)
+                    .tracking(1.2)
+                    .foregroundStyle(.white.opacity(0.45))
+                    .padding(.horizontal, 4)
+                queueList(upcoming, faded: false, reorderable: true)
+            }
+            // Nothing to show and not a radio context → neutral empty hint.
+            if history.isEmpty && upcoming.isEmpty && !showRadioHint {
+                emptyHint(emptyHintText)
+            }
         }
+    }
+
+    /// Shown in the Up Next tab for radio contexts, where we deliberately
+    /// don't display an upcoming queue: a radio's next tracks are
+    /// non-deterministic (the WebView plays its own radio, which an
+    /// independent /next call can't reproduce), so any list we drew would
+    /// not match what actually plays. Truthful placeholder until Phase 2
+    /// mirrors the page's real queue. Explicit Play next / Add to queue
+    /// items still appear above this (they live in the user region).
+    private var radioAutoplayHint: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(.white.opacity(0.7))
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Autoplay radio")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                Text("Next tracks are chosen automatically as the station plays. Use “Play next” or “Add to queue” to line up specific songs.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(Color.white.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+        )
+        .padding(.horizontal, 4)
     }
 
     /// Returns the upcoming list excluding the currently-playing track.
@@ -1831,10 +1966,14 @@ struct NowPlayingView: View {
                             .accessibilityLabel("Metadata edited")
                     }
                 }
-                Text(env.displaySubtitle(for: item))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .lineLimit(1)
+                // Artist line is its own click target (Spotify-style):
+                // clicking it opens the artist page instead of playing
+                // the row. Button-inside-row wins the hit test over the
+                // row's tap gesture, so the rest of the row still plays.
+                QueueArtistLink(
+                    label: env.displaySubtitle(for: item),
+                    item: item
+                )
             }
             Spacer()
             if isSmartShuffleInjected {
@@ -1886,12 +2025,65 @@ struct NowPlayingView: View {
         return segments.joined(separator: " · ")
     }
 
+    /// Best-effort artist name for the now-playing artist link. Prefers a
+    /// local override; otherwise parses the subtitle by stripping a
+    /// leading media-type token ("Song", "Video", …) and taking the first
+    /// remaining segment. Used as the search fallback name when the track
+    /// carries no artistId. Empty only when the subtitle is empty.
+    private func artistName(track: PlayerBridge.Track?) -> String {
+        guard let track else { return "" }
+        if let a = env.trackOverrides.overriddenArtist(for: track.videoId) { return a }
+        let typeTokens: Set<String> = [
+            "song", "video", "album", "single", "ep",
+            "playlist", "artist", "episode", "podcast"
+        ]
+        let segments = track.subtitle
+            .split(whereSeparator: { $0 == "·" || $0 == "•" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return segments.first(where: { !typeTokens.contains($0.lowercased()) })
+            ?? segments.first
+            ?? ""
+    }
+
     private func emptyHint(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 12))
             .foregroundStyle(.white.opacity(0.75))
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.vertical, 12)
+    }
+}
+
+/// Clickable artist line inside a queue row. Hover underlines +
+/// brightens; click opens the artist page (by id when the row carries
+/// one, else name-resolved via search — see `navigateToArtist`). The
+/// name passed for resolution is the first subtitle segment (artist
+/// comes first in "Artist · Album · Year").
+private struct QueueArtistLink: View {
+    @Environment(AppEnvironment.self) private var env
+    let label: String
+    let item: MediaItem
+    @State private var hovering = false
+
+    var body: some View {
+        Button {
+            let name = label
+                .split(whereSeparator: { $0 == "·" || $0 == "•" })
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .first(where: { !$0.isEmpty }) ?? label
+            env.navigateToArtist(name: name, artistId: item.artistId)
+        } label: {
+            Text(label)
+                .font(.system(size: 10))
+                .foregroundStyle(.white.opacity(hovering ? 1.0 : 0.75))
+                .underline(hovering)
+                .lineLimit(1)
+        }
+        .buttonStyle(.plain)
+        .onHover { hovering = $0 }
+        .help("Go to artist")
+        .accessibilityLabel("Go to artist: \(label)")
     }
 }
 

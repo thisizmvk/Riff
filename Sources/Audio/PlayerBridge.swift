@@ -64,6 +64,21 @@ final class PlayerBridge {
     /// the right Up Next queue when playing inside a playlist (without it,
     /// /next returns radio-style suggestions instead of the playlist's tracks).
     @ObservationIgnored private var currentPlaylistId: String?
+    /// True when the current playback context is an auto-generated radio
+    /// (no deterministic playlist — either no `list=` at all or a radio
+    /// prefix like `RDAMVM…`/`RD…`). Radio queues are non-deterministic:
+    /// the WebView plays its OWN radio, which an independent `/next` call
+    /// cannot reproduce (ytmusicapi: "get a radio playlist (changes each
+    /// time)"). So for radio we do NOT display a separately-fetched queue
+    /// that wouldn't match what actually plays — the UI shows an autoplay
+    /// hint instead. Deterministic contexts (albums, user playlists) DO
+    /// match and keep their real queue. Reads an ObservationIgnored field,
+    /// so views should re-read it alongside an observed one (e.g. upNext),
+    /// which is exactly how the queue panel consumes it.
+    var isRadioContext: Bool {
+        guard let plid = currentPlaylistId, !plid.isEmpty else { return true }
+        return plid.hasPrefix("RD")
+    }
     /// The chip the user last picked from the tune-chip popover, or nil
     /// when no chip is active. Threaded into every `/next` fetch inside
     /// the current watch context so autoplaying past track 1 doesn't
@@ -722,7 +737,20 @@ final class PlayerBridge {
                 // row. Blocked-artist filtering happens before the
                 // handoff so blocked rows never enter upNext.
                 let curId = self.currentTrack?.videoId
-                let serverItems = fetched.filter { item in
+                // PHASE 1 (interim): radio contexts are non-deterministic —
+                // the WebView plays its OWN radio, which this independent
+                // /next call can't reproduce (docs: "changes each time").
+                // Displaying that mismatched queue is exactly what produced
+                // "random songs". For radio we clear the server region and
+                // let the page's native autoplay drive; the UI shows an
+                // autoplay hint. Explicit user-queued items (Play Next /
+                // Add to queue) stay in the user region and are still
+                // honored via the pending-URL + reconciliation path.
+                // Deterministic contexts (albums, playlists) DO match, so
+                // they populate as before. (Phase 2 will mirror the page's
+                // real queue and restore a radio Up Next that's correct.)
+                let isRadio = (playlistId?.hasPrefix("RD") ?? true)
+                let serverItems: [MediaItem] = isRadio ? [] : fetched.filter { item in
                     item.id != curId && !self.shouldBlock(item)
                 }
                 self.queue.replaceServerRegion(serverItems)
@@ -1397,6 +1425,16 @@ final class PlayerBridge {
         await play(item: item, clearQueue: false)
     }
 
+    /// "Clear" button on the Up Next header. Empties both queue regions
+    /// (playing track unaffected) and resyncs the JS pending-next URL so
+    /// end-of-track doesn't navigate to a head that no longer exists —
+    /// with an empty queue the sync pushes "" and YT's own autoplay
+    /// takes over, matching YT Music's clear-queue behavior.
+    func clearUpNext() async {
+        queue.clearQueue()
+        await syncPendingNextURL()
+    }
+
     func removeFromQueue(videoId: String) async {
         // QueueManager.remove updates the region boundary if the
         // removed row was inside the user region — no separate
@@ -1739,34 +1777,17 @@ final class PlayerBridge {
                         }
                     }
                 } else {
-                    // JS is armed to navigate to `head`. Trust it, but
-                    // VERIFY: if the head is an explicit user-queued
-                    // item ("Play next" / album / add-to-queue), the
-                    // user's intent must win the race against YT's
-                    // native autoplay. Schedule a check — if `head`
-                    // hasn't played after 2s (it would have been
-                    // popped from upNext by consumeUpTo on its
-                    // trackChanged), JS lost the race and Swift
-                    // overrides. Gated on `isUserQueued` so radio
-                    // continuation (which YT handles fine) never
-                    // triggers a spurious override.
+                    // JS is armed to navigate to the displayed head via
+                    // the pending URL. Trust it here — but the
+                    // AUTHORITATIVE WYSIWYG enforcement lives in the
+                    // trackChanged handler, not here: YT Music's MSE
+                    // pipeline frequently does NOT emit a reliable ENDED
+                    // (see player-bridge.js header), so this branch may
+                    // never run for a radio advance. Whatever ends up
+                    // playing surfaces as a trackChanged, and that's
+                    // where we reconcile against the shown queue.
                     pendingNextURLArmed = false
-                    if let head, queue.isUserQueued(videoId: head.id) {
-                        let expectedId = head.id
-                        Task { [weak self] in
-                            try? await Task.sleep(nanoseconds: 2_000_000_000)
-                            guard let self else { return }
-                            // Still queued ⇒ it never played ⇒ JS lost
-                            // the race to YT autoplay. Override now.
-                            if self.upNext.contains(where: { $0.id == expectedId }),
-                               self.currentTrack?.videoId != expectedId,
-                               let item = self.upNext.first(where: { $0.id == expectedId }) {
-                                Log.bridge.debug(".ended → verify: \(expectedId, privacy: .public) never played; Swift overriding")
-                                await self.play(item: item, clearQueue: false)
-                            }
-                        }
-                    }
-                    Log.bridge.debug(".ended → JS armed; verify scheduled=\(head.map { self.queue.isUserQueued(videoId: $0.id) } ?? false, privacy: .public)")
+                    Log.bridge.debug(".ended → JS armed via pending URL; WYSIWYG reconciled in trackChanged")
                 }
             }
         case .progress(let t, let d):
@@ -1779,8 +1800,13 @@ final class PlayerBridge {
             if inGrace, t > 5 {
                 return
             }
-            elapsed = t
-            duration = d
+            // Sanitize before publishing. `<video>.duration` is NaN until a
+            // new track's metadata loads and can report ±inf on edge builds;
+            // a non-finite value poisons every scrubber Range/Slider
+            // downstream (0...NaN traps). Store 0 in that window — the UI
+            // treats a 0/unknown duration as "not ready yet".
+            elapsed = t.isFinite ? t : 0
+            duration = (d.isFinite && d > 0) ? d : 0
             // Snapshot for "Continue where you left off" — rate-limited
             // to one write per `snapshotEverySeconds` so we're not
             // writing UserDefaults every 500 ms.
@@ -1792,33 +1818,63 @@ final class PlayerBridge {
             // progress tick after the threshold.
             prefetchNextArtworkIfDue()
         case .trackChanged(let id, let playlistId, let title, let artist, let art):
-            // Two-region model: the just-arrived track lives
-            // somewhere in upNext (typically the head after natural
-            // progression, but potentially further down if the user
-            // tapped a row to skip ahead). Pop it AND everything
-            // above it — matching YT Music's "jump to row" semantic
-            // where skipped rows are discarded. `consumeUpTo`
-            // returns the discarded items so we could archive them
-            // to played history if we wanted; for now we just drop
-            // them (a jumped-over track wasn't really "played").
-            if upNext.contains(where: { $0.id == id }) {
-                _ = queue.consumeUpTo(videoId: id)
-            }
-            // Always resync the pending URL after a track change:
-            // page navigations reset window.__riffPendingNextUrl
-            // (new page = new window), so we have to push the next
-            // user-queued URL on every fresh load. Cheap — one JS
-            // eval that's effectively a no-op when nothing's queued.
-            Task { await syncPendingNextURL() }
-            // Time-gated dedupe. Within 30s of a play(item:), we trust the
-            // user-clicked metadata over JS-side reports for the same
-            // videoId — catches pre-roll ads (which all happen in the
-            // first ~10s). After the grace window, we trust JS reports —
-            // catches autoplay advances where YT Music's SPA may keep the
-            // URL videoId stable but advance mediaSession.metadata.
             let sameVideoId = currentTrack?.videoId == id
             let titleChanged = currentTrack?.title != title
             let withinClickGrace = Date().timeIntervalSince(userClickedAt) < Self.userClickGraceSeconds
+
+            // STRICT WYSIWYG enforcement for autoplay advances.
+            //
+            // The next track that plays MUST be the HEAD of the queue
+            // we're showing. YT Music's native autoplay is an
+            // independent source — after a user-queued song it continues
+            // THAT song's radio, which is unrelated to the server region
+            // we're displaying — so on a natural advance it can land on:
+            //   • a track nowhere in our list ("random song"), or
+            //   • a track DEEPER in our list, skipping the head.
+            // Both violate "what you see is what plays next"; we snap to
+            // the shown head instead. This is the authoritative guard:
+            // YT's MSE pipeline frequently does NOT emit a reliable ENDED
+            // (see player-bridge.js header), so the pending-URL nav in
+            // the .ended handler can't be trusted to fire — but whatever
+            // actually plays ALWAYS surfaces here as a trackChanged.
+            //
+            // Guards make this fire ONLY on genuine autoplay divergence,
+            // never on legitimate navigation:
+            //   • !sameVideoId — re-poll / same-track metadata churn.
+            //   • !withinClickGrace — inside 30s of a deliberate
+            //     play(item:) we're seeing the user's own click, a
+            //     jumped-to row (skipTo routes through play, arming the
+            //     grace), or a pre-roll ad (distinct videoId, first ~10s).
+            //   • head exists AND head.id != id — the arrival isn't the
+            //     shown head. If it IS the head, this is normal
+            //     progression: fall through and consume it.
+            // Evaluated BEFORE consumeUpTo so a deep jump is measured
+            // against the REAL head, not a post-consume one. Converges in
+            // one hop: the override plays the head, whose trackChanged is
+            // sameVideoId and falls through. Deliberately NOT the old
+            // userQueuedIds shadow-set reconciliation (which misfired on
+            // legitimate plays — "song plays 2-5s then jumps"); the
+            // discriminator here is the visible queue itself.
+            if !sameVideoId, !withinClickGrace,
+               let head = upNext.first(where: { $0.id != currentTrack?.videoId }),
+               head.id != id {
+                Log.bridge.debug("trackChanged: arrived \(id, privacy: .public) ≠ shown head \(head.id, privacy: .public); autoplay diverged → overriding to head")
+                Task { [weak self] in await self?.play(item: head, clearQueue: false) }
+                return
+            }
+
+            // Two-region model: the just-arrived track lives somewhere in
+            // upNext (the head after natural progression, or further down
+            // if the user tapped a row to skip ahead within click-grace).
+            // Pop it AND everything above it — matching YT Music's
+            // "jump to row" semantic where skipped rows are discarded.
+            if upNext.contains(where: { $0.id == id }) {
+                _ = queue.consumeUpTo(videoId: id)
+            }
+            // Always resync the pending URL after a track change: page
+            // navigations reset window.__riffPendingNextUrl (new page =
+            // new window), so we re-push the next URL on every load.
+            Task { await syncPendingNextURL() }
 
             if sameVideoId && !titleChanged {
                 // Identical event (re-poll). Just refresh duration if it's

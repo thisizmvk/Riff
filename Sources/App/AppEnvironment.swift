@@ -546,6 +546,27 @@ final class AppEnvironment {
         navigate(to: item)
     }
 
+    /// Open an artist's page. Prefers a known browseId; when the source
+    /// (e.g. the now-playing track) doesn't carry one — common for radio
+    /// tracks whose `/next` row lacked an artist nav endpoint — resolves
+    /// by name via a Search("Artists") and opens the first artist hit.
+    /// No-ops when there's neither an id nor a usable name.
+    func navigateToArtist(name: String, artistId: String?) {
+        if let id = artistId, !id.isEmpty {
+            navigateToBrowseId(id, kind: .artist, fallbackTitle: name)
+            return
+        }
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        Task { [innerTube] in
+            let results = (try? await innerTube.search(query: trimmed, filter: .artists)) ?? []
+            guard let artist = results.first(where: { $0.kind == .artist }) else { return }
+            await MainActor.run {
+                self.navigateToBrowseId(artist.id, kind: .artist, fallbackTitle: artist.title)
+            }
+        }
+    }
+
     /// Cached user-owned playlists for "Add to Playlist" menus. Loaded on
     /// demand when a UI surface needs them; refreshed whenever the user
     /// signs in/out.
