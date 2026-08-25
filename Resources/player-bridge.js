@@ -514,31 +514,50 @@
         postEvent({ event: "diagnostic", msg: "queueSnapshot probe [" + stage + "]: " + (extra || "") });
     }
 
+    // Find the live queue slice. YT's builds move it around:
+    //   - classic: ytmusic-app.store.getState().queue
+    //   - proxy-wrapped app (observed 2026-08: appKeys show inst/
+    //     controllerProxy, no store): the real instance hides behind
+    //     .inst, and/or the player elements expose .queue directly.
+    // Returns { q, via } — q has items/automixItems when found.
+    function resolveQueueSlice() {
+        const app = document.querySelector("ytmusic-app");
+        if (app) {
+            const store = app.store || (app.inst && app.inst.store);
+            if (store && typeof store.getState === "function") {
+                const st = store.getState();
+                if (st && st.queue) return { q: st.queue, via: "app.store" };
+            }
+        }
+        for (const sel of ["ytmusic-player-bar", "ytmusic-player-queue"]) {
+            const el = document.querySelector(sel);
+            const q = el && el.queue;
+            if (!q) continue;
+            if (q.items || q.automixItems) return { q: q, via: sel + ".queue" };
+            if (typeof q.getState === "function") {
+                const st = q.getState();
+                if (st && (st.items || st.automixItems)) return { q: st, via: sel + ".queue.getState()" };
+                if (st && st.queue) return { q: st.queue, via: sel + ".queue.getState().queue" };
+            }
+            if (q.store && typeof q.store.getState === "function") {
+                const st = q.store.getState();
+                if (st && (st.items || st.automixItems)) return { q: st, via: sel + ".queue.store(flat)" };
+                if (st && st.queue) return { q: st.queue, via: sel + ".queue.store" };
+            }
+            // Unknown queue-object shape — report its keys so the next
+            // capture tells us how to read it.
+            reportQueueShapeOnce("queue-prop-unknown-shape",
+                sel + ".queue keys=" + Object.keys(q).slice(0, 25).join("|"));
+        }
+        return { q: null, via: "none" };
+    }
+
     function emitQueueSnapshot() {
         try {
-            const app = document.querySelector("ytmusic-app");
-            if (!app) { reportQueueShapeOnce("no-app-element"); return; }
-            if (!app.store) {
-                // Some builds hang the store off the player page or
-                // expose only dispatch — enumerate likely hosts.
-                const alt = ["ytmusic-player-bar", "ytmusic-player-page", "ytmusic-player-queue"]
-                    .map((sel) => {
-                        const el = document.querySelector(sel);
-                        return sel + "=" + (el ? (el.store ? "store" : (el.queue ? "queue-prop" : "el")) : "none");
-                    }).join(", ");
-                reportQueueShapeOnce("no-store", "appKeys(sample)=" +
-                    Object.keys(app).slice(0, 25).join("|") + "; alts: " + alt);
-                return;
-            }
-            if (typeof app.store.getState !== "function") {
-                reportQueueShapeOnce("no-getState", "storeKeys=" + Object.keys(app.store).slice(0, 20).join("|"));
-                return;
-            }
-            const state = app.store.getState();
-            const q = state ? state.queue : null;
+            const resolved = resolveQueueSlice();
+            const q = resolved.q;
             if (!q) {
-                reportQueueShapeOnce("no-queue-slice", "stateKeys=" +
-                    (state ? Object.keys(state).slice(0, 30).join("|") : "state-null"));
+                reportQueueShapeOnce("no-queue-anywhere");
                 return;
             }
             const unwrap = (it) => {
@@ -546,10 +565,13 @@
                 if (it.playlistPanelVideoRenderer) return it.playlistPanelVideoRenderer;
                 const w = it.playlistPanelVideoWrapperRenderer;
                 if (w && w.primaryRenderer) return w.primaryRenderer.playlistPanelVideoRenderer || null;
+                // Flat shape (queue-service items carry videoId directly).
+                if (typeof it.videoId === "string") return it;
                 return null;
             };
             const text = (t) => {
                 if (!t) return "";
+                if (typeof t === "string") return t;
                 if (t.runs) return t.runs.map((r) => r.text).join("");
                 return t.simpleText || "";
             };
@@ -571,7 +593,8 @@
             if (!rows.length) {
                 const first = source.length ? source[0] : null;
                 reportQueueShapeOnce("zero-rows",
-                    "queueKeys=" + Object.keys(q).slice(0, 20).join("|") +
+                    "via=" + resolved.via +
+                    "; queueKeys=" + Object.keys(q).slice(0, 20).join("|") +
                     "; items=" + (q.items ? q.items.length : "nil") +
                     "; automix=" + (q.automixItems ? q.automixItems.length : "nil") +
                     "; firstItemKeys=" + (first ? Object.keys(first).slice(0, 10).join("|") : "none"));
@@ -580,7 +603,7 @@
             const sig = rows.map((r) => r.videoId + (r.selected ? "*" : "")).join(",");
             if (sig === window.__riffQueueSig) return;
             window.__riffQueueSig = sig;
-            reportQueueShapeOnce("ok", rows.length + " rows");
+            reportQueueShapeOnce("ok", rows.length + " rows via " + resolved.via);
             postEvent({ event: "queueSnapshot", items: rows });
         } catch (e) {
             if (!window.__riffQueueSnapErrLogged) {
