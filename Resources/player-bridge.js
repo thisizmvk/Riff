@@ -1027,6 +1027,14 @@
     };
     window.__riffNorm = norm;
 
+    // ---- Debug hooks ------------------------------------------------------
+    // Manual probes for Safari Web Inspector (debug builds expose the
+    // WebView there) and for the offline JS harness. Calling
+    // emitQueueSnapshot() by hand forces a fresh mirror emit; the sig
+    // dedup still applies, so clear window.__riffQueueSig first to
+    // force a re-emit of unchanged state.
+    window.__riffDebug = { emitQueueSnapshot: emitQueueSnapshot, resolveQueueSlice: resolveQueueSlice };
+
     // ---- Kick off ---------------------------------------------------------
 
     if (document.readyState === "loading") {

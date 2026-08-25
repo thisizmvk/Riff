@@ -122,8 +122,12 @@ final class QueueManager {
     /// play. Only items not already anywhere in `upNext` are added
     /// (dedupe against the whole queue, user + server).
     func extendServerRegion(_ serverItems: [MediaItem]) {
-        let existing = Set(upNext.map(\.id))
-        let fresh = serverItems.filter { !existing.contains($0.id) }
+        // Dedupe against the whole queue AND within the incoming batch
+        // itself (found by the fuzz harness: a batch repeating an id
+        // appended it twice, recreating the duplicate-id hazard that
+        // replaceServerRegion already guards).
+        var seen = Set(upNext.map(\.id))
+        let fresh = serverItems.filter { seen.insert($0.id).inserted }
         guard !fresh.isEmpty else { return }
         upNext.append(contentsOf: fresh)
         // userQueueCount unchanged — appends land in the server region.
