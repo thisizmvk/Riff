@@ -200,7 +200,10 @@
                 }
             } else {
                 if (window.__riffSafetyPollPaused && !window.__riffSafetyPollId) {
-                    window.__riffSafetyPollId = setInterval(() => emitTrackChanged("safety-poll"), 2000);
+                    window.__riffSafetyPollId = setInterval(() => {
+                        emitTrackChanged("safety-poll");
+                        emitQueueSnapshot();
+                    }, 2000);
                     window.__riffSafetyPollPaused = false;
                 }
                 if (window.__riffNorm && window.__riffNorm.tickPaused && window.__riffNorm.measuring) {
@@ -481,7 +484,70 @@
         // dedup gate in emitTrackChanged guards against redundant
         // emits when nothing changed). Cheap enough to leave running.
         if (!window.__riffSafetyPollId) {
-            window.__riffSafetyPollId = setInterval(() => emitTrackChanged("safety-poll"), 2000);
+            window.__riffSafetyPollId = setInterval(() => {
+                emitTrackChanged("safety-poll");
+                emitQueueSnapshot();
+            }, 2000);
+        }
+    }
+
+    // ---- Page-queue mirror (Phase 2 radio truth) ---------------------------
+    //
+    // Radio queues are non-deterministic, so the only correct Up Next
+    // for radio is the queue THE PAGE is actually playing. That lives in
+    // the ytmusic-app Polymer store: state.queue.items (+ automixItems,
+    // the autoplay extension). Items are wrapped renderers — either
+    // { playlistPanelVideoRenderer } directly or
+    // { playlistPanelVideoWrapperRenderer: { primaryRenderer: {...} } }
+    // (the wrapper carries counterpart/video-toggle variants).
+    //
+    // Emitted from the 2s safety poll, deduped by a videoId+selected
+    // signature so Swift only hears real changes. Failure is silent
+    // after one diagnostic — Swift keeps the Phase-1 banner as fallback.
+    function emitQueueSnapshot() {
+        try {
+            const app = document.querySelector("ytmusic-app");
+            const state = app && app.store && typeof app.store.getState === "function"
+                ? app.store.getState() : null;
+            const q = state ? state.queue : null;
+            if (!q) return;
+            const unwrap = (it) => {
+                if (!it) return null;
+                if (it.playlistPanelVideoRenderer) return it.playlistPanelVideoRenderer;
+                const w = it.playlistPanelVideoWrapperRenderer;
+                if (w && w.primaryRenderer) return w.primaryRenderer.playlistPanelVideoRenderer || null;
+                return null;
+            };
+            const text = (t) => {
+                if (!t) return "";
+                if (t.runs) return t.runs.map((r) => r.text).join("");
+                return t.simpleText || "";
+            };
+            const rows = [];
+            const source = (q.items || []).concat(q.automixItems || []);
+            for (const raw of source) {
+                const r = unwrap(raw);
+                if (!r || !r.videoId) continue;
+                const thumbs = (r.thumbnail && r.thumbnail.thumbnails) || [];
+                rows.push({
+                    videoId: r.videoId,
+                    title: text(r.title),
+                    byline: text(r.longBylineText) || text(r.shortBylineText),
+                    thumbnail: thumbs.length ? thumbs[thumbs.length - 1].url : "",
+                    selected: !!r.selected,
+                });
+                if (rows.length >= 80) break;   // cap payload; radio can run long
+            }
+            if (!rows.length) return;
+            const sig = rows.map((r) => r.videoId + (r.selected ? "*" : "")).join(",");
+            if (sig === window.__riffQueueSig) return;
+            window.__riffQueueSig = sig;
+            postEvent({ event: "queueSnapshot", items: rows });
+        } catch (e) {
+            if (!window.__riffQueueSnapErrLogged) {
+                window.__riffQueueSnapErrLogged = true;
+                postEvent({ event: "diagnostic", msg: "queueSnapshot failed: " + (e && e.message ? e.message : String(e)) });
+            }
         }
     }
 

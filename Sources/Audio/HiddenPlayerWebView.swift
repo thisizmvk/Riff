@@ -25,6 +25,22 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         /// jump to a user-queued "Play next" item before YT Music's
         /// natural autoplay kicks in.
         case ended
+        /// The page's OWN queue (ytmusic-app store: items + automixItems),
+        /// emitted by the JS safety poll whenever it changes. This is the
+        /// ground truth for radio contexts, whose queues are
+        /// non-deterministic and can't be reproduced by an independent
+        /// /next call. `selected == true` marks the currently-playing row.
+        case queueSnapshot(items: [PageQueueItem])
+    }
+
+    /// One row of the page's real queue, as mirrored from the ytmusic-app
+    /// store by player-bridge.js's emitQueueSnapshot.
+    struct PageQueueItem {
+        let videoId: String
+        let title: String
+        let byline: String
+        let thumbnailURL: URL?
+        let selected: Bool
     }
 
     override init() {
@@ -103,6 +119,20 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
             return .trackChanged(videoId: videoId, playlistId: playlistId, title: title, artist: artist, artwork: artwork)
         case "ended":
             return .ended
+        case "queueSnapshot":
+            guard let raw = body["items"] as? [[String: Any]], !raw.isEmpty else { return nil }
+            let items: [PageQueueItem] = raw.compactMap { dict in
+                guard let videoId = dict["videoId"] as? String, !videoId.isEmpty else { return nil }
+                return PageQueueItem(
+                    videoId: videoId,
+                    title: (dict["title"] as? String) ?? "",
+                    byline: (dict["byline"] as? String) ?? "",
+                    thumbnailURL: (dict["thumbnail"] as? String).flatMap(URL.init(string:)),
+                    selected: (dict["selected"] as? Bool) ?? false
+                )
+            }
+            guard !items.isEmpty else { return nil }
+            return .queueSnapshot(items: items)
         case "riffNavigatedTo":
             // Bookkeeping-only event so Swift can log JS-driven nav.
             // Commit-1 keeps this hooked while __riffPendingNextUrl

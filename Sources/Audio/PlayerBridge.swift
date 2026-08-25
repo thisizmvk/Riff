@@ -79,6 +79,13 @@ final class PlayerBridge {
         guard let plid = currentPlaylistId, !plid.isEmpty else { return true }
         return plid.hasPrefix("RD")
     }
+    /// True when the PAGE is the queue's source of truth: plain radio
+    /// with no Tune chip active. Here Riff mirrors the page's own queue
+    /// (Phase 2), never arms forced navigation, and skips WYSIWYG
+    /// enforcement (the mirror lags the page by up to a poll tick).
+    /// A chip-tuned queue is Riff-curated — the page knows nothing
+    /// about it — so chips keep the enforce-by-navigation model.
+    var isPageDrivenContext: Bool { isRadioContext && activeChip == nil }
     /// The chip the user last picked from the tune-chip popover, or nil
     /// when no chip is active. Threaded into every `/next` fetch inside
     /// the current watch context so autoplaying past track 1 doesn't
@@ -749,7 +756,10 @@ final class PlayerBridge {
                 // Deterministic contexts (albums, playlists) DO match, so
                 // they populate as before. (Phase 2 will mirror the page's
                 // real queue and restore a radio Up Next that's correct.)
-                let isRadio = (playlistId?.hasPrefix("RD") ?? true)
+                // Chip-tuned fetches are Riff-curated and DO populate
+                // (the page doesn't know the chip); only plain radio
+                // defers to the page mirror.
+                let isRadio = chip == nil && (playlistId?.hasPrefix("RD") ?? true)
                 let serverItems: [MediaItem] = isRadio ? [] : fetched.filter { item in
                     item.id != curId && !self.shouldBlock(item)
                 }
@@ -1360,7 +1370,7 @@ final class PlayerBridge {
         let curId = currentTrack?.videoId
         let head = upNext.first { $0.id != curId }
         let url: String
-        if let chosen = head {
+        if let chosen = head, queue.isUserQueued(videoId: chosen.id) || !isPageDrivenContext {
             // Playlist selection for the pending-next URL:
             //   - Head is user-queued (in the top region): they may
             //     have queued a song from an unrelated album; use
@@ -1383,7 +1393,12 @@ final class PlayerBridge {
             }
             url = watchURL(videoId: chosen.id, playlistId: plid)
         } else {
-            url = ""  // clear
+            // No head, OR the head is a mirrored radio row (Phase 2):
+            // the page's native autoplay will play that exact row on
+            // its own — arming a forced location.href navigation would
+            // reload the page on every track for zero gain (and race
+            // the native advance). Clear and let the page drive.
+            url = ""
         }
         Log.bridge.debug("syncPendingNextURL → \(url, privacy: .public)")
         // Mirror what we're pushing to JS so the ended handler can
@@ -1769,8 +1784,14 @@ final class PlayerBridge {
                 let head = upNext.first(where: { $0.id != curId })
                 if !pendingNextURLArmed {
                     // JS had nothing armed — YT's own autoplay is about
-                    // to fire. If the user queued something, play it.
-                    if let head {
+                    // to fire. Fallback-play the head ONLY when it's an
+                    // explicit user-queued item or a deterministic
+                    // (album/playlist) row. A mirrored radio row (Phase
+                    // 2) is deliberately un-armed: the page's native
+                    // autoplay is about to play that exact row itself,
+                    // and a Swift force-play would reload the page for
+                    // zero gain.
+                    if let head, queue.isUserQueued(videoId: head.id) || !isPageDrivenContext {
                         Task { [weak self] in
                             await self?.play(item: head, clearQueue: false)
                             Log.bridge.debug(".ended → Swift fallback played head=\(head.id, privacy: .public)")
@@ -1790,6 +1811,34 @@ final class PlayerBridge {
                     Log.bridge.debug(".ended → JS armed via pending URL; WYSIWYG reconciled in trackChanged")
                 }
             }
+        case .queueSnapshot(let items):
+            // PHASE 2 radio truth: mirror the page's OWN queue into the
+            // server region. Radio queues are non-deterministic — an
+            // independent /next fetch shows a different radio than the
+            // page plays — so the store snapshot is the only correct
+            // source. Deterministic contexts (albums/playlists) keep
+            // the /next fetch, whose rows are richer (album/artist ids),
+            // and chip-tuned queues are Riff-curated (page-unaware).
+            guard isPageDrivenContext else { break }
+            let curId = currentTrack?.videoId
+            // Upcoming = rows after the page's selected row; fall back
+            // to slicing after the current videoId when no row is
+            // marked (briefly true right after a navigation).
+            var upcomingRows = items
+            if let selIdx = items.lastIndex(where: { $0.selected }) {
+                upcomingRows = Array(items[items.index(after: selIdx)...])
+            } else if let curId, let curIdx = items.lastIndex(where: { $0.videoId == curId }) {
+                upcomingRows = Array(items[items.index(after: curIdx)...])
+            }
+            let mapped: [MediaItem] = upcomingRows
+                .filter { $0.videoId != curId }
+                .map {
+                    MediaItem(id: $0.videoId, kind: .song, title: $0.title,
+                              subtitle: $0.byline, thumbnailURL: $0.thumbnailURL)
+                }
+                .filter { !shouldBlock($0) }
+            queue.replaceServerRegion(mapped)
+            Log.bridge.debug("queueSnapshot → mirrored \(mapped.count) upcoming radio rows (of \(items.count) total)")
         case .progress(let t, let d):
             // Filter stale events that arrive in the window right after a
             // track change. YT Music's SPA can keep firing `timeupdate`
@@ -1855,7 +1904,18 @@ final class PlayerBridge {
             // userQueuedIds shadow-set reconciliation (which misfired on
             // legitimate plays — "song plays 2-5s then jumps"); the
             // discriminator here is the visible queue itself.
-            if !sameVideoId, !withinClickGrace,
+            // Radio scope guard (Phase 2): in a radio context with no
+            // user-queued items, the SHOWN queue is itself a mirror of
+            // the page's queue — the page is the source of truth and
+            // the mirror can lag it by up to one 2s poll tick. Enforcing
+            // the mirror against the page would chase our own tail
+            // (override → navigation → new radio → new mirror → …), so
+            // enforcement applies only when the user has explicitly
+            // queued something, or in deterministic (album/playlist)
+            // contexts where the shown queue is independently correct.
+            let wysiwygEnforceable = queue.userQueueCount > 0 || !isPageDrivenContext
+            if wysiwygEnforceable,
+               !sameVideoId, !withinClickGrace,
                let head = upNext.first(where: { $0.id != currentTrack?.videoId }),
                head.id != id {
                 Log.bridge.debug("trackChanged: arrived \(id, privacy: .public) ≠ shown head \(head.id, privacy: .public); autoplay diverged → overriding to head")
