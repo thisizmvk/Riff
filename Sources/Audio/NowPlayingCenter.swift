@@ -101,7 +101,10 @@ final class NowPlayingCenter {
             MPMediaItemPropertyArtist: artist,
             MPMediaItemPropertyPlaybackDuration: duration,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
-            MPNowPlayingInfoPropertyPlaybackRate: player.isPlaying ? 1.0 : 0.0,
+            // Real rate, not hardcoded 1.0 — with progress-only updates
+            // now skipped, the system extrapolates elapsed from this, and
+            // a podcast at 1.5× would drift visibly at the wrong rate.
+            MPNowPlayingInfoPropertyPlaybackRate: player.isPlaying ? player.playbackRate : 0.0,
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
         ]
         if let artwork, let cached = artworkCache[artwork.absoluteString] {

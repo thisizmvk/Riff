@@ -28,7 +28,12 @@ final class NowPlayingSnapshotWriter {
     // Threshold below which an elapsed-only delta is squelched. Below
     // 10s the widget's own date-aware timeline format handles the
     // tick visually; we don't need to re-write defaults for that.
-    private static let elapsedRewriteThresholdSec: TimeInterval = 10
+    // 60s, not 10: every threshold crossing triggers a
+    // WidgetCenter.reloadTimelines → a widget-extension render pass.
+    // At 10s that was ~6 reloads/min for a whole session, which also
+    // burns WidgetKit's daily reload budget; material changes (track,
+    // play state) still reload instantly via the delta check.
+    private static let elapsedRewriteThresholdSec: TimeInterval = 60
 
     private var lastWritten: NowPlayingSnapshot?
     private var lastWriteAt: Date = .distantPast

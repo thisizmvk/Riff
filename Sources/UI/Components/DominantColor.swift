@@ -10,19 +10,37 @@ import AppKit
 /// Results are cached by image URL so re-opening the same track
 /// doesn't re-sample. The sampling runs off the main actor.
 enum DominantColor {
-    private static var cache: [String: Color] = [:]
+    /// Bounded, MainActor-isolated cache. MainActor (not a bare static
+    /// var mutated from a nonisolated async function — a latent data
+    /// race under strict concurrency); capped so a long session can't
+    /// grow it unboundedly — insertion order approximates LRU well
+    /// enough for artwork accents.
+    @MainActor private static var cache: [String: Color] = [:]
+    @MainActor private static var cacheOrder: [String] = []
+    private static let cacheCap = 200
 
     /// Fetch + extract the accent color for `url`, or nil on failure.
     /// The fetch reuses `URLCache.shared` (same store AsyncImage
     /// warms), so on a cache hit this is near-instant.
     static func extract(from url: URL) async -> Color? {
-        if let hit = cache[url.absoluteString] { return hit }
+        if let hit = await MainActor.run(body: { cache[url.absoluteString] }) { return hit }
         var req = URLRequest(url: url)
         req.cachePolicy = .returnCacheDataElseLoad
         guard let (data, _) = try? await URLSession.shared.data(for: req),
               let image = NSImage(data: data) else { return nil }
         let color = Self.accentColor(from: image)
-        if let color { cache[url.absoluteString] = color }
+        if let color {
+            await MainActor.run {
+                if cache[url.absoluteString] == nil {
+                    cacheOrder.append(url.absoluteString)
+                    if cacheOrder.count > cacheCap {
+                        let evicted = cacheOrder.removeFirst()
+                        cache.removeValue(forKey: evicted)
+                    }
+                }
+                cache[url.absoluteString] = color
+            }
+        }
         return color
     }
 

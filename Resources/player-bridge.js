@@ -348,14 +348,22 @@
                 if (id) return id;
             } catch (_) { /* malformed; fall through */ }
         }
-        // 3. DOM scan for any list= link.
-        const link = document.querySelector('a[href*="list="]');
-        if (link) {
-            try {
-                const href = new URL(link.href, location.origin);
-                id = href.searchParams.get("list");
-                if (id) return id;
-            } catch (_) {}
+        // 3. DOM scan for any list= link — but ONLY while we don't have
+        // a sticky id yet. This attribute-substring selector walks the
+        // whole DOM, and since YT strips ?list= right after playback
+        // starts, an unconditional scan here ran on every 2s safety
+        // poll for the entire session. Once sticky is set, the scan
+        // can't tell us anything new (navigations reload the page and
+        // reset sticky anyway).
+        if (stickyPlaylistId === null) {
+            const link = document.querySelector('a[href*="list="]');
+            if (link) {
+                try {
+                    const href = new URL(link.href, location.origin);
+                    id = href.searchParams.get("list");
+                    if (id) return id;
+                } catch (_) {}
+            }
         }
         return null;
     }
@@ -585,7 +593,11 @@
                     videoId: r.videoId,
                     title: text(r.title),
                     byline: text(r.longBylineText) || text(r.shortBylineText),
-                    thumbnail: thumbs.length ? thumbs[thumbs.length - 1].url : "",
+                    // SMALLEST variant: these rows render at 36pt in the
+                    // queue list, and AsyncImage decodes at native size —
+                    // the largest variant would cost ~1MB of decoded
+                    // bitmap per row across up to 80 rows.
+                    thumbnail: thumbs.length ? thumbs[0].url : "",
                     selected: !!r.selected,
                 });
                 if (rows.length >= 80) break;   // cap payload; radio can run long
@@ -667,15 +679,26 @@
         // childList is overkill for this; the videodatachange event will
         // already fire on the new element, and we just need to grab the
         // new element's timeupdate.
+        // Debounced (500ms trailing): this SPA mutates near-continuously
+        // while playing, and running three querySelector lookups on every
+        // mutation batch kept the hidden WebView's JS runtime hot for the
+        // whole session. Element swaps we're catching here are rare and a
+        // half-second re-attach lag is invisible (the 2s safety poll and
+        // videodatachange cover the gap).
+        let riffReattachTimer = null;
         new MutationObserver(() => {
-            attachVideoListeners();
-            // Also rebind playerApi listeners if the playerApi instance
-            // changed (defensive — YT sometimes recreates the player on
-            // certain navigations).
-            const fresh = playerApi();
-            if (fresh && !fresh.__riffSubscribed) {
-                subscribeToPlayerApi(fresh);
-            }
+            if (riffReattachTimer !== null) return;
+            riffReattachTimer = setTimeout(() => {
+                riffReattachTimer = null;
+                attachVideoListeners();
+                // Also rebind playerApi listeners if the playerApi instance
+                // changed (defensive — YT sometimes recreates the player on
+                // certain navigations).
+                const fresh = playerApi();
+                if (fresh && !fresh.__riffSubscribed) {
+                    subscribeToPlayerApi(fresh);
+                }
+            }, 500);
         }).observe(document.documentElement, { childList: true, subtree: true });
         postEvent({ event: "ready" });
     }

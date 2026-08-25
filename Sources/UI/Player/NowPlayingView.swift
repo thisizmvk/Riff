@@ -9,7 +9,6 @@ import SwiftUI
 ///   - ESC dismisses
 struct NowPlayingView: View {
     @Environment(AppEnvironment.self) private var env
-    @State private var scrubbing: Double? = nil
     @State private var bottomTab: BottomTab = .upNext
     @State private var queueMode: QueueMode = .related
     /// Anchor for extrapolating `env.player.elapsed` between polls.
@@ -392,37 +391,13 @@ struct NowPlayingView: View {
 
     // MARK: - Scrubber
 
-    private var scrubber: some View {
-        // Sanitize against NaN/±inf. `<video>.duration` is NaN until a new
-        // track's metadata loads, and Swift's `max(NaN, x)` returns NaN
-        // (NaN fails every comparison) — so `0...duration` would trap with
-        // "Range requires lowerBound <= upperBound". Never let a non-finite
-        // value reach the Range or the Slider binding.
-        let rawDuration = env.player.duration
-        let duration = (rawDuration.isFinite && rawDuration > 0) ? rawDuration : 0.001
-        let rawElapsed = scrubbing ?? env.player.elapsed
-        let displayed = min(max(rawElapsed.isFinite ? rawElapsed : 0, 0), duration)
-        return VStack(spacing: 6) {
-            ScrubberSlider(
-                value: Binding(
-                    get: { displayed },
-                    set: { scrubbing = $0 }
-                ),
-                range: 0...duration,
-                onCommit: { value in
-                    scrubbing = nil
-                    Task { await env.player.seek(to: value / duration) }
-                }
-            )
-            HStack {
-                Text(format(time: displayed))
-                Spacer()
-                Text("-" + format(time: max(0, duration - displayed)))
-            }
-            .font(.system(size: 11, weight: .medium, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.75))
-        }
-    }
+    // Scrubber lives in its own View struct (ScrubberSection, end of
+    // file) — @Observable tracks property access per view body, and
+    // elapsed/duration mutate at ~4Hz. When this 2,100-line view read
+    // them directly, the ENTIRE body re-evaluated four times a second
+    // for the life of the player; isolated in a child, only the child
+    // re-renders per tick.
+    private var scrubber: some View { ScrubberSection() }
 
     /// Help-text label for the shuffle button, surfacing the Smart
     /// Shuffle state alongside regular shuffle so a hover hint tells
@@ -846,12 +821,6 @@ struct NowPlayingView: View {
         // VoiceOver reads the same intent, not the raw SF Symbol
         // name.
         .accessibilityLabel(help ?? systemName)
-    }
-
-    private func format(time: Double) -> String {
-        guard time.isFinite, time >= 0 else { return "0:00" }
-        let total = Int(time)
-        return String(format: "%d:%02d", total / 60, total % 60)
     }
 
     // MARK: - Tab content
@@ -2052,6 +2021,52 @@ struct NowPlayingView: View {
             .foregroundStyle(.white.opacity(0.75))
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.vertical, 12)
+    }
+}
+
+/// The scrubber + time labels, isolated from NowPlayingView so its
+/// ~4Hz elapsed/duration reads only re-render THIS view, not the
+/// 2,100-line parent body (see the `scrubber` accessor comment).
+private struct ScrubberSection: View {
+    @Environment(AppEnvironment.self) private var env
+    @State private var scrubbing: Double? = nil
+
+    var body: some View {
+        // Sanitize against NaN/±inf. `<video>.duration` is NaN until a new
+        // track's metadata loads, and Swift's `max(NaN, x)` returns NaN
+        // (NaN fails every comparison) — so `0...duration` would trap with
+        // "Range requires lowerBound <= upperBound". Never let a non-finite
+        // value reach the Range or the Slider binding.
+        let rawDuration = env.player.duration
+        let duration = (rawDuration.isFinite && rawDuration > 0) ? rawDuration : 0.001
+        let rawElapsed = scrubbing ?? env.player.elapsed
+        let displayed = min(max(rawElapsed.isFinite ? rawElapsed : 0, 0), duration)
+        return VStack(spacing: 6) {
+            ScrubberSlider(
+                value: Binding(
+                    get: { displayed },
+                    set: { scrubbing = $0 }
+                ),
+                range: 0...duration,
+                onCommit: { value in
+                    scrubbing = nil
+                    Task { await env.player.seek(to: value / duration) }
+                }
+            )
+            HStack {
+                Text(format(time: displayed))
+                Spacer()
+                Text("-" + format(time: max(0, duration - displayed)))
+            }
+            .font(.system(size: 11, weight: .medium, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.75))
+        }
+    }
+
+    private func format(time: Double) -> String {
+        guard time.isFinite, time >= 0 else { return "0:00" }
+        let total = Int(time)
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 

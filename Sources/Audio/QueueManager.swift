@@ -48,7 +48,11 @@ final class QueueManager {
     private(set) var userQueueCount: Int = 0
 
     /// Tracks heard earlier in this session (most-recent last).
-    var playedHistory: [MediaItem] { playedEntries.map(\.item) }
+    /// Stored (not computed): NowPlayingView's body reads this at
+    /// ~4Hz via progress-tick re-renders, and a computed
+    /// `playedEntries.map(\.item)` allocated a fresh ~400-element
+    /// array on every access. Maintained by `archive`.
+    private(set) var playedHistory: [MediaItem] = []
 
     /// Timestamped played history (most-recent last). Persisted.
     private(set) var playedEntries: [PlayedEntry] = []
@@ -60,6 +64,7 @@ final class QueueManager {
         self.historyCap = historyCap
         self.historyStore = PlayedHistoryStore(cap: historyCap, defaults: defaults)
         self.playedEntries = historyStore.load()
+        self.playedHistory = playedEntries.map(\.item)
     }
 
     // MARK: - Region helpers
@@ -277,8 +282,10 @@ final class QueueManager {
     func archive(_ item: MediaItem, at date: Date = Date()) {
         if playedEntries.last?.item.id == item.id { return }
         playedEntries.append(PlayedEntry(item: item, playedAt: date))
+        playedHistory.append(item)
         if playedEntries.count > historyCap {
             playedEntries.removeFirst(playedEntries.count - historyCap)
+            playedHistory.removeFirst(playedHistory.count - historyCap)
         }
         historyStore.save(playedEntries)
     }

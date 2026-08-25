@@ -183,6 +183,12 @@ final class AppEnvironment {
     @ObservationIgnored private var lastOnUpdateVideoId: String? = nil
     @ObservationIgnored private var lastOnUpdateIsPlaying: Bool = false
     @ObservationIgnored private var lastOnUpdateAt: Date = .distantPast
+    /// What we last pushed to MPNowPlayingInfoCenter — used to skip
+    /// progress-only rewrites (the system extrapolates from rate) while
+    /// still catching seeks and late-arriving durations.
+    @ObservationIgnored private var lastNowPlayingElapsed: Double = 0
+    @ObservationIgnored private var lastNowPlayingPushAt: Date = .distantPast
+    @ObservationIgnored private var lastNowPlayingDuration: Double = -1
     private static let progressTickMinInterval: TimeInterval = 0.5
 
     /// Called by the app-level ⌘F handler. Switches to the Search
@@ -770,13 +776,28 @@ final class AppEnvironment {
             self.lastOnUpdateVideoId = track.videoId
             self.lastOnUpdateIsPlaying = self.player.isPlaying
             self.lastOnUpdateAt = now
-            self.nowPlaying.update(
-                title: track.title,
-                artist: track.subtitle,
-                artwork: track.thumbnailURL,
-                duration: self.player.duration,
-                elapsed: self.player.elapsed
-            )
+            // MPNowPlayingInfoCenter contract: set elapsed + rate once and
+            // the system extrapolates — rewriting the whole dictionary at
+            // 2Hz is a continuous XPC round-trip to nowplayingd for zero
+            // visible benefit. Skip progress-only ticks unless the elapsed
+            // deviates from wall-clock extrapolation (a seek) or the
+            // duration finally arrived (it's 0 right after a track change).
+            let extrapolated = self.lastNowPlayingElapsed
+                + (self.player.isPlaying ? now.timeIntervalSince(self.lastNowPlayingPushAt) : 0)
+            let seeked = abs(self.player.elapsed - extrapolated) > 2.0
+            let durationArrived = self.lastNowPlayingDuration != self.player.duration
+            if !isProgressOnly || seeked || durationArrived {
+                self.lastNowPlayingElapsed = self.player.elapsed
+                self.lastNowPlayingPushAt = now
+                self.lastNowPlayingDuration = self.player.duration
+                self.nowPlaying.update(
+                    title: track.title,
+                    artist: track.subtitle,
+                    artwork: track.thumbnailURL,
+                    duration: self.player.duration,
+                    elapsed: self.player.elapsed
+                )
+            }
             // B9 — mirror the same payload into the App-Group-shared
             // snapshot the Notification Center widget reads. The
             // writer rate-limits internally so this stays cheap on
