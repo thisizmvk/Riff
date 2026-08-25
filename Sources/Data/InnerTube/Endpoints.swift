@@ -16,6 +16,7 @@ enum Endpoint: String {
     /// source for cookie-import sign-ins where the OAuth userinfo
     /// endpoint isn't reachable.
     case accountMenu = "account/account_menu"
+    case searchSuggestions = "music/get_search_suggestions"
 }
 
 /// Well-known browseId values used by InnerTube.

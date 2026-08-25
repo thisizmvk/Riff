@@ -482,7 +482,8 @@ struct NowPlayingView: View {
                 systemName: env.player.repeatMode == .one ? "repeat.1" : "repeat",
                 size: 18,
                 tint: env.player.repeatMode == .off ? .white.opacity(0.7) : Theme.red,
-                help: env.player.repeatMode == .one ? "Repeat one" : "Repeat"
+                help: env.player.repeatMode == .one ? "Repeat one"
+                    : env.player.repeatMode == .all ? "Repeat all" : "Repeat"
             ) {
                 Task { await env.player.toggleRepeat() }
             }

@@ -299,9 +299,15 @@ final class PlayerBridge {
     /// require intercepting end-of-queue and racing the page's
     /// autoplay, which is fragile. Track for v1.1.
     enum RepeatMode: String, Sendable {
-        case off, one
+        case off, all, one
     }
     private(set) var repeatMode: RepeatMode = .off
+    /// Index into `queue.playedEntries` marking where the CURRENT
+    /// listening context began (set on every fresh-context play).
+    /// Repeat All uses the entries from here forward as the cycle:
+    /// when the queue drains at end-of-track, everything played in
+    /// this context (plus the finishing track) is re-queued in order.
+    @ObservationIgnored private var contextStartHistoryIndex: Int = 0
     private(set) var shuffleEnabled: Bool = false
     /// B5 Smart Shuffle. When ON *together with* `shuffleEnabled`, the
     /// visible Up Next gets interleaved with /related recommendations
@@ -320,10 +326,16 @@ final class PlayerBridge {
     /// can't carry forward.
     private(set) var smartShuffleInjectedIds: Set<String> = []
 
-    /// Cycle through repeat modes. Two states for now (off → one →
-    /// off); a future `.all` slot will splice in here.
+    /// Cycle through repeat modes: off → all → one → off (the order
+    /// every mainstream player uses). `.one` maps to <video>.loop in
+    /// JS; `.all` is Swift-side — see the queue-drain hook in `.ended`.
     func toggleRepeat() async {
-        let next: RepeatMode = (repeatMode == .off) ? .one : .off
+        let next: RepeatMode
+        switch repeatMode {
+        case .off: next = .all
+        case .all: next = .one
+        case .one: next = .off
+        }
         repeatMode = next
         UserDefaults.standard.set(next.rawValue, forKey: Self.repeatKey)
         await eval("window.musicBridge.setRepeatLoop(\(next == .one ? "true" : "false"))")
@@ -497,6 +509,12 @@ final class PlayerBridge {
         // against tail, so a same-song reclick is a no-op.
         if let existing = currentTrack, existing.videoId != item.id {
             archiveCurrent()
+        }
+        // Fresh watch context → new Repeat All cycle boundary. Marked
+        // AFTER archiving the outgoing track so the old track belongs
+        // to the OLD context's cycle.
+        if clearQueue {
+            contextStartHistoryIndex = queue.playedEntries.count
         }
         // A pending resume from restoreLastSession only applies to the
         // very first play. An explicit click of a different song
@@ -1016,8 +1034,9 @@ final class PlayerBridge {
         guard let first = tracks.first else { return }
         let rest = Array(tracks.dropFirst())
         Log.bridge.debug("playTracks ENTRY firstId=\(first.id, privacy: .public) restCount=\(rest.count) plid=\(playlistId ?? "nil", privacy: .public)")
-        // Fresh watch context — full queue reset.
+        // Fresh watch context — full queue reset + Repeat All boundary.
         queue.replaceQueue([])
+        contextStartHistoryIndex = queue.playedEntries.count
         // Seed the user region with the tail of the album in order.
         for track in rest {
             queue.addToEnd(track)
@@ -1857,6 +1876,32 @@ final class PlayerBridge {
             } else {
                 let curId = self.currentTrack?.videoId
                 let head = upNext.first(where: { $0.id != curId })
+                // Repeat All: queue drained → cycle the context. The
+                // cycle is everything played since this context started
+                // plus the track that just finished, in original order.
+                // Runs before the autoplay fallbacks so YT's radio
+                // doesn't take over at the end of an album on repeat.
+                if repeatMode == .all, head == nil {
+                    let start = min(contextStartHistoryIndex, queue.playedEntries.count)
+                    var cycle = queue.playedEntries[start...].map(\.item)
+                    if let cur = currentTrack {
+                        cycle.append(MediaItem(
+                            id: cur.videoId, kind: .song, title: cur.title,
+                            subtitle: cur.subtitle, thumbnailURL: cur.thumbnailURL,
+                            albumId: cur.albumId, artistId: cur.artistId
+                        ))
+                    }
+                    // Dedupe by id, preserving first occurrence order.
+                    var seen = Set<String>()
+                    let ordered = cycle.filter { seen.insert($0.id).inserted }
+                    if !ordered.isEmpty {
+                        Log.bridge.debug(".ended → Repeat All: cycling \(ordered.count) tracks")
+                        Task { [weak self] in
+                            await self?.playTracks(ordered, playlistId: nil)
+                        }
+                        return
+                    }
+                }
                 if !pendingNextURLArmed {
                     // JS had nothing armed — YT's own autoplay is about
                     // to fire. Fallback-play the head ONLY when it's an

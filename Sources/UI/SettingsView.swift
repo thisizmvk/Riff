@@ -381,6 +381,24 @@ struct SettingsView: View {
             }
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
+                    Text("Track change notifications")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                    Text("Show a Notification Center banner with the new track when Riff is in the background.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.75))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 16)
+                Toggle("", isOn: Binding(
+                    get: { env.trackNotificationsEnabled },
+                    set: { env.trackNotificationsEnabled = $0 }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+            }
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Volume normalization")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white)

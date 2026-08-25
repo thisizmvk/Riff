@@ -1152,6 +1152,30 @@ final class InnerTubeClient: @unchecked Sendable {
         _ = try await postRaw(.dislike, body: ["target": ["videoId": videoId]])
     }
 
+    /// Completions for a partial search query — the strings YT Music's
+    /// own search box shows as you type (includes typo corrections).
+    /// Lightweight endpoint; called per keystroke (debounced by the
+    /// caller). Returns plain suggestion strings in rank order.
+    func searchSuggestions(query: String) async throws -> [String] {
+        let body = try await postRaw(.searchSuggestions, body: ["input": query])
+        let sections = Parsing.array(body, "contents") ?? []
+        var out: [String] = []
+        for section in sections {
+            guard let renderer = section["searchSuggestionsSectionRenderer"] as? [String: Any],
+                  let contents = renderer["contents"] as? [[String: Any]] else { continue }
+            for entry in contents {
+                // Plain text suggestions only — entries can also be
+                // rich results (musicResponsiveListItemRenderer); the
+                // search itself covers those.
+                guard let s = entry["searchSuggestionRenderer"] as? [String: Any],
+                      let runs = Parsing.dig(s, ["suggestion", "runs"]) as? [[String: Any]] else { continue }
+                let text = runs.compactMap { $0["text"] as? String }.joined()
+                if !text.isEmpty { out.append(text) }
+            }
+        }
+        return out
+    }
+
     /// Add the given video to the given user-owned playlist. Requires
     /// SAPISID cookie auth (the user's session). The playlistId is the
     /// raw PL... id (no VL prefix).

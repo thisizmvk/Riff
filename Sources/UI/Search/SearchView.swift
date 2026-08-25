@@ -3,6 +3,12 @@ import SwiftUI
 struct SearchView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var query: String = ""
+    /// Live completions for the current query (YT Music's own
+    /// suggestions endpoint). Cleared when empty/picked.
+    @State private var suggestions: [String] = []
+    /// The query string a just-picked suggestion set — suppresses
+    /// re-suggesting for the exact text the user just committed.
+    @State private var suppressSuggestionsFor: String? = nil
     @State private var filter: SearchFilter = .all
     @FocusState private var searchFieldFocused: Bool
     /// Focused videoId in the result list, or nil when no row is
@@ -180,6 +186,57 @@ struct SearchView: View {
                     // first (SearchView may have been off-screen).
                     Task { @MainActor in searchFieldFocused = true }
                 }
+                // Suggestions-as-you-type. 150ms debounce (lighter than
+                // the 300ms full-search debounce — suggestions should
+                // feel instantaneous); cancelled and cleared when the
+                // query empties or a suggestion is picked.
+                .task(id: query) {
+                    let trimmed = query.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.isEmpty, trimmed != suppressSuggestionsFor else {
+                        suggestions = []
+                        return
+                    }
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    guard !Task.isCancelled else { return }
+                    let fetched = (try? await env.innerTube.searchSuggestions(query: trimmed)) ?? []
+                    guard !Task.isCancelled else { return }
+                    // Suggesting exactly what's already typed is noise.
+                    suggestions = fetched.filter { $0.lowercased() != trimmed.lowercased() }.prefix(6).map { $0 }
+                }
+
+            // Completion strip under the field — YT Music's own
+            // suggestions (with typo corrections). Picking one commits
+            // it as the query; the existing .task(id:) then runs the
+            // real search.
+            if !suggestions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(suggestions, id: \.self) { s in
+                            Button {
+                                suppressSuggestionsFor = s
+                                suggestions = []
+                                query = s
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "magnifyingglass")
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(.white.opacity(0.5))
+                                    Text(s)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(.white.opacity(0.9))
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Color.white.opacity(0.07))
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                }
+            }
 
             // Pill-style filter row mirroring YT Music's chips. Horizontal
             // scroll keeps it from clipping when the user resizes the

@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import SwiftUI
 import AppKit
+import UserNotifications
 
 /// Top-level tab identifier. Lifted out of `MainTabs` so the app-level
 /// `CommandGroup` (which doesn't see private nested types) can bind
@@ -139,6 +140,47 @@ final class AppEnvironment {
     func dismissToast() {
         toastDismissTask?.cancel()
         currentToast = nil
+    }
+
+    // MARK: - Track-change notifications (Spotify-style banners)
+
+    private static let trackNotificationsKey = "notifications.trackChange"
+
+    /// Whether a Notification Center banner shows when the track
+    /// changes while Riff is in the background. Off by default —
+    /// notifications are opt-in by nature. Toggled from Settings;
+    /// turning it on requests system authorization.
+    var trackNotificationsEnabled: Bool = UserDefaults.standard.bool(forKey: AppEnvironment.trackNotificationsKey) {
+        didSet {
+            UserDefaults.standard.set(trackNotificationsEnabled, forKey: Self.trackNotificationsKey)
+            if trackNotificationsEnabled {
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { granted, _ in
+                    if !granted {
+                        Task { @MainActor [weak self] in
+                            self?.trackNotificationsEnabled = false
+                            self?.showToast("Notifications are off in System Settings")
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Post a "now playing" banner for a track change — but only when
+    /// enabled AND the app is in the background (a banner about the
+    /// window you're looking at is noise). Replaces the previous
+    /// banner (fixed identifier) so quick skips don't stack five deep.
+    func postTrackChangeNotificationIfEnabled(title: String, artist: String) {
+        guard trackNotificationsEnabled, !NSApp.isActive, !title.isEmpty else { return }
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.subtitle = artist
+        let request = UNNotificationRequest(
+            identifier: "riff.nowplaying",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
     /// True on the very first launch (i.e. before the user has
@@ -821,6 +863,13 @@ final class AppEnvironment {
             if self.scrobbleLastSeenVideoId != track.videoId {
                 self.scrobbleTrackStartedAt = Date()
                 self.scrobbleLastSeenVideoId = track.videoId
+                // Track-change banner (Spotify-style): only when the app
+                // is in the background — a banner about the window you're
+                // already looking at is noise — and only when enabled in
+                // Settings.
+                self.postTrackChangeNotificationIfEnabled(
+                    title: track.title, artist: track.subtitle
+                )
             }
             let durationSeconds: Int? = self.player.duration > 0 ? Int(self.player.duration) : nil
             let scrobbleTrack = ScrobbleTrack(
