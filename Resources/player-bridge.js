@@ -504,13 +504,43 @@
     // Emitted from the 2s safety poll, deduped by a videoId+selected
     // signature so Swift only hears real changes. Failure is silent
     // after one diagnostic — Swift keeps the Phase-1 banner as fallback.
+    // One-shot shape report so a failed store lookup is debuggable from
+    // the unified log instead of silently showing no queue. Reports
+    // which link in the chain is missing and, when a state exists, its
+    // top-level keys — enough to adapt the path without live inspection.
+    function reportQueueShapeOnce(stage, extra) {
+        if (window.__riffQueueShapeReported) return;
+        window.__riffQueueShapeReported = true;
+        postEvent({ event: "diagnostic", msg: "queueSnapshot probe [" + stage + "]: " + (extra || "") });
+    }
+
     function emitQueueSnapshot() {
         try {
             const app = document.querySelector("ytmusic-app");
-            const state = app && app.store && typeof app.store.getState === "function"
-                ? app.store.getState() : null;
+            if (!app) { reportQueueShapeOnce("no-app-element"); return; }
+            if (!app.store) {
+                // Some builds hang the store off the player page or
+                // expose only dispatch — enumerate likely hosts.
+                const alt = ["ytmusic-player-bar", "ytmusic-player-page", "ytmusic-player-queue"]
+                    .map((sel) => {
+                        const el = document.querySelector(sel);
+                        return sel + "=" + (el ? (el.store ? "store" : (el.queue ? "queue-prop" : "el")) : "none");
+                    }).join(", ");
+                reportQueueShapeOnce("no-store", "appKeys(sample)=" +
+                    Object.keys(app).slice(0, 25).join("|") + "; alts: " + alt);
+                return;
+            }
+            if (typeof app.store.getState !== "function") {
+                reportQueueShapeOnce("no-getState", "storeKeys=" + Object.keys(app.store).slice(0, 20).join("|"));
+                return;
+            }
+            const state = app.store.getState();
             const q = state ? state.queue : null;
-            if (!q) return;
+            if (!q) {
+                reportQueueShapeOnce("no-queue-slice", "stateKeys=" +
+                    (state ? Object.keys(state).slice(0, 30).join("|") : "state-null"));
+                return;
+            }
             const unwrap = (it) => {
                 if (!it) return null;
                 if (it.playlistPanelVideoRenderer) return it.playlistPanelVideoRenderer;
@@ -538,10 +568,19 @@
                 });
                 if (rows.length >= 80) break;   // cap payload; radio can run long
             }
-            if (!rows.length) return;
+            if (!rows.length) {
+                const first = source.length ? source[0] : null;
+                reportQueueShapeOnce("zero-rows",
+                    "queueKeys=" + Object.keys(q).slice(0, 20).join("|") +
+                    "; items=" + (q.items ? q.items.length : "nil") +
+                    "; automix=" + (q.automixItems ? q.automixItems.length : "nil") +
+                    "; firstItemKeys=" + (first ? Object.keys(first).slice(0, 10).join("|") : "none"));
+                return;
+            }
             const sig = rows.map((r) => r.videoId + (r.selected ? "*" : "")).join(",");
             if (sig === window.__riffQueueSig) return;
             window.__riffQueueSig = sig;
+            reportQueueShapeOnce("ok", rows.length + " rows");
             postEvent({ event: "queueSnapshot", items: rows });
         } catch (e) {
             if (!window.__riffQueueSnapErrLogged) {
