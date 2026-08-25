@@ -924,6 +924,20 @@ final class PlayerBridge {
         }
     }
 
+    /// Thumbs-down a track. Trains YT Music's server-side radio away
+    /// from it — the one steering signal local artist-blocking can't
+    /// send. Returns true on success so the caller can toast.
+    func dislike(videoId: String) async -> Bool {
+        do {
+            try await innerTube.dislike(videoId: videoId)
+            if currentTrack?.videoId == videoId { liked = false }
+            return true
+        } catch {
+            Log.bridge.error("dislike failed for \(videoId, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            return false
+        }
+    }
+
     /// Lazy-load lyrics on tab open. Sets `lyricsLoading` while in flight.
     /// Populates either `lyricsLines` (with `lyricsTimed=true`) for synced
     /// lyrics or just the plain `lyrics` text fallback.

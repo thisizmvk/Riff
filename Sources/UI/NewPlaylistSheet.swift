@@ -23,6 +23,11 @@ struct NewPlaylistSheet: View {
     enum Source: Equatable {
         case currentTrack
         case queue
+        /// A specific track (context-menu "Add to playlist → New
+        /// Playlist…" from any row) — previously that path had to
+        /// PLAY the row first to reuse .currentTrack, interrupting
+        /// whatever the user was listening to.
+        case item(MediaItem)
     }
 
     var body: some View {
@@ -72,6 +77,7 @@ struct NewPlaylistSheet: View {
         switch env.newPlaylistSource {
         case .currentTrack: return "New Playlist"
         case .queue:        return "Save Queue as Playlist"
+        case .item:         return "New Playlist"
         }
     }
 
@@ -82,6 +88,8 @@ struct NewPlaylistSheet: View {
         case .queue:
             let n = env.player.upNext.count
             return "Creates a private playlist and adds the \(n) track\(n == 1 ? "" : "s") currently in Up Next."
+        case .item(let item):
+            return "Creates a private playlist and adds “\(item.title)”."
         }
     }
 
@@ -98,6 +106,11 @@ struct NewPlaylistSheet: View {
                     _ = try await env.player.createPlaylistWithCurrentTrack(title: trimmed)
                 case .queue:
                     _ = try await env.player.savePlaylistFromQueue(title: trimmed)
+                case .item(let item):
+                    let plid = try await env.innerTube.createPlaylist(title: trimmed)
+                    if let plid {
+                        try await env.innerTube.addToPlaylist(videoId: item.id, playlistId: plid)
+                    }
                 }
                 env.reloadUserPlaylists()
                 await MainActor.run {

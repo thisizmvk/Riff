@@ -123,6 +123,10 @@ final class AppEnvironment {
         toastDismissTask?.cancel()
         let toast = Toast(message: message, undo: undo)
         currentToast = toast
+        // VoiceOver: announce the toast — a transient visual banner is
+        // otherwise invisible to screen-reader users, who got no
+        // confirmation for "Added to queue" / undoable "Blocked artist".
+        AccessibilityNotification.Announcement(message).post()
         toastDismissTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(Toast.duration * 1_000_000_000))
             guard let self, !Task.isCancelled else { return }

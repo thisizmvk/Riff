@@ -21,8 +21,21 @@ struct MiniPlayerView: View {
                         .fill(Theme.red)
                         .frame(width: geo.size.width * env.player.progress)
                 }
+                // Click (or drag-release) to seek — desktop players all
+                // treat the bottom-bar progress line as a scrubber.
+                // contentShape widens the 2pt line's hit area.
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onEnded { value in
+                            let fraction = min(max(value.location.x / max(geo.size.width, 1), 0), 1)
+                            Task { await env.player.seek(to: fraction) }
+                        }
+                )
             }
-            .frame(height: 2)
+            .frame(height: 6)
+            .accessibilityLabel("Playback progress")
+            .accessibilityHint("Click to seek")
 
             HStack(spacing: 14) {
                 AsyncImage(url: track?.thumbnailURL) { phase in
@@ -80,6 +93,8 @@ struct MiniPlayerView: View {
                     .controlSize(.small)
                     .frame(width: 84)
                     .tint(.white)
+                    .accessibilityLabel("Volume")
+                    .accessibilityValue("\(Int((env.player.volume * 100).rounded())) percent")
                 }
                 .padding(.leading, 8)
             }

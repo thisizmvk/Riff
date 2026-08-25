@@ -6,6 +6,7 @@ enum Endpoint: String {
     case next   = "next"
     case player = "player"
     case like         = "like/like"
+    case dislike      = "like/dislike"
     case removeLike   = "like/removelike"
     case editPlaylist = "browse/edit_playlist"
     case createPlaylist = "playlist/create"

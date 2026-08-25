@@ -2,9 +2,57 @@ import SwiftUI
 import AppKit
 import Combine
 
+/// Bridges AppKit's Dock-menu callback into the SwiftUI app. The Dock
+/// icon is the one surface guaranteed visible for every user (unlike
+/// the opt-in menu-bar and floating mini players), and Spotify /
+/// Music.app both put transport controls there. `env` is injected by
+/// RiffApp at init; the menu is rebuilt on every right-click, so it
+/// always reflects live player state.
+final class RiffAppDelegate: NSObject, NSApplicationDelegate {
+    var env: AppEnvironment?
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        guard let env else { return nil }
+        let menu = NSMenu()
+        if let track = env.player.currentTrack {
+            let info = NSMenuItem(title: "\(track.title) — \(track.subtitle)", action: nil, keyEquivalent: "")
+            info.isEnabled = false
+            menu.addItem(info)
+            menu.addItem(.separator())
+        }
+        let playPause = NSMenuItem(
+            title: env.player.isPlaying ? "Pause" : "Play",
+            action: #selector(dockTogglePlay), keyEquivalent: ""
+        )
+        playPause.target = self
+        menu.addItem(playPause)
+        let next = NSMenuItem(title: "Next Track", action: #selector(dockNext), keyEquivalent: "")
+        next.target = self
+        menu.addItem(next)
+        let prev = NSMenuItem(title: "Previous Track", action: #selector(dockPrevious), keyEquivalent: "")
+        prev.target = self
+        menu.addItem(prev)
+        return menu
+    }
+
+    @MainActor @objc private func dockTogglePlay() {
+        guard let env else { return }
+        Task { await env.player.togglePlay() }
+    }
+    @MainActor @objc private func dockNext() {
+        guard let env else { return }
+        Task { await env.player.next() }
+    }
+    @MainActor @objc private func dockPrevious() {
+        guard let env else { return }
+        Task { await env.player.previous() }
+    }
+}
+
 @main
 struct RiffApp: App {
     @State private var environment = AppEnvironment()
+    @NSApplicationDelegateAdaptor(RiffAppDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup {
@@ -12,6 +60,7 @@ struct RiffApp: App {
                 .environment(environment)
                 .frame(minWidth: 980, minHeight: 640)
                 .preferredColorScheme(.dark)
+                .onAppear { appDelegate.env = environment }
         }
         .windowStyle(.hiddenTitleBar)
         .windowToolbarStyle(.unifiedCompact)
@@ -317,7 +366,9 @@ struct RootView: View {
                     .padding(.bottom, env.player.hasTrack ? 88 : 20)
                     .padding(.horizontal, 24)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .accessibilityAddTraits(.isModal)
+                    // NOT .isModal — that told VoiceOver to ignore the
+                    // entire window for the toast's 3-second life.
+                    // Announcement happens in showToast instead.
             }
         }
         .animation(.easeOut(duration: 0.2), value: env.currentToast)

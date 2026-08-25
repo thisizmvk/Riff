@@ -532,6 +532,7 @@ struct NowPlayingView: View {
                 .frame(width: 18)
         }
         .accessibilityLabel("Volume")
+        .accessibilityValue("\(Int((env.player.volume * 100).rounded())) percent")
     }
 
     /// Sleep-timer menu. Shows the running countdown when armed (mm:ss),

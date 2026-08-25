@@ -100,6 +100,20 @@ struct TrackContextMenu: View {
         if env.isSignedIn {
             Divider()
             addToPlaylistMenu
+            // Thumbs-down — the server-side steering signal local
+            // artist-blocking can't send: YT's radio stops suggesting
+            // the track account-wide. Songs/episodes only.
+            if item.kind == .song || item.kind == .episode {
+                Button("Not for me (dislike)") {
+                    Task {
+                        if await env.player.dislike(videoId: item.id) {
+                            env.showToast("Disliked — YT Music will suggest this less")
+                        } else {
+                            env.showToast("Couldn't dislike \(item.title)")
+                        }
+                    }
+                }
+            }
         }
         // "Copy share link" — the music.youtube.com URL for this
         // track. Bottom of the menu so it doesn't bump the common
@@ -149,15 +163,12 @@ struct TrackContextMenu: View {
     private var addToPlaylistMenu: some View {
         Menu("Add to playlist") {
             Button("New Playlist…") {
-                // The new-playlist sheet currently captures the *currently
-                // playing* track. Make this row the current track first,
-                // then prompt — keeps the existing flow intact without
-                // duplicating sheet plumbing.
-                Task {
-                    await env.player.play(item: item)
-                    env.newPlaylistSource = .currentTrack
-                    env.isNewPlaylistSheetPresented = true
-                }
+                // .item source: file THIS row into the new playlist
+                // without touching playback. (The old workaround played
+                // the row first to reuse .currentTrack — interrupting
+                // the current song because the user filed a track away.)
+                env.newPlaylistSource = .item(item)
+                env.isNewPlaylistSheetPresented = true
             }
             if env.userPlaylistsLoading {
                 Text("Loading…")
@@ -168,10 +179,18 @@ struct TrackContextMenu: View {
                 ForEach(env.userPlaylists) { pl in
                     Button(pl.title) {
                         Task {
-                            try? await env.innerTube.addToPlaylist(
-                                videoId: item.id,
-                                playlistId: pl.id
-                            )
+                            // Toast both outcomes — Play next / Add to
+                            // queue toast, so a silent add here read as
+                            // "did that even work?"
+                            do {
+                                try await env.innerTube.addToPlaylist(
+                                    videoId: item.id,
+                                    playlistId: pl.id
+                                )
+                                env.showToast("Added to \(pl.title)")
+                            } catch {
+                                env.showToast("Couldn't add to \(pl.title)")
+                            }
                         }
                     }
                 }

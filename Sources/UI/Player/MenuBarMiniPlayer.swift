@@ -44,8 +44,17 @@ struct MenuBarMiniPlayer: View {
                                 .fill(Theme.red)
                                 .frame(width: geo.size.width * env.player.progress)
                         }
+                        // Click to seek from the popover.
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onEnded { value in
+                                    let fraction = min(max(value.location.x / max(geo.size.width, 1), 0), 1)
+                                    Task { await env.player.seek(to: fraction) }
+                                }
+                        )
                     }
-                    .frame(height: 3)
+                    .frame(height: 6)
                     HStack {
                         Text(format(env.player.elapsed))
                         Spacer()
@@ -112,6 +121,7 @@ struct MenuBarMiniPlayer: View {
                     .frame(width: 14)
             }
             .accessibilityLabel("Volume")
+            .accessibilityValue("\(Int((env.player.volume * 100).rounded())) percent")
 
             // Chip strip (Tune / mood chips returned by /next). Only
             // rendered when YT sent chips for the current watch

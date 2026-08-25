@@ -110,10 +110,20 @@ struct FloatingMiniPlayerView: View {
                         Rectangle().fill(Color.white.opacity(0.06))
                         Rectangle()
                             .fill(Theme.red)
-                            .frame(width: geo.size.width * env.player.progress)     
+                            .frame(width: geo.size.width * env.player.progress)
                     }
+                    // Click to seek, same affordance as the main-window
+                    // bottom bar.
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onEnded { value in
+                                let fraction = min(max(value.location.x / max(geo.size.width, 1), 0), 1)
+                                Task { await env.player.seek(to: fraction) }
+                            }
+                    )
                 }
-                .frame(height: 2)
+                .frame(height: 5)
                 Spacer(minLength: 0)
             }
         }

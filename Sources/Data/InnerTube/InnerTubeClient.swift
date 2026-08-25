@@ -1145,6 +1145,13 @@ final class InnerTubeClient: @unchecked Sendable {
         _ = try await postRaw(.like, body: ["target": ["videoId": videoId]])
     }
 
+    /// Thumbs-down. Unlike the local blocked-artists feature, this
+    /// trains YT Music's server-side recommendations — the radio stops
+    /// suggesting the track. Same endpoint family as like/removelike.
+    func dislike(videoId: String) async throws {
+        _ = try await postRaw(.dislike, body: ["target": ["videoId": videoId]])
+    }
+
     /// Add the given video to the given user-owned playlist. Requires
     /// SAPISID cookie auth (the user's session). The playlistId is the
     /// raw PL... id (no VL prefix).
