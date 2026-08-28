@@ -2040,6 +2040,24 @@ final class PlayerBridge {
                     Log.bridge.debug(".ended → JS armed via pending URL; WYSIWYG reconciled in trackChanged")
                 }
             }
+        case .queueAddResult(let videoId, let position, let ok, let via):
+            // Phase A self-migration (docs/QUEUE-DESIGN.md): a VERIFIED
+            // page-queue add means the page now owns the item — its own
+            // autoplay will play it at the right slot, and the mirror
+            // will display it. Drop Swift's fallback copy so the two
+            // authorities can't fight. Conservatively scoped to the
+            // simple case (page-driven context, this is the ONLY
+            // user-region item); multiple queued items keep the proven
+            // fallback until Phase B.
+            if ok, isPageDrivenContext,
+               queue.isUserQueued(videoId: videoId),
+               queue.userQueueCount == 1 {
+                queue.remove(videoId: videoId)
+                Task { [weak self] in await self?.syncPendingNextURL() }
+                Log.bridge.debug("queueAddResult VERIFIED (\(position, privacy: .public) via \(via, privacy: .public)) → page owns \(videoId, privacy: .public); Swift fallback dropped")
+            } else {
+                Log.bridge.debug("queueAddResult ok=\(ok, privacy: .public) pos=\(position, privacy: .public) via=\(via, privacy: .public) id=\(videoId, privacy: .public) (fallback retained)")
+            }
         case .queueSnapshot(let items):
             // PHASE 2 radio truth: mirror the page's OWN queue into the
             // server region. Radio queues are non-deterministic — an

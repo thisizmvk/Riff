@@ -25,6 +25,12 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         /// jump to a user-queued "Play next" item before YT Music's
         /// natural autoplay kicks in.
         case ended
+        /// Outcome of a queueAddViaPage dispatch: `ok` means the id was
+        /// VERIFIED present in the page's queue store after the
+        /// ADD_ITEMS dispatch. Drives Phase A's self-migration — a
+        /// verified add lets Swift drop its fallback copy (the page
+        /// owns the item). See docs/QUEUE-DESIGN.md.
+        case queueAddResult(videoId: String, position: String, ok: Bool, via: String)
         /// The page's OWN queue (ytmusic-app store: items + automixItems),
         /// emitted by the JS safety poll whenever it changes. This is the
         /// ground truth for radio contexts, whose queues are
@@ -142,6 +148,14 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
             return .trackChanged(videoId: videoId, playlistId: playlistId, title: title, artist: artist, artwork: artwork)
         case "ended":
             return .ended
+        case "queueAddResult":
+            guard let videoId = body["videoId"] as? String, !videoId.isEmpty else { return nil }
+            return .queueAddResult(
+                videoId: videoId,
+                position: (body["position"] as? String) ?? "",
+                ok: (body["ok"] as? Bool) ?? false,
+                via: (body["via"] as? String) ?? ""
+            )
         case "queueSnapshot":
             guard let raw = body["items"] as? [[String: Any]], !raw.isEmpty else { return nil }
             let items: [PageQueueItem] = raw.compactMap { dict in

@@ -25,10 +25,17 @@ global.URL = URL;
 global.MutationObserver = class { observe() {} disconnect() {} };
 global.webkit = { messageHandlers: { bridge: { postMessage: (p) => posted.push(p) } } };
 global.window.webkit = global.webkit;
-// setup() will retry via setTimeout — neuter timers so the harness exits.
+// setup() will retry via setTimeout(…, 500) — run only SHORT timers
+// (the 0ms/300ms snapshot + verification shots) immediately, so async
+// pipelines complete without letting setup() recurse forever.
+const realSetTimeout = setTimeout;
 global.setInterval = () => 0;
 global.clearInterval = () => {};
-global.setTimeout = () => 0;
+global.setTimeout = (fn, delay) => {
+  if (typeof fn === "function" && (delay ?? 0) < 500) { fn(); }
+  return 0;
+};
+const settle = () => new Promise((r) => realSetTimeout(r, 5));
 
 // ---- Load the bridge ------------------------------------------------------
 const src = readFileSync(process.argv[2] ?? "../../../Riff/Resources/player-bridge.js", "utf8");
@@ -182,6 +189,56 @@ const wrap = (id, title, byline, selected = false) => ({
   });
   const { snapshots } = snap();
   check(snapshots[0]?.items?.length === 1 && snapshots[0].items[0].videoId === "ok1", "id-less rows skipped");
+}
+
+// ---- Case 11: queueAddViaPage happy path (dispatch + verify) --------------
+{
+  elements.clear();
+  const dispatched = [];
+  // Fake store whose dispatch behaves like YT's ADD_ITEMS reducer:
+  // splices the items in at payload.index.
+  const state = { queue: { items: [renderer("q1", "Q1", "A", true), renderer("q2", "Q2", "A")], nextQueueItemId: 77 } };
+  elements.set("ytmusic-app", {
+    store: {
+      getState: () => state,
+      dispatch: (a) => {
+        dispatched.push(a);
+        if (a.type === "ADD_ITEMS") state.queue.items.splice(a.payload.index, 0, ...a.payload.items);
+      },
+    },
+    networkManager: {
+      fetch: async (path, body) => ({
+        queueDatas: [{ content: renderer(body.videoIds[0], "Injected", "AI") }],
+      }),
+    },
+  });
+  posted.length = 0;
+  window.__riffQueueSig = undefined;
+  window.musicBridge.queueAddViaPage("z1", "next");
+  await settle();
+  const results = posted.filter((p) => p.event === "queueAddResult");
+  check(results.length === 1 && results[0].ok === true, "verified add reports ok=true (got " + JSON.stringify(results) + ")");
+  const add = dispatched.find((a) => a.type === "ADD_ITEMS");
+  check(!!add && add.payload.index === 1, "ADD_ITEMS lands after the selected row (index 1)");
+  check(add?.payload.items?.[0]?.playlistPanelVideoRenderer?.videoId === "z1", "real fetched renderer dispatched, not a hand-built shape");
+  check(posted.some((p) => p.event === "queueSnapshot" && p.items.some((r) => r.videoId === "z1")), "mirror re-emitted including the injected row");
+}
+
+// ---- Case 12: queueAddViaPage failure paths -------------------------------
+{
+  elements.clear();
+  posted.length = 0;
+  window.musicBridge.queueAddViaPage("z2", "end");
+  await settle();
+  let r = posted.filter((p) => p.event === "queueAddResult");
+  check(r.length === 1 && r[0].ok === false && r[0].via === "no-dispatcher", "no dispatcher → ok=false with reason");
+
+  elements.set("ytmusic-app", { store: { getState: () => ({ queue: { items: [] } }), dispatch: () => {} } });
+  posted.length = 0;
+  window.musicBridge.queueAddViaPage("z3", "end");
+  await settle();
+  r = posted.filter((p) => p.event === "queueAddResult");
+  check(r.length === 1 && r[0].ok === false && r[0].via.startsWith("no-items"), "no renderers fetchable → ok=false no-items");
 }
 
 console.log(`\nJS RESULT: ${passes} passed, ${failures} failed`);

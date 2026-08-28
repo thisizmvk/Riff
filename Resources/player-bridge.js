@@ -240,78 +240,81 @@
          * wrapper). If YT rejects this shape the dispatch is a no-op
          * — no crash, just a diagnostic.
          */
+        // Inject a track into the PAGE's own queue (single-authority
+        // design, Phase A — see docs/QUEUE-DESIGN.md). Pipeline:
+        //   1. fetch a REAL queue renderer for the videoId via the
+        //      page's own music/get_queue (th-ch's proven approach —
+        //      hand-built minimal renderers were silently rejected),
+        //   2. dispatch ADD_ITEMS at the right index,
+        //   3. VERIFY the id landed in the store, and report a
+        //      `queueAddResult` event either way — Swift keeps its
+        //      fallback copy until verification succeeds.
         queueAddViaPage(videoId, position) {
-            const insertAfter = position === 'next';
-            // Try several known queue-element seams.
-            const candidates = [
-                () => document.querySelector('ytmusic-player-bar'),
-                () => document.querySelector('ytmusic-app-layout #queue'),
-                () => document.querySelector('ytmusic-player-queue'),
-                () => document.querySelector('ytmusic-app'),
-            ];
-            let dispatcher = null;
-            let where = null;
-            for (const c of candidates) {
+            (async () => {
                 try {
-                    const el = c();
-                    if (!el) continue;
-                    // Two known dispatch paths:
-                    //   el.dispatch(...)              — high-level helper on the element
-                    //   el.queue.store.store.dispatch — direct Redux store access
-                    if (typeof el.dispatch === 'function') {
-                        dispatcher = (action) => el.dispatch(action);
-                        where = el.tagName + '.dispatch';
-                        break;
+                    const disp = resolveQueueDispatch();
+                    if (!disp) {
+                        postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: false, via: "no-dispatcher" });
+                        return;
                     }
-                    if (el.queue && el.queue.store && el.queue.store.store && typeof el.queue.store.store.dispatch === 'function') {
-                        dispatcher = (action) => el.queue.store.store.dispatch(action);
-                        where = el.tagName + '.queue.store.store.dispatch';
-                        break;
+                    const fetched = await fetchQueueRenderers(videoId);
+                    if (!fetched.items.length) {
+                        postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: false, via: "no-items:" + fetched.via });
+                        return;
                     }
-                } catch (_) {}
-            }
-            if (!dispatcher) {
-                postEvent({ event: "diagnostic", msg: "queueAddViaPage: no dispatcher found for any queue-element candidate" });
-                return false;
-            }
-            const action = {
-                type: 'ADD_ITEMS',
-                payload: {
-                    // YT's reducer (CZ(d).navigationEndpoint per the
-                    // first-pass diagnostic) expects each item to carry
-                    // a watchEndpoint navigation node. The minimal
-                    // shape YT accepts looks like a stripped-down
-                    // playlistPanelVideoRenderer.
-                    items: [{
-                        videoId: videoId,
-                        navigationEndpoint: {
-                            watchEndpoint: { videoId: videoId },
+                    const slice = resolveQueueSlice();
+                    const items = (slice.q && slice.q.items) || [];
+                    let selIdx = -1;
+                    for (let i = 0; i < items.length; i++) {
+                        const it = items[i];
+                        const r = it && (it.playlistPanelVideoRenderer
+                            || (it.playlistPanelVideoWrapperRenderer
+                                && it.playlistPanelVideoWrapperRenderer.primaryRenderer
+                                && it.playlistPanelVideoWrapperRenderer.primaryRenderer.playlistPanelVideoRenderer));
+                        if (r && r.selected) { selIdx = i; break; }
+                    }
+                    // 'next' → right after the playing row; 'end' → end
+                    // of the main items (before the automix tail).
+                    const index = position === "next" ? (selIdx >= 0 ? selIdx + 1 : 0) : items.length;
+                    disp.dispatch({
+                        type: "ADD_ITEMS",
+                        payload: {
+                            nextQueueItemId: (slice.q && slice.q.nextQueueItemId) || null,
+                            index: index,
+                            items: fetched.items,
+                            shuffleEnabled: false,
+                            shouldAssignIds: true,
                         },
-                        // Wrap in the renderer envelope YT uses
-                        // internally — sometimes the reducer keys
-                        // off `.playlistPanelVideoRenderer` on the
-                        // item rather than the item itself.
-                        playlistPanelVideoRenderer: {
-                            videoId: videoId,
-                            navigationEndpoint: {
-                                watchEndpoint: { videoId: videoId },
-                            },
-                        },
-                    }],
-                    nextQueueItemId: insertAfter ? null : undefined,
-                    index: insertAfter ? 0 : undefined,
-                    shuffleEnabled: false,
-                    shouldAssignIds: true,
-                },
-            };
-            try {
-                dispatcher(action);
-                postEvent({ event: "diagnostic", msg: "queueAddViaPage dispatched via " + where + ": " + videoId + " (" + position + ")" });
-                return true;
-            } catch (e) {
-                postEvent({ event: "diagnostic", msg: "queueAddViaPage dispatch threw at " + where + ": " + (e && e.message ? e.message : String(e)) });
-                return false;
-            }
+                    });
+                    const via = disp.via + "+" + fetched.via;
+                    // Verify after the store settles; re-emit the mirror
+                    // on success so Swift's display updates immediately.
+                    setTimeout(() => {
+                        try {
+                            const after = resolveQueueSlice();
+                            const all = (((after.q && after.q.items) || [])).concat((after.q && after.q.automixItems) || []);
+                            const present = all.some((it) => {
+                                const r = it && (it.playlistPanelVideoRenderer
+                                    || (it.playlistPanelVideoWrapperRenderer
+                                        && it.playlistPanelVideoWrapperRenderer.primaryRenderer
+                                        && it.playlistPanelVideoWrapperRenderer.primaryRenderer.playlistPanelVideoRenderer)
+                                    || (typeof it.videoId === "string" ? it : null));
+                                return !!r && r.videoId === videoId;
+                            });
+                            postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: present, via: via });
+                            if (present) {
+                                window.__riffQueueSig = undefined;
+                                emitQueueSnapshot();
+                            }
+                        } catch (e) {
+                            postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: false, via: via + "+verify-threw" });
+                        }
+                    }, 300);
+                } catch (e) {
+                    postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: false, via: "threw:" + (e && e.message ? e.message : String(e)) });
+                }
+            })();
+            return true;
         },
 
         next()     { document.querySelector(".next-button")?.click(); },
@@ -578,6 +581,75 @@
                 sel + ".queue keys=" + Object.keys(q).slice(0, 25).join("|"));
         }
         return { q: null, via: "none" };
+    }
+
+    // Find a dispatch function into the page's queue store. Ordered by
+    // directness; mirrors resolveQueueSlice's host list (the store and
+    // its dispatch usually live together).
+    function resolveQueueDispatch() {
+        const app = document.querySelector("ytmusic-app");
+        const store = app && (app.store || (app.inst && app.inst.store));
+        if (store && typeof store.dispatch === "function") {
+            return { dispatch: (a) => store.dispatch(a), via: "app.store" };
+        }
+        for (const sel of ["ytmusic-player-bar", "ytmusic-player-queue"]) {
+            const el = document.querySelector(sel);
+            const q = el && el.queue;
+            if (q) {
+                if (q.store && q.store.store && typeof q.store.store.dispatch === "function") {
+                    return { dispatch: (a) => q.store.store.dispatch(a), via: sel + ".queue.store.store" };
+                }
+                if (q.store && typeof q.store.dispatch === "function") {
+                    return { dispatch: (a) => q.store.dispatch(a), via: sel + ".queue.store" };
+                }
+                if (typeof q.dispatch === "function") {
+                    return { dispatch: (a) => q.dispatch(a), via: sel + ".queue" };
+                }
+            }
+            if (el && typeof el.dispatch === "function") {
+                return { dispatch: (a) => el.dispatch(a), via: sel + ".dispatch" };
+            }
+        }
+        return null;
+    }
+
+    // Fetch REAL queue renderers for a videoId via the page's own
+    // music/get_queue — the response's queueDatas[].content are exactly
+    // the playlistPanelVideoRenderer wrappers YT's ADD_ITEMS reducer
+    // expects (hand-built minimal shapes get silently dropped).
+    // Primary: the page's networkManager (carries auth/context itself).
+    // Fallback: a same-origin InnerTube fetch built from window.ytcfg.
+    async function fetchQueueRenderers(videoId) {
+        const app = document.querySelector("ytmusic-app");
+        const nm = app && (app.networkManager || (app.inst && app.inst.networkManager));
+        if (nm && typeof nm.fetch === "function") {
+            try {
+                const resp = await nm.fetch("/music/get_queue", { videoIds: [videoId] });
+                const datas = resp && resp.queueDatas;
+                if (Array.isArray(datas) && datas.length) {
+                    return { items: datas.map((d) => d && d.content).filter(Boolean), via: "networkManager" };
+                }
+            } catch (_) { /* fall through */ }
+        }
+        try {
+            const cfg = (window.yt && window.yt.config_) || (window.ytcfg && window.ytcfg.data_) || null;
+            const key = cfg && cfg.INNERTUBE_API_KEY;
+            const ctx = cfg && cfg.INNERTUBE_CONTEXT;
+            if (key && ctx) {
+                const r = await fetch("/youtubei/v1/music/get_queue?key=" + encodeURIComponent(key), {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ context: ctx, videoIds: [videoId] }),
+                });
+                const resp = await r.json();
+                const datas = resp && resp.queueDatas;
+                if (Array.isArray(datas) && datas.length) {
+                    return { items: datas.map((d) => d && d.content).filter(Boolean), via: "ytcfg-fetch" };
+                }
+            }
+        } catch (_) {}
+        return { items: [], via: "none" };
     }
 
     function emitQueueSnapshot() {
