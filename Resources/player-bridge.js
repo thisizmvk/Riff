@@ -317,6 +317,52 @@
             return true;
         },
 
+        // Remove a row from the PAGE's queue (Phase B). REMOVE_ITEM
+        // with the item's index is the action YT's own queue menu
+        // dispatches; unknown-type worst case is a redux no-op, and the
+        // verification reports either way.
+        queueRemoveViaPage(videoId) {
+            try {
+                const disp = resolveQueueDispatch();
+                if (!disp) {
+                    postEvent({ event: "queueRemoveResult", videoId: videoId, ok: false, via: "no-dispatcher" });
+                    return true;
+                }
+                const slice = resolveQueueSlice();
+                const items = (slice.q && slice.q.items) || [];
+                let idx = -1;
+                for (let i = 0; i < items.length; i++) {
+                    const r = unwrapQueueItem(items[i]);
+                    if (r && r.videoId === videoId) { idx = i; break; }
+                }
+                if (idx < 0) {
+                    postEvent({ event: "queueRemoveResult", videoId: videoId, ok: false, via: "not-in-items" });
+                    return true;
+                }
+                disp.dispatch({ type: "REMOVE_ITEM", payload: idx });
+                setTimeout(() => {
+                    try {
+                        const after = resolveQueueSlice();
+                        const all = (((after.q && after.q.items) || [])).concat((after.q && after.q.automixItems) || []);
+                        const gone = !all.some((it) => {
+                            const r = unwrapQueueItem(it);
+                            return !!r && r.videoId === videoId;
+                        });
+                        postEvent({ event: "queueRemoveResult", videoId: videoId, ok: gone, via: disp.via });
+                        if (gone) {
+                            window.__riffQueueSig = undefined;
+                            emitQueueSnapshot();
+                        }
+                    } catch (e) {
+                        postEvent({ event: "queueRemoveResult", videoId: videoId, ok: false, via: "verify-threw" });
+                    }
+                }, 300);
+            } catch (e) {
+                postEvent({ event: "queueRemoveResult", videoId: videoId, ok: false, via: "threw:" + (e && e.message ? e.message : String(e)) });
+            }
+            return true;
+        },
+
         next()     { document.querySelector(".next-button")?.click(); },
         previous() { document.querySelector(".previous-button")?.click(); },
 
@@ -610,6 +656,17 @@
                 return { dispatch: (a) => el.dispatch(a), via: sel + ".dispatch" };
             }
         }
+        return null;
+    }
+
+    // Unwrap any queue-item shape to its renderer (wrapper, direct, or
+    // flat). Shared by the injection/removal verification paths.
+    function unwrapQueueItem(it) {
+        if (!it) return null;
+        if (it.playlistPanelVideoRenderer) return it.playlistPanelVideoRenderer;
+        const w = it.playlistPanelVideoWrapperRenderer;
+        if (w && w.primaryRenderer) return w.primaryRenderer.playlistPanelVideoRenderer || null;
+        if (typeof it.videoId === "string") return it;
         return null;
     }
 

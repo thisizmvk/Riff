@@ -1,6 +1,7 @@
 # Queue system design — single playback authority
 
-Status: **adopted 2026-08-25** · Phase A landed · Phases B-D staged
+Status: **adopted 2026-08-25** · Phases A-C landed · Phase D gated on
+field verification (queueAddResult/queueRemoveResult logs)
 
 ## The problem this design removes
 
@@ -60,15 +61,26 @@ Invariants:
   UI + today's guaranteed fallback) + page dispatch; on a verified
   add, the Swift copy is dropped and the page owns the item. Runtime
   self-migration — no capability cliff.
-- **Phase B:** once field logs show verified adds are reliable, make
-  page dispatch the primary for all queue mutations in radio
-  (remove/reorder via dispatch where the page supports it; drop
-  affordances it doesn't).
-- **Phase C:** albums/playlists display from the mirror too (the page
-  queue in a deterministic context IS the album); `/next` fetches
-  remain for metadata only (lyrics/related/chips/like state).
-- **Phase D:** delete the pending-URL + enforcement + two-region
-  apparatus; `QueueManager` becomes mirror + history.
+- **Phase B (landed):** verified adds drop the Swift copy per-id in
+  every non-chip context (order-safe: dispatches insert at
+  selected+1 in call order, reproducing playNext/addToEnd ordering);
+  verified page-owned ids are recorded so enforcement treats their
+  arrival as expected. Queue-row removal also dispatches into the
+  page (`REMOVE_ITEM` + verification via `queueRemoveResult`), with
+  the local removal as fallback.
+- **Phase C (landed):** the mirror is the display truth in every
+  non-chip context once the current page's first snapshot lands
+  (`mirrorFresh`); `/next` refreshes become metadata-only while the
+  mirror owns the queue (they still seed initial rows on a fresh
+  page). Enforcement narrows to user-region/chip ownership.
+  "Queue drained" triggers (Repeat All, autoplay-off stop) become
+  "context exhausted" — the finishing track is a context track and
+  only autoplay filler remains — since the mirror truthfully shows
+  the page's automix padding at album end.
+- **Phase D (pending field verification):** delete the pending-URL +
+  enforcement + two-region apparatus; `QueueManager` becomes mirror +
+  history. Gate: field logs showing queueAddResult/queueRemoveResult
+  verify reliably across sessions.
 
 ## Fallback truth
 

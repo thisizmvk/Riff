@@ -319,6 +319,17 @@ final class PlayerBridge {
     /// the page radio took over ("returns to a new radio").
     @ObservationIgnored private var contextTracksIds: Set<String> = []
     @ObservationIgnored private var contextPlaylistId: String? = nil
+    /// Phase C (docs/QUEUE-DESIGN.md): true once a queueSnapshot from
+    /// the CURRENT page has been applied. While fresh, the mirror owns
+    /// the server region in every non-chip context and /next refreshes
+    /// are metadata-only; a navigation resets it so the /next fetch can
+    /// seed the initial rows before the new page's first snapshot.
+    @ObservationIgnored private var mirrorFresh: Bool = false
+    /// Ids whose page-queue add VERIFIED (Phase B): the page owns them
+    /// now, so their arrival is expected even though they left Riff's
+    /// user region — WYSIWYG enforcement must not snap them away.
+    /// Consumed on arrival; cleared on navigation (new page, new queue).
+    @ObservationIgnored private var pageOwnedQueuedIds: Set<String> = []
     /// Wall-clock deadline for pause enforcement. After a sleep-timer
     /// end-of-track or an autoplay-off end-of-queue pause, the page can
     /// still natively start the next track; any `stateChanged(playing)`
@@ -828,7 +839,13 @@ final class PlayerBridge {
                 // album tracks re-accumulate below the remaining ones and
                 // the album loops back to track 1 instead of ending.
                 let playedIds = Set(self.queue.playedEntries.suffix(200).map { $0.item.id })
-                if updateQueue {
+                // Phase C: once the current page's mirror is live, IT
+                // owns the server region (in non-chip contexts) — a
+                // /next replace here would fight it. The fetch still
+                // ran for the metadata applied below. Chip queues stay
+                // /next-driven.
+                let mirrorOwnsQueue = self.mirrorFresh && self.activeChip == nil
+                if updateQueue, !mirrorOwnsQueue {
                     let serverItems: [MediaItem] = isRadio ? [] : fetched.filter { item in
                         item.id != curId && !playedIds.contains(item.id) && !self.shouldBlock(item)
                     }
@@ -1179,6 +1196,11 @@ final class PlayerBridge {
         // otherwise a later togglePlay would yank the WebView back
         // to the restored track over the top of what's playing now.
         pendingResume = nil
+        // New page → its queue store is fresh; until its first snapshot
+        // arrives, /next fetches may seed the visible rows. Page-owned
+        // queued items die with the old page's queue.
+        mirrorFresh = false
+        pageOwnedQueuedIds = []
         await eval("window.musicBridge.navigate(\(url.jsonQuoted))")
     }
 
@@ -1538,9 +1560,10 @@ final class PlayerBridge {
             // wrong list=.
             return .navigate(watchURL(videoId: head.id, playlistId: Self.radioPlaylistId(for: head.id)))
         }
-        if !isPageDrivenContext {
-            // Deterministic server head (album continuation fetched via
-            // /next): keep the real context list.
+        if activeChip != nil || (!mirrorFresh && !isPageDrivenContext) {
+            // Chip-curated queues (page-unaware) and deterministic
+            // server heads seeded by /next BEFORE the page mirror went
+            // live: Swift drives, keeping the real context list.
             let plid: String
             if let ctx = currentPlaylistId, !ctx.isEmpty, !ctx.hasPrefix("RDAMVM") {
                 plid = ctx
@@ -1549,7 +1572,8 @@ final class PlayerBridge {
             }
             return .navigate(watchURL(videoId: head.id, playlistId: plid))
         }
-        // Mirrored radio row — the page plays it natively.
+        // Mirrored row (radio OR deterministic context with a live
+        // mirror) — the page plays it natively.
         return .native
     }
 
@@ -1620,6 +1644,16 @@ final class PlayerBridge {
         // removed row was inside the user region — no separate
         // bookkeeping needed here.
         queue.remove(videoId: videoId)
+        pageOwnedQueuedIds.remove(videoId)
+        // Phase B: also remove from the PAGE's queue so its autoplay
+        // can't play a row the user deleted. Verified via
+        // queueRemoveResult; on failure the local removal stands as a
+        // display-only hint (pre-Phase-B behavior) — the mirror's next
+        // snapshot would resurface a row the page still intends to
+        // play, which is truthful even if unwelcome.
+        if activeChip == nil {
+            await eval("window.musicBridge.queueRemoveViaPage(\(videoId.jsonQuoted))")
+        }
         await syncPendingNextURL()
     }
 
@@ -1974,12 +2008,26 @@ final class PlayerBridge {
             } else {
                 let curId = self.currentTrack?.videoId
                 let head = upNext.first(where: { $0.id != curId })
-                // Repeat All: queue drained → cycle the context. The
-                // cycle is everything played since this context started
-                // plus the track that just finished, in original order.
-                // Runs before the autoplay fallbacks so YT's radio
-                // doesn't take over at the end of an album on repeat.
-                if repeatMode == .all, head == nil {
+                // "The context is over" in the mirror world: the queue
+                // may never literally drain (the page pads album/playlist
+                // ends with automix radio rows, and the mirror shows
+                // them). The context is exhausted when the finishing
+                // track IS a context track, the user region is empty,
+                // and the next shown row is NOT a context track (i.e.
+                // only autoplay filler remains).
+                let contextExhausted: Bool = {
+                    guard queue.userQueueCount == 0, !contextTracksIds.isEmpty,
+                          let cur = currentTrack, contextTracksIds.contains(cur.videoId),
+                          contextTracksIds.count > 1 else { return false }
+                    guard let head else { return true }
+                    return !contextTracksIds.contains(head.id)
+                }()
+                // Repeat All: context over → cycle it. The cycle is
+                // everything played since this context started plus the
+                // track that just finished, in original order. Runs
+                // before the autoplay fallbacks so YT's radio doesn't
+                // take over at the end of an album on repeat.
+                if repeatMode == .all, head == nil || contextExhausted {
                     let start = min(contextStartHistoryIndex, queue.playedEntries.count)
                     var cycle = queue.playedEntries[start...].map(\.item)
                     if let cur = currentTrack {
@@ -2000,11 +2048,12 @@ final class PlayerBridge {
                         return
                     }
                 }
-                // Autoplay OFF + nothing left → stop, matching the
-                // Settings copy ("stop at the end of the current queue
-                // or album"). Without this the page drifts into its own
-                // radio at album end regardless of the setting.
-                if !autoplayEnabled, head == nil {
+                // Autoplay OFF + nothing left (or only autoplay filler
+                // left) → stop, matching the Settings copy ("stop at
+                // the end of the current queue or album"). Without this
+                // the page drifts into its own radio at album end
+                // regardless of the setting.
+                if !autoplayEnabled, head == nil || contextExhausted {
                     Log.bridge.debug(".ended → autoplay off, queue drained → pausing")
                     Task { [weak self] in
                         guard let self else { return }
@@ -2041,23 +2090,30 @@ final class PlayerBridge {
                 }
             }
         case .queueAddResult(let videoId, let position, let ok, let via):
-            // Phase A self-migration (docs/QUEUE-DESIGN.md): a VERIFIED
+            // Phase B self-migration (docs/QUEUE-DESIGN.md): a VERIFIED
             // page-queue add means the page now owns the item — its own
             // autoplay will play it at the right slot, and the mirror
             // will display it. Drop Swift's fallback copy so the two
-            // authorities can't fight. Conservatively scoped to the
-            // simple case (page-driven context, this is the ONLY
-            // user-region item); multiple queued items keep the proven
-            // fallback until Phase B.
-            if ok, isPageDrivenContext,
-               queue.isUserQueued(videoId: videoId),
-               queue.userQueueCount == 1 {
+            // authorities can't fight. Per-id and order-safe with
+            // multiple queued items: dispatches insert at the
+            // then-selected+1 in call order, which reproduces exactly
+            // the ordering playNext/addToEnd built Swift-side. Items
+            // whose add did NOT verify stay in the user region and keep
+            // the proven fallback. Chip contexts keep Swift ownership.
+            if ok, activeChip == nil,
+               queue.isUserQueued(videoId: videoId) {
                 queue.remove(videoId: videoId)
+                pageOwnedQueuedIds.insert(videoId)
                 Task { [weak self] in await self?.syncPendingNextURL() }
                 Log.bridge.debug("queueAddResult VERIFIED (\(position, privacy: .public) via \(via, privacy: .public)) → page owns \(videoId, privacy: .public); Swift fallback dropped")
             } else {
                 Log.bridge.debug("queueAddResult ok=\(ok, privacy: .public) pos=\(position, privacy: .public) via=\(via, privacy: .public) id=\(videoId, privacy: .public) (fallback retained)")
             }
+        case .queueRemoveResult(let videoId, let ok, let via):
+            // Log-only: on ok the JS re-emits the mirror (display
+            // already updated locally); on failure the next snapshot
+            // truthfully resurfaces the row the page still holds.
+            Log.bridge.debug("queueRemoveResult ok=\(ok, privacy: .public) via=\(via, privacy: .public) id=\(videoId, privacy: .public)")
         case .queueSnapshot(let items):
             // PHASE 2 radio truth: mirror the page's OWN queue into the
             // server region. Radio queues are non-deterministic — an
@@ -2066,7 +2122,11 @@ final class PlayerBridge {
             // source. Deterministic contexts (albums/playlists) keep
             // the /next fetch, whose rows are richer (album/artist ids),
             // and chip-tuned queues are Riff-curated (page-unaware).
-            guard isPageDrivenContext else { break }
+            // Phase C: the mirror is the display truth in EVERY context
+            // except chip-tuned queues (Riff-curated; the page doesn't
+            // know the chip). Deterministic contexts included — the page
+            // queue in an album/playlist context IS the album/playlist.
+            guard activeChip == nil else { break }
             // While the user region has items, the USER'S list is the
             // queue — repainting radio filler beneath it on every poll
             // is churn ("queue changes dynamically"), and those rows
@@ -2101,6 +2161,7 @@ final class PlayerBridge {
                 }
                 .filter { !shouldBlock($0) }
             queue.replaceServerRegion(mapped)
+            mirrorFresh = true
             // Mirrored rows are the page's, not Smart Shuffle's — clear
             // stale injection ids so no mirrored row whose id happens to
             // match an old injection wears a false "+" badge.
@@ -2182,8 +2243,19 @@ final class PlayerBridge {
             // enforcement applies only when the user has explicitly
             // queued something, or in deterministic (album/playlist)
             // contexts where the shown queue is independently correct.
-            let wysiwygEnforceable = queue.userQueueCount > 0 || !isPageDrivenContext
-            if wysiwygEnforceable,
+            // Phase C: with the mirror as display truth everywhere,
+            // enforcement is only meaningful where Riff genuinely owns
+            // the next-up order — explicit user-queued items and
+            // chip-curated queues. Everywhere else the shown queue IS
+            // the page's, so "divergence" can only be mirror lag.
+            let wysiwygEnforceable = queue.userQueueCount > 0 || activeChip != nil
+                || (!mirrorFresh && !isPageDrivenContext)
+            // A verified page-owned queued item arriving is EXPECTED —
+            // the page inserted it ahead of the shown head by design.
+            if !sameVideoId, pageOwnedQueuedIds.contains(id) {
+                pageOwnedQueuedIds.remove(id)
+                Log.bridge.debug("trackChanged: \(id, privacy: .public) is a verified page-owned queued item — expected arrival")
+            } else if wysiwygEnforceable,
                !sameVideoId, !withinClickGrace,
                let head = upNext.first(where: { $0.id != currentTrack?.videoId }),
                head.id != id {

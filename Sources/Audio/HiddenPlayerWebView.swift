@@ -31,6 +31,9 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         /// verified add lets Swift drop its fallback copy (the page
         /// owns the item). See docs/QUEUE-DESIGN.md.
         case queueAddResult(videoId: String, position: String, ok: Bool, via: String)
+        /// Outcome of a queueRemoveViaPage dispatch (Phase B): `ok`
+        /// means the id was verified GONE from the page queue.
+        case queueRemoveResult(videoId: String, ok: Bool, via: String)
         /// The page's OWN queue (ytmusic-app store: items + automixItems),
         /// emitted by the JS safety poll whenever it changes. This is the
         /// ground truth for radio contexts, whose queues are
@@ -153,6 +156,13 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
             return .queueAddResult(
                 videoId: videoId,
                 position: (body["position"] as? String) ?? "",
+                ok: (body["ok"] as? Bool) ?? false,
+                via: (body["via"] as? String) ?? ""
+            )
+        case "queueRemoveResult":
+            guard let videoId = body["videoId"] as? String, !videoId.isEmpty else { return nil }
+            return .queueRemoveResult(
+                videoId: videoId,
                 ok: (body["ok"] as? Bool) ?? false,
                 via: (body["via"] as? String) ?? ""
             )

@@ -241,5 +241,36 @@ const wrap = (id, title, byline, selected = false) => ({
   check(r.length === 1 && r[0].ok === false && r[0].via.startsWith("no-items"), "no renderers fetchable → ok=false no-items");
 }
 
+// ---- Case 13: queueRemoveViaPage (dispatch + verify) ----------------------
+{
+  elements.clear();
+  const dispatched = [];
+  const state = { queue: { items: [renderer("r1", "R1", "A", true), renderer("r2", "R2", "A"), renderer("r3", "R3", "A")] } };
+  elements.set("ytmusic-app", {
+    store: {
+      getState: () => state,
+      dispatch: (a) => {
+        dispatched.push(a);
+        if (a.type === "REMOVE_ITEM") state.queue.items.splice(a.payload, 1);
+      },
+    },
+  });
+  posted.length = 0;
+  window.__riffQueueSig = undefined;
+  window.musicBridge.queueRemoveViaPage("r2");
+  await settle();
+  const r = posted.filter((p) => p.event === "queueRemoveResult");
+  check(r.length === 1 && r[0].ok === true, "verified remove reports ok=true");
+  check(dispatched.some((a) => a.type === "REMOVE_ITEM" && a.payload === 1), "REMOVE_ITEM dispatched with the row's index");
+  check(posted.some((p) => p.event === "queueSnapshot" && !p.items.some((row) => row.videoId === "r2")), "mirror re-emitted without the removed row");
+
+  // Unknown id → not-in-items failure, no dispatch.
+  posted.length = 0;
+  window.musicBridge.queueRemoveViaPage("nope");
+  await settle();
+  const r2 = posted.filter((p) => p.event === "queueRemoveResult");
+  check(r2.length === 1 && r2[0].ok === false && r2[0].via === "not-in-items", "unknown id → ok=false not-in-items");
+}
+
 console.log(`\nJS RESULT: ${passes} passed, ${failures} failed`);
 process.exit(failures === 0 ? 1 - 1 : 1);
