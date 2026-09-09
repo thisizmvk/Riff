@@ -403,39 +403,26 @@
         // trackChanged arrival and falls back to navigation otherwise.
         queuePlayItem(videoId) {
             try {
-                const slice = resolveQueueSlice();
-                const items = (slice.q && slice.q.items) || [];
-                const auto = (slice.q && slice.q.automixItems) || [];
-                const findIdx = (arr) => {
-                    for (let i = 0; i < arr.length; i++) {
-                        const r = unwrapQueueItem(arr[i]);
-                        if (r && r.videoId === videoId) return i;
-                    }
-                    return -1;
-                };
-                let idx = findIdx(items);
-                let inAutomix = false;
-                if (idx < 0) { idx = findIdx(auto); inAutomix = idx >= 0; }
-                if (idx < 0) {
-                    postEvent({ event: "diagnostic", msg: "queuePlayItem: " + videoId + " not-in-queue" });
+                // IDENTITY-verified only. The previous version targeted
+                // rows by store index and fell back to
+                // playerApi.playVideoAt(index) — the player's index space
+                // is not the store's, and that played the WRONG row; the
+                // Swift fallback then navigated and re-rolled the radio.
+                // Now: find the queue-panel row whose own data carries
+                // this videoId; click only that; never guess.
+                const rows = document.querySelectorAll("ytmusic-player-queue-item");
+                let match = null;
+                for (const row of rows) {
+                    if (rowVideoId(row) === videoId) { match = row; break; }
+                }
+                if (!match) {
+                    postEvent({ event: "diagnostic", msg: "queuePlayItem: " + videoId + " no identity-matched row (rows=" + rows.length + ")" });
                     return false;
                 }
-                const listSel = inAutomix ? "#automix-contents" : "#contents";
-                const rows = document.querySelectorAll("ytmusic-player-queue " + listSel + " > ytmusic-player-queue-item");
-                const row = rows && rows[idx];
-                if (row) {
-                    const btn = (row.querySelector && row.querySelector("ytmusic-play-button-renderer, #play-button, .play-button")) || row;
-                    btn.click();
-                    postEvent({ event: "diagnostic", msg: "queuePlayItem: " + videoId + " via queue-row-click idx=" + idx + (inAutomix ? " (automix)" : "") });
-                    return true;
-                }
-                const api = playerApi();
-                if (!inAutomix && api && typeof api.playVideoAt === "function") {
-                    api.playVideoAt(idx);
-                    postEvent({ event: "diagnostic", msg: "queuePlayItem: " + videoId + " via playVideoAt idx=" + idx });
-                    return true;
-                }
-                postEvent({ event: "diagnostic", msg: "queuePlayItem: " + videoId + " no-strategy (rows=" + (rows ? rows.length : 0) + ")" });
+                const btn = (match.querySelector && match.querySelector("ytmusic-play-button-renderer, #play-button, .play-button")) || match;
+                btn.click();
+                postEvent({ event: "diagnostic", msg: "queuePlayItem: " + videoId + " via identity-matched row click" });
+                return true;
             } catch (e) {
                 postEvent({ event: "diagnostic", msg: "queuePlayItem threw: " + (e && e.message ? e.message : String(e)) });
             }
@@ -746,6 +733,27 @@
         const w = it.playlistPanelVideoWrapperRenderer;
         if (w && w.primaryRenderer) return w.primaryRenderer.playlistPanelVideoRenderer || null;
         if (typeof it.videoId === "string") return it;
+        return null;
+    }
+
+    // The videoId a queue-panel row represents, read from the row's own
+    // bound data (property names vary across builds) or, failing that,
+    // an inner watch link. Null when the row can't be identified —
+    // callers must treat that as "don't click".
+    function rowVideoId(row) {
+        try {
+            const cands = [row.data, row.queueItem, row.item, row.__data && row.__data.data];
+            for (const c of cands) {
+                const r = unwrapQueueItem(c);
+                if (r && typeof r.videoId === "string") return r.videoId;
+                if (c && typeof c.videoId === "string") return c.videoId;
+            }
+            const a = row.querySelector && row.querySelector('a[href*="v="]');
+            if (a && a.href) {
+                const v = new URL(a.href, location.origin).searchParams.get("v");
+                if (v) return v;
+            }
+        } catch (_) {}
         return null;
     }
 

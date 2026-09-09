@@ -113,6 +113,9 @@ final class PlayerBridge {
     /// queue assignment + related-songs assignment paths.
     @ObservationIgnored
     var shouldBlock: (MediaItem) -> Bool = { _ in false }
+    /// Invoked when a tapped Up Next row could not be played in place
+    /// (page-queue jump didn't take). AppEnvironment shows a toast.
+    var onJumpFailed: ((MediaItem) -> Void)? = nil
 
     // NOTE: The old `userQueuedIds` set was replaced by
     // `QueueManager.userQueueCount` — a positional region at the
@@ -1658,9 +1661,13 @@ final class PlayerBridge {
             Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
                 guard let self, self.currentTrack?.videoId != target.id else { return }
-                Log.bridge.debug("skipTo: page didn't jump to \(target.id, privacy: .public) in 2.5s → navigation fallback")
-                self.queue.remove(videoId: target.id)
-                await self.play(item: target, clearQueue: false)
+                // NON-destructive fallback. Navigating here reloads the
+                // page and RE-ROLLS the radio — replacing the entire list
+                // the user was looking at, which is worse than a tap that
+                // didn't take. Tell them and keep the queue intact; the
+                // diagnostic line names which strategy missed.
+                Log.bridge.error("skipTo: page didn't jump to \(target.id, privacy: .public) in 2.5s — keeping queue intact (no navigation)")
+                self.onJumpFailed?(target)
             }
             return
         }

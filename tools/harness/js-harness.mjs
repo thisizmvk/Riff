@@ -274,24 +274,29 @@ const wrap = (id, title, byline, selected = false) => ({
   check(r2.length === 1 && r2[0].ok === false && r2[0].via === "not-in-items", "unknown id → ok=false not-in-items");
 }
 
-// ---- Case 14: queuePlayItem — in-place page-queue jump ---------------------
+// ---- Case 14: queuePlayItem — identity-verified in-place jump -----------
 {
   elements.clear(); lists.clear();
-  const state = { queue: { items: [renderer("j1", "J1", "A", true), renderer("j2", "J2", "A"), renderer("j3", "J3", "A")], automixItems: [renderer("m1", "M1", "A")] } };
+  const state = { queue: { items: [renderer("j1", "J1", "A", true), renderer("j2", "J2", "A"), renderer("j3", "J3", "A")] } };
   elements.set("ytmusic-app", { store: { getState: () => state, dispatch: () => {} } });
   const clicked = [];
-  const mkRow = (id) => ({ querySelector: () => ({ click: () => clicked.push(id) }), click: () => clicked.push(id + "-row") });
-  lists.set("ytmusic-player-queue #contents > ytmusic-player-queue-item", [mkRow("j1"), mkRow("j2"), mkRow("j3")]);
-  lists.set("ytmusic-player-queue #automix-contents > ytmusic-player-queue-item", [mkRow("m1")]);
+  // Rows deliberately in a DIFFERENT order than the store, with the
+  // videoId bound on the row's data — the old index-based click would
+  // have hit the wrong one.
+  const mkRow = (id) => ({ data: renderer(id, id, "A"), querySelector: () => ({ click: () => clicked.push(id) }), click: () => clicked.push(id + "-row") });
+  lists.set("ytmusic-player-queue-item", [mkRow("j3"), mkRow("j1"), mkRow("j2")]);
   posted.length = 0;
-  check(window.musicBridge.queuePlayItem("j3") === true && clicked.at(-1) === "j3", "jump clicks the matching #contents row (index-aligned)");
-  check(window.musicBridge.queuePlayItem("m1") === true && clicked.at(-1) === "m1", "automix rows map to #automix-contents");
-  check(window.musicBridge.queuePlayItem("nope") === false && posted.some((p) => p.event === "diagnostic" && p.msg.includes("not-in-queue")), "unknown id → not-in-queue diagnostic, no click");
-  // No rendered rows → playVideoAt fallback via the player API.
+  check(window.musicBridge.queuePlayItem("j2") === true && clicked.at(-1) === "j2", "clicks the row whose OWN data matches the id, regardless of position");
+  check(window.musicBridge.queuePlayItem("nope") === false && clicked.at(-1) === "j2", "unknown id → no click at all");
+  check(posted.some((p) => p.event === "diagnostic" && p.msg.includes("no identity-matched row")), "unknown id → diagnostic");
+  // Row identified via inner watch link when no data property exists.
+  lists.set("ytmusic-player-queue-item", [{ querySelector: (sel) => sel.startsWith("a[") ? { href: "https://music.youtube.com/watch?v=j1&list=x" } : { click: () => clicked.push("j1-link") } }]);
+  check(window.musicBridge.queuePlayItem("j1") === true && clicked.at(-1) === "j1-link", "falls back to the row's watch link for identity");
+  // No rows rendered → refuses (no playVideoAt index guessing anymore).
   lists.clear();
   const played = [];
   elements.set("ytmusic-player", { playerApi: { playVideoAt: (i) => played.push(i), getVideoData: () => ({}), addEventListener: () => {} } });
-  check(window.musicBridge.queuePlayItem("j2") === true && played.at(-1) === 1, "no rows → playerApi.playVideoAt(index) fallback");
+  check(window.musicBridge.queuePlayItem("j2") === false && played.length === 0, "no rows → returns false, never index-guesses via playVideoAt");
 }
 
 console.log(`\nJS RESULT: ${passes} passed, ${failures} failed`);

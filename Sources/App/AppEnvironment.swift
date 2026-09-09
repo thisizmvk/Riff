@@ -964,6 +964,9 @@ final class AppEnvironment {
         self.player.shouldBlock = { [weak self] item in
             self?.isBlocked(item) ?? false
         }
+        self.player.onJumpFailed = { [weak self] item in
+            self?.showToast("Couldn't jump to “\(item.title)” — try tapping it again")
+        }
 
         // B9 — drain any widget command that landed while the app was
         // backgrounded. The widget's transport buttons enqueue a
