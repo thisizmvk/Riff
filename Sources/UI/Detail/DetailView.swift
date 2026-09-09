@@ -273,7 +273,6 @@ struct DetailView: View {
     /// the human-readable name because `item.title` can be stale
     /// (e.g. arriving via "Go to artist" from a song row where the
     /// artist name was a subtitle split that lost the full name).
-    @ViewBuilder
     /// Follow / Following toggle on Artist pages — the library already
     /// has a "New from artists you follow" rail, but there was no way to
     /// follow anyone without leaving the app.
@@ -294,6 +293,7 @@ struct DetailView: View {
         .help(following ? "Stop following this artist" : "Follow this artist on YouTube Music")
     }
 
+    @ViewBuilder
     private func blockArtistButton(page: InnerTubeClient.DetailPage) -> some View {
         let blocked = env.isBlocked(artistId: item.id)
         Button {
