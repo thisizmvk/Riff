@@ -47,8 +47,6 @@ struct NowPlayingView: View {
     /// the player with large, centered (synced) lyrics over the
     /// adaptive backdrop. Apple Music's dedicated lyrics view.
     @State private var lyricsFullscreen: Bool = false
-    /// Hover state for the now-playing artist link (subtitle).
-    @State private var artistLinkHover: Bool = false
     /// Volume level to restore when the speaker icon un-mutes.
     @State private var preMuteVolume: Double = 1.0
 
@@ -237,22 +235,16 @@ struct NowPlayingView: View {
                             .accessibilityLabel("Metadata edited")
                     }
                 }
-                Button {
-                    env.navigateToArtist(
-                        name: artistName(track: track),
-                        artistId: track?.artistId
-                    )
-                } label: {
-                    Text(displayedSubtitle(track: track))
-                        .font(.system(size: 14))
-                        .foregroundStyle(.white.opacity(artistLinkHover ? 1.0 : 0.7))
-                        .underline(artistLinkHover)
-                        .lineLimit(1)
-                }
-                .buttonStyle(.plain)
-                .onHover { artistLinkHover = $0 }
-                .help("Go to artist")
-                .accessibilityLabel("Go to artist \(artistName(track: track))")
+                // Each credited artist is its own link (hover highlights
+                // only that name; click opens THAT artist) — the previous
+                // single link lit the whole credit string and could only
+                // reach the first artist.
+                ArtistLinkLine(
+                    subtitle: displayedSubtitle(track: track),
+                    primaryArtistId: track?.artistId,
+                    fontSize: 14,
+                    baseOpacity: 0.7
+                )
             }
             .padding(.horizontal, 32)
             .contextMenu { nowPlayingMenuItems }
@@ -2037,6 +2029,65 @@ struct NowPlayingView: View {
 /// The scrubber + time labels, isolated from NowPlayingView so its
 /// ~4Hz elapsed/duration reads only re-render THIS view, not the
 /// 2,100-line parent body (see the `scrubber` accessor comment).
+private struct ScrubberSection: View {
+    @Environment(AppEnvironment.self) private var env
+    @State private var scrubbing: Double? = nil
+
+    var body: some View {
+        // Sanitize against NaN/±inf. `<video>.duration` is NaN until a new
+        // track's metadata loads, and Swift's `max(NaN, x)` returns NaN
+        // (NaN fails every comparison) — so `0...duration` would trap with
+        // "Range requires lowerBound <= upperBound". Never let a non-finite
+        // value reach the Range or the Slider binding.
+        let rawDuration = env.player.duration
+        let duration = (rawDuration.isFinite && rawDuration > 0) ? rawDuration : 0.001
+        let rawElapsed = scrubbing ?? env.player.elapsed
+        let displayed = min(max(rawElapsed.isFinite ? rawElapsed : 0, 0), duration)
+        return VStack(spacing: 6) {
+            ScrubberSlider(
+                value: Binding(
+                    get: { displayed },
+                    set: { scrubbing = $0 }
+                ),
+                range: 0...duration,
+                onCommit: { value in
+                    scrubbing = nil
+                    Task { await env.player.seek(to: value / duration) }
+                }
+            )
+            HStack {
+                Text(format(time: displayed))
+                Spacer()
+                Text("-" + format(time: max(0, duration - displayed)))
+            }
+            .font(.system(size: 11, weight: .medium, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.75))
+        }
+    }
+
+    private func format(time: Double) -> String {
+        guard time.isFinite, time >= 0 else { return "0:00" }
+        let total = Int(time)
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+/// Clickable artist line inside a queue row. Hover underlines +
+/// brightens; click opens the artist page (by id when the row carries
+/// one, else name-resolved via search — see `navigateToArtist`). The
+/// name passed for resolution is the first subtitle segment (artist
+/// comes first in "Artist · Album · Year").
+private struct QueueArtistLink: View {
+    let label: String
+    let item: MediaItem
+
+    var body: some View {
+        ArtistLinkLine(subtitle: label, primaryArtistId: item.artistId, fontSize: 10, baseOpacity: 0.75)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
+    }
+}
+
 private struct ScrubberSection: View {
     @Environment(AppEnvironment.self) private var env
     @State private var scrubbing: Double? = nil
