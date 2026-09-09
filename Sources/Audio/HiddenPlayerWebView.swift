@@ -39,7 +39,7 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         /// ground truth for radio contexts, whose queues are
         /// non-deterministic and can't be reproduced by an independent
         /// /next call. `selected == true` marks the currently-playing row.
-        case queueSnapshot(items: [PageQueueItem])
+        case queueSnapshot(items: [PageQueueItem], shuffleEnabled: Bool?)
     }
 
     /// One row of the page's real queue, as mirrored from the ytmusic-app
@@ -179,7 +179,7 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
                 )
             }
             guard !items.isEmpty else { return nil }
-            return .queueSnapshot(items: items)
+            return .queueSnapshot(items: items, shuffleEnabled: body["shuffleEnabled"] as? Bool)
         case "riffNavigatedTo":
             // Bookkeeping-only event so Swift can log JS-driven nav.
             // Commit-1 keeps this hooked while __riffPendingNextUrl

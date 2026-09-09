@@ -867,6 +867,10 @@ struct NowPlayingView: View {
                         .background(Color.white.opacity(0.06))
                         .foregroundStyle(.white.opacity(0.85))
                         .clipShape(Capsule())
+                        // Never wrap a chip label mid-word ("Sav e") when
+                        // four chips share the pane header; overflow is
+                        // absorbed by the section title instead.
+                        .fixedSize()
                     }
                     .buttonStyle(.plain)
                     .help("Save these tracks as a new playlist")
@@ -891,6 +895,10 @@ struct NowPlayingView: View {
                         .background(Color.white.opacity(0.06))
                         .foregroundStyle(.white.opacity(0.85))
                         .clipShape(Capsule())
+                        // Never wrap a chip label mid-word ("Sav e") when
+                        // four chips share the pane header; overflow is
+                        // absorbed by the section title instead.
+                        .fixedSize()
                     }
                     .buttonStyle(.plain)
                     .help("Remove all upcoming tracks")

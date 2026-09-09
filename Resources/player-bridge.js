@@ -363,6 +363,31 @@
             return true;
         },
 
+        // Toggle the PAGE's shuffle (single-authority design): the page
+        // permutes its own queue, the mirror displays that order, and
+        // Next plays the top row — so shuffle never desynchronizes the
+        // shown list from the play order. Selector candidates cover the
+        // player-bar control and the queue-panel control across builds;
+        // a diagnostic fires once if none is found.
+        toggleShuffle() {
+            const candidates = [
+                "ytmusic-player-bar .shuffle",
+                "ytmusic-player-bar tp-yt-paper-icon-button.shuffle",
+                "ytmusic-player-bar [aria-label*='huffle']",
+                "#queue .shuffle",
+                "ytmusic-player-queue [aria-label*='huffle']",
+            ];
+            for (const sel of candidates) {
+                const el = document.querySelector(sel);
+                if (el) { el.click(); return true; }
+            }
+            if (!window.__riffShuffleSelectorWarned) {
+                window.__riffShuffleSelectorWarned = true;
+                postEvent({ event: "diagnostic", msg: "toggleShuffle: no shuffle control matched any candidate selector" });
+            }
+            return false;
+        },
+
         next()     { document.querySelector(".next-button")?.click(); },
         previous() { document.querySelector(".previous-button")?.click(); },
 
@@ -765,7 +790,14 @@
             if (sig === window.__riffQueueSig) return;
             window.__riffQueueSig = sig;
             reportQueueShapeOnce("ok", rows.length + " rows via " + resolved.via);
-            postEvent({ event: "queueSnapshot", items: rows });
+            postEvent({
+                event: "queueSnapshot",
+                items: rows,
+                // The page's own shuffle state (single-authority: in
+                // page-driven contexts Swift mirrors this rather than
+                // keeping a local flag that the display can't honor).
+                shuffleEnabled: (typeof q.shuffleEnabled === "boolean") ? q.shuffleEnabled : null,
+            });
         } catch (e) {
             if (!window.__riffQueueSnapErrLogged) {
                 window.__riffQueueSnapErrLogged = true;

@@ -377,6 +377,14 @@ final class PlayerBridge {
     func toggleShuffle() {
         shuffleEnabled.toggle()
         UserDefaults.standard.set(shuffleEnabled, forKey: Self.shuffleKey)
+        // Page-driven contexts delegate to the PAGE's shuffle: it
+        // permutes the queue we mirror, so the shown order stays the
+        // play order. The next snapshot re-syncs our flag from the
+        // page (authoritative), correcting an optimistic flip if the
+        // control wasn't found.
+        if isPageDrivenContext {
+            Task { [weak self] in await self?.eval("window.musicBridge.toggleShuffle()") }
+        }
         // Flipping shuffle changes whether Smart Shuffle is "active".
         // Re-run the merge so the queue picks up (or sheds) injections
         // immediately rather than waiting for the next /next response.
@@ -1265,8 +1273,14 @@ final class PlayerBridge {
         }
 
         // 2. Shuffle over the SERVER region only (user region is
-        //    empty or exhausted at this point).
-        if shuffleEnabled {
+        //    empty or exhausted at this point). NOT in page-driven
+        //    contexts: a local random pick from the 49 mirrored rows
+        //    plays a row the user can't see while the list still shows
+        //    sequential order ("queue order seems off"), and the
+        //    navigation re-rolls the radio. There, shuffle is the
+        //    PAGE's (toggleShuffle delegates to it) and Next advances
+        //    page-natively (3a) into whatever order the page holds.
+        if shuffleEnabled, !isPageDrivenContext {
             let serverCandidates = Array(upNext.dropFirst(userCount)).filter { $0.id != currentId }
             if let pick = serverCandidates.randomElement() {
                 await skipTo(item: pick)
@@ -2114,7 +2128,15 @@ final class PlayerBridge {
             // already updated locally); on failure the next snapshot
             // truthfully resurfaces the row the page still holds.
             Log.bridge.debug("queueRemoveResult ok=\(ok, privacy: .public) via=\(via, privacy: .public) id=\(videoId, privacy: .public)")
-        case .queueSnapshot(let items):
+        case .queueSnapshot(let items, let pageShuffle):
+            // Page-driven contexts: the page's shuffle state is the
+            // truth — a lit local shuffle icon the display can't honor
+            // is exactly what produced "queue order seems off".
+            if isPageDrivenContext, let pageShuffle, pageShuffle != shuffleEnabled {
+                shuffleEnabled = pageShuffle
+                UserDefaults.standard.set(pageShuffle, forKey: Self.shuffleKey)
+                Log.bridge.debug("queueSnapshot: synced shuffle from page → \(pageShuffle, privacy: .public)")
+            }
             // PHASE 2 radio truth: mirror the page's OWN queue into the
             // server region. Radio queues are non-deterministic — an
             // independent /next fetch shows a different radio than the

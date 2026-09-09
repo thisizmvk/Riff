@@ -111,6 +111,19 @@ struct MiniPlayerView: View {
             .background(.ultraThinMaterial)
             .contentShape(Rectangle())
             .onTapGesture { env.player.isFullPlayerOpen = true }
+            // The tap-to-expand was invisible to assistive tech: the
+            // mini player exposed no accessible element at all, so
+            // VoiceOver users had no way to open Now Playing / the
+            // queue. Expose the expand action explicitly (transport +
+            // volume keep their own labels as children).
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(
+                "Now playing: \(track?.title ?? "nothing"). \(track?.subtitle ?? "")"
+            )
+            .accessibilityHint("Opens the full player and queue")
+            .accessibilityAction(named: "Open Now Playing") {
+                env.player.isFullPlayerOpen = true
+            }
             // Right-click on the mini bar surfaces the now-playing
             // version of YT Music's track menu — Go to album/artist
             // are the high-value entries here, so the user can jump
