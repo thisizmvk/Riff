@@ -49,8 +49,26 @@ final class AppEnvironment {
             if let expires = cookie.expiresDate { return expires > now }
             return true  // session cookie — no explicit expiry
         }) ?? false
-        isSignedIn = hasToken || hasLiveCookie
+        let nowSignedIn = hasToken || hasLiveCookie
+        // Session-expiry notice: a user who WAS signed in and comes
+        // back to find the account icon silently anonymous has no idea
+        // why their library went blank. Say so. `signOut()` clears the
+        // flag first so a deliberate sign-out never triggers this.
+        let wasSignedIn = UserDefaults.standard.bool(forKey: Self.wasSignedInKey)
+        if wasSignedIn, !nowSignedIn {
+            UserDefaults.standard.set(false, forKey: Self.wasSignedInKey)
+            Task { @MainActor [weak self] in
+                // Let the window come up first so the banner has a home.
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                self?.showToast("Your YouTube Music session expired — sign in again for your library and ad-free playback")
+            }
+        } else if nowSignedIn {
+            UserDefaults.standard.set(true, forKey: Self.wasSignedInKey)
+        }
+        isSignedIn = nowSignedIn
     }
+
+    private static let wasSignedInKey = "auth.wasSignedIn"
 
     /// Sign out clears OAuth tokens + cookies and re-evaluates state.
     /// `isSignedIn` flips to false SYNCHRONOUSLY (so the UI updates
@@ -58,6 +76,8 @@ final class AppEnvironment {
     /// background so a later re-sign-in actually shows Google's
     /// login page instead of silently reusing the old account.
     func signOut() {
+        // Deliberate sign-out must not read as "session expired".
+        UserDefaults.standard.set(false, forKey: Self.wasSignedInKey)
         OAuthDeviceFlow.signOut()
         HTTPCookieStorage.shared.cookies?
             .filter { $0.domain.contains("youtube.com") || $0.domain.contains("google.com") }

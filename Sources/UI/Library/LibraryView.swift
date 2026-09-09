@@ -138,6 +138,10 @@ struct LibraryView: View {
                 ForEach(Section.allCases) { s in Text(s.rawValue).tag(s) }
             }
             .pickerStyle(.segmented)
+            // macOS renders a segmented Picker's label as a leading
+            // caption — "Section" was showing up as a phantom first
+            // segment. The label stays for VoiceOver; just not drawn.
+            .labelsHidden()
             .padding(.horizontal, 24)
             .padding(.top, 8)
 
@@ -368,14 +372,40 @@ struct LibraryView: View {
         // and any failure should silently hide the carousels rather
         // than show an error banner above the user's primary library
         // content.
-        async let libraryFetch = env.innerTube.library(section: section)
         async let mixedFetch = env.innerTube.browseMixedForYou()
-        do {
-            items = try await libraryFetch
+        if section == .history {
+            // History comes from Riff's OWN journal — the same
+            // `playedEntries` Home's "You've been playing" renders. The
+            // InnerTube history feed was returning empty (it's a
+            // separate server-side log that anonymous-shaped sessions
+            // never populate), so the tab read "No listening history
+            // yet" while Home showed hundreds of plays. Local is also
+            // instant and works without a network round-trip.
+            // Most-recent first, deduped to the latest play of each id.
+            var seen = Set<String>()
+            items = env.player.playedEntries.reversed().compactMap { entry in
+                seen.insert(entry.item.id).inserted ? entry.item : nil
+            }
             errorMessage = nil
-        } catch {
-            items = []
-            errorMessage = LoadErrorPresenter.message(for: error, env: env)
+        } else {
+            do {
+                let fetched = try await env.innerTube.library(section: section)
+                items = fetched
+                errorMessage = nil
+                // Silent auth decay: a stale-but-unexpired cookie makes
+                // InnerTube answer library calls with an anonymous-shaped
+                // EMPTY response instead of an error — the user then sees
+                // "No liked songs yet" for a library they know is full.
+                // Confirm with a cheap account probe before believing an
+                // empty library from a signed-in user.
+                if fetched.isEmpty, env.isSignedIn,
+                   await env.innerTube.fetchAccountInfo() == nil {
+                    errorMessage = "Your YouTube Music session looks expired — sign in again to see your library."
+                }
+            } catch {
+                items = []
+                errorMessage = LoadErrorPresenter.message(for: error, env: env)
+            }
         }
         // try? collapses both "feed errored" and "feed returned empty"
         // into the same hide-the-carousels code path — exactly what we

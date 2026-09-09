@@ -118,7 +118,17 @@ enum PersonalizedShelves {
         // but defensive), we return nil so the caller drops the
         // entry rather than surfacing "Song" as an artist name.
         for segment in segments where !kindLabels.contains(segment) {
-            return segment
+            // The artist run is often a multi-credit string
+            // ("A.R. Rahman, Karthik, Devan" / "Thaman S & Sid Sriram").
+            // A top-ARTISTS tile should name the primary artist, not a
+            // truncated credits list — take the first credited name.
+            let primary = segment
+                .replacingOccurrences(of: " & ", with: ", ")
+                .replacingOccurrences(of: " and ", with: ", ")
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .first(where: { !$0.isEmpty })
+            return primary ?? segment
         }
         return nil
     }
