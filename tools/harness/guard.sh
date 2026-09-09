@@ -51,6 +51,16 @@ done
 #    reintroduces the two-radios bug). The page-driven flag itself:
 grep -q "var isPageDrivenContext" "$PB" || say "isPageDrivenContext removed"
 
+# 8. Duplicate type declarations within a file. swiftc -parse (all the
+#    sandbox can run) does not catch "invalid redeclaration" — a
+#    patch that mis-anchored once duplicated two structs and broke the
+#    real build. Cheap to catch here.
+while IFS= read -r f; do
+  dups=$(grep -oE "^(private |fileprivate |internal |public )?(final )?(struct|class|enum|actor) [A-Za-z_][A-Za-z0-9_]*" "$f" \
+         | awk '{print $NF}' | sort | uniq -d)
+  [ -n "$dups" ] && say "$f declares a type more than once: $(echo "$dups" | tr '\n' ' ')"
+done < <(find "$REPO/Sources" -name '*.swift')
+
 if [ "$fail" -ne 0 ]; then
   echo "Static guards FAILED — see docs/QUEUE-DESIGN.md (Behavior contract)."
   exit 1
