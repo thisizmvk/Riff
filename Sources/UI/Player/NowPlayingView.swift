@@ -1947,6 +1947,34 @@ struct NowPlayingView: View {
                 )
             }
             Spacer()
+            // Inline row actions (Spotify-style "⋯"): the same queue
+            // operations were right-click-only before.
+            if !isCurrent {
+                Menu {
+                    Button("Play next") {
+                        env.player.playNext(item: item)
+                        env.showToast("Playing next: \(item.title)")
+                    }
+                    Button("Add to queue") {
+                        env.player.addToQueueEnd(item: item)
+                        env.showToast("Added to queue: \(item.title)")
+                    }
+                    Divider()
+                    Button("Remove from queue", role: .destructive) {
+                        Task { await env.player.removeFromQueue(videoId: item.id) }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.55))
+                        .frame(width: 22, height: 22)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .frame(width: 22)
+                .help("Queue actions")
+                .accessibilityLabel("Queue actions for \(item.title)")
+            }
             if isSmartShuffleInjected {
                 Image(systemName: "plus")
                     .font(.system(size: 9, weight: .bold))

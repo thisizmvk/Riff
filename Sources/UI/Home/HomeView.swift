@@ -3,6 +3,11 @@ import SwiftUI
 struct HomeView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var sections: [HomeSection] = []
+    @State private var signInNudgeDismissed = false
+    /// Artist portraits resolved for the "Your top artists" shelf
+    /// (artistId → image URL), so the circles show the artist rather
+    /// than a recent album cover. Persisted across launches.
+    @State private var portraits: [String: URL] = HomeView.loadPortraitCache()
     @State private var chips: [InnerTubeClient.HomeChip] = []
     /// The chip currently filtering Home. `nil` means the default "All"
     /// state — every chip pill renders unselected and the rails are the
@@ -20,6 +25,11 @@ struct HomeView: View {
                         ErrorBanner(message: errorMessage) {
                             Task { await load() }
                         }
+                    }
+                    // Anonymous sessions get YouTube's tiny generic feed;
+                    // say why, with the one action that fixes it.
+                    if !env.isSignedIn, !signInNudgeDismissed {
+                        SignInNudgeCard(onDismiss: { signInNudgeDismissed = true })
                     }
                     if !chips.isEmpty {
                         MoodChipRow(
@@ -53,6 +63,9 @@ struct HomeView: View {
             }
             .navigationDestination(for: MediaItem.self) { DetailView(item: $0) }
             .task { await load() }
+            // Resolve portraits for top artists we haven't seen yet (one
+            // /browse per new artist, sequential, cached to disk).
+            .task(id: topArtistIdsKey) { await loadPortraits() }
             // Signed-in state flipped (sign-in, or the liveness probe
             // marked the session dead) → the feed shape changes wholesale;
             // refetch instead of leaving the old feed on screen.
@@ -74,6 +87,10 @@ struct HomeView: View {
         let entries = env.player.playedEntries
         let topArtists = PersonalizedShelves.topArtists(from: entries)
             .filter { !env.isBlocked(artistId: $0.id) }
+            .map { item -> MediaItem in
+                guard let portrait = portraits[item.id] else { return item }
+                return item.withThumbnail(portrait)
+            }
         if !topArtists.isEmpty {
             out.append(HomeSection(
                 id: "personal.topArtists",
@@ -94,6 +111,30 @@ struct HomeView: View {
             ))
         }
         return out
+    }
+
+    private var topArtistIdsKey: String {
+        PersonalizedShelves.topArtists(from: env.player.playedEntries).map(\.id).joined(separator: ",")
+    }
+
+    private static let portraitCacheKey = "home.artistPortraits"
+    private static func loadPortraitCache() -> [String: URL] {
+        guard let raw = UserDefaults.standard.dictionary(forKey: portraitCacheKey) as? [String: String] else { return [:] }
+        return raw.compactMapValues(URL.init(string:))
+    }
+
+    private func loadPortraits() async {
+        let missing = PersonalizedShelves.topArtists(from: env.player.playedEntries)
+            .map(\.id)
+            .filter { portraits[$0] == nil && $0.hasPrefix("UC") }
+        guard !missing.isEmpty else { return }
+        for id in missing {
+            guard let page = try? await env.innerTube.detail(forBrowseId: id),
+                  let url = page.artworkURL else { continue }
+            portraits[id] = url
+        }
+        let raw = portraits.mapValues(\.absoluteString)
+        UserDefaults.standard.set(raw, forKey: Self.portraitCacheKey)
     }
 
     private func load() async {
@@ -284,6 +325,17 @@ struct HomeSectionRow: View {
         return lower.contains("quick picks") || lower == "quick picks"
     }
 
+    /// Hover reveals paging chevrons — the carousel had no mouse
+    /// affordance at all (indicators hidden, no arrows), so mouse users
+    /// could only ever see the ~7 tiles that fit.
+    @State private var hovering = false
+    @State private var pageStart = 0
+    /// Keyboard focus by tile key: ←/→ move focus (and scroll to it).
+    @FocusState private var focusedTile: String?
+    private static let pageSize = 4
+
+    private func tileKey(_ idx: Int) -> String { "\(section.id)#\(idx)" }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(section.title)
@@ -293,14 +345,74 @@ struct HomeSectionRow: View {
             if renderAsQuickPicks {
                 quickPicksGrid
             } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(spacing: 16) {
-                        ForEach(section.items) { item in
-                            ThumbnailButton(item: item)
-                        }
+                carousel
+            }
+        }
+    }
+
+    private var carousel: some View {
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 16) {
+                    ForEach(Array(section.items.enumerated()), id: \.offset) { idx, item in
+                        ThumbnailButton(item: item, externalFocus: $focusedTile, focusKey: tileKey(idx))
+                            .id(tileKey(idx))
                     }
                 }
             }
+            .overlay(alignment: .leading) {
+                if hovering, pageStart > 0 {
+                    chevron("chevron.left", help: "Previous tiles") { page(-1, proxy) }
+                }
+            }
+            .overlay(alignment: .trailing) {
+                if hovering, pageStart + Self.pageSize < section.items.count {
+                    chevron("chevron.right", help: "More tiles") { page(+1, proxy) }
+                }
+            }
+            .onHover { hovering = $0 }
+            // Arrow keys move tile focus once a tile in this row has
+            // keyboard focus (Tab into it), scrolling to keep it visible.
+            .onKeyPress(.rightArrow) { moveFocus(+1, proxy); return .handled }
+            .onKeyPress(.leftArrow) { moveFocus(-1, proxy); return .handled }
+        }
+    }
+
+    private func chevron(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 36, height: 36)
+                .background(Color.black.opacity(0.72))
+                .clipShape(Circle())
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 1))
+                .shadow(color: .black.opacity(0.5), radius: 8)
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, 6)
+        .help(help)
+        .transition(.opacity)
+    }
+
+    private func page(_ direction: Int, _ proxy: ScrollViewProxy) {
+        let last = max(0, section.items.count - 1)
+        pageStart = min(max(pageStart + direction * Self.pageSize, 0), last)
+        withAnimation(.easeInOut(duration: 0.25)) {
+            proxy.scrollTo(tileKey(pageStart), anchor: .leading)
+        }
+    }
+
+    private func moveFocus(_ direction: Int, _ proxy: ScrollViewProxy) {
+        let current = focusedTile.flatMap { key -> Int? in
+            guard let hash = key.lastIndex(of: "#") else { return nil }
+            return Int(key[key.index(after: hash)...])
+        } ?? pageStart
+        let next = min(max(current + direction, 0), max(0, section.items.count - 1))
+        focusedTile = tileKey(next)
+        pageStart = next
+        withAnimation(.easeInOut(duration: 0.2)) {
+            proxy.scrollTo(tileKey(next), anchor: .center)
         }
     }
 
@@ -384,5 +496,57 @@ private struct QuickPickRow: View {
         case .artist:         await env.player.playArtistRadio(id: item.id)
         case .podcast:        await env.player.playPodcast(id: item.id)
         }
+    }
+}
+
+
+private extension MediaItem {
+    /// Same item with a different artwork URL (fields are `let`).
+    func withThumbnail(_ url: URL) -> MediaItem {
+        MediaItem(id: id, kind: kind, title: title, subtitle: subtitle, thumbnailURL: url,
+                  albumId: albumId, artistId: artistId, setVideoId: setVideoId,
+                  durationSeconds: durationSeconds, year: year)
+    }
+}
+
+/// Compact Home card explaining the anonymous feed, with the fix.
+private struct SignInNudgeCard: View {
+    @Environment(AppEnvironment.self) private var env
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "person.crop.circle.badge.exclamationmark")
+                .font(.system(size: 22))
+                .foregroundStyle(Theme.red)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("You're browsing without an account")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.white)
+                Text("Sign in to get your mixes, listen-again shelves, library and ad-free playback.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.7))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            Button("Sign In") { env.isSignInSheetPresented = true }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.red)
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss for this session")
+            .accessibilityLabel("Dismiss sign-in suggestion")
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.06))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
     }
 }

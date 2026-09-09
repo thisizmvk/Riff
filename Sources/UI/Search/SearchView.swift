@@ -177,6 +177,13 @@ struct SearchView: View {
                 .padding(.horizontal, 24)
                 .padding(.top, 8)
                 .focused($searchFieldFocused)
+                // A pasted music.youtube.com / youtu.be URL opens directly
+                // instead of being searched as text.
+                .onChange(of: query) { _, newValue in
+                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard trimmed.hasPrefix("http"), let url = URL(string: trimmed) else { return }
+                    if env.openYouTubeMusicLink(url) { query = "" }
+                }
                 .onAppear { searchFieldFocused = true }
                 .onChange(of: env.focusSearchToken) { _, _ in
                     // ⌘F handler in RiffApp bumps this token; grab

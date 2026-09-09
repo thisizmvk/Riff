@@ -15,6 +15,11 @@ struct ThumbnailButton: View {
     /// the Library tab passes `true` — Home / Search / Explore tiles
     /// don't get pinning since the concept is library-scoped.
     var showPinAction: Bool = false
+    /// Optional caller-owned focus: lets a carousel move tile focus with
+    /// arrow keys (see HomeSectionRow). The internal `isFocused` still
+    /// drives the ring; both bindings update when the button takes focus.
+    var externalFocus: FocusState<String?>.Binding? = nil
+    var focusKey: String = ""
 
     @State private var hovering: Bool = false
     @FocusState private var isFocused: Bool
@@ -48,6 +53,7 @@ struct ThumbnailButton: View {
             Button(action: { Task { await playDirect() } }) { content }
                 .buttonStyle(.plain)
                 .focused($isFocused)
+                .modifier(ExternalFocusModifier(binding: externalFocus, key: focusKey))
                 .onHover { hovering = $0 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(accessibilityLabelText)
@@ -58,6 +64,7 @@ struct ThumbnailButton: View {
             NavigationLink(value: item) { content }
                 .buttonStyle(.plain)
                 .focused($isFocused)
+                .modifier(ExternalFocusModifier(binding: externalFocus, key: focusKey))
                 .onHover { hovering = $0 }
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(accessibilityLabelText)
@@ -358,6 +365,20 @@ struct ThumbnailButton: View {
         case .playlist:       await env.player.playPlaylist(id: item.id)
         case .artist:         await env.player.playArtistRadio(id: item.id)
         case .podcast:        await env.player.playPodcast(id: item.id)
+        }
+    }
+}
+
+
+/// Applies a caller-owned focus binding when one was provided.
+private struct ExternalFocusModifier: ViewModifier {
+    let binding: FocusState<String?>.Binding?
+    let key: String
+    func body(content: Content) -> some View {
+        if let binding {
+            content.focused(binding, equals: key)
+        } else {
+            content
         }
     }
 }

@@ -687,6 +687,97 @@ final class AppEnvironment {
         }
     }
 
+    // MARK: - Open YouTube Music links
+
+    /// Route a music.youtube.com / youtu.be URL into Riff: songs play,
+    /// playlists play, albums / artists / playlists open their page.
+    /// Returns false when the URL isn't a recognizable YT Music link.
+    @discardableResult
+    func openYouTubeMusicLink(_ url: URL) -> Bool {
+        guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let site = comps.host?.lowercased(),
+              site.hasSuffix("youtube.com") || site == "youtu.be" else { return false }
+        var params: [String: String] = [:]
+        for item in comps.queryItems ?? [] where params[item.name] == nil {
+            params[item.name] = item.value ?? ""
+        }
+        let path = comps.path
+        let parts = path.split(separator: "/").map(String.init)
+        if site == "youtu.be", let v = parts.first, !v.isEmpty {
+            Task { await player.play(videoId: v) }
+            return true
+        }
+        switch parts.first ?? "" {
+        case "watch":
+            guard let v = params["v"], !v.isEmpty else { return false }
+            if let list = params["list"], !list.isEmpty, !list.hasPrefix("RD") {
+                Task { await player.play(videoId: v, explicitPlaylistId: list) }
+            } else {
+                Task { await player.play(videoId: v) }
+            }
+            return true
+        case "playlist":
+            guard let list = params["list"], !list.isEmpty else { return false }
+            Task { await player.playPlaylist(id: list) }
+            return true
+        case "browse":
+            guard parts.count > 1 else { return false }
+            let id = parts[1]
+            let kind: MediaItem.Kind = id.hasPrefix("MPREb") ? .album
+                : (id.hasPrefix("UC") ? .artist : .playlist)
+            navigateToBrowseId(id, kind: kind)
+            return true
+        case "channel":
+            guard parts.count > 1 else { return false }
+            navigateToBrowseId(parts[1], kind: .artist)
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Menu command: open whatever YT Music link is on the clipboard.
+    func openLinkFromPasteboard() {
+        let text = NSPasteboard.general.string(forType: .string)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if let url = URL(string: text), openYouTubeMusicLink(url) {
+            showToast("Opening link…")
+        } else {
+            showToast("No YouTube Music link on the clipboard")
+        }
+    }
+
+    // MARK: - Followed artists
+
+    private static let followedArtistsKey = "library.followedArtistIds"
+    /// Locally-known follow state (YT's own subscriptions list is read
+    /// separately for the release rail; this drives the button state).
+    private(set) var followedArtistIds: Set<String> =
+        Set((UserDefaults.standard.stringArray(forKey: AppEnvironment.followedArtistsKey) ?? []))
+
+    func isFollowing(artistId: String) -> Bool { followedArtistIds.contains(artistId) }
+
+    /// Follow / unfollow via InnerTube's subscription endpoints.
+    /// Optimistic; reverts on failure.
+    func toggleFollow(artistId: String, name: String) {
+        let follow = !followedArtistIds.contains(artistId)
+        if follow { followedArtistIds.insert(artistId) } else { followedArtistIds.remove(artistId) }
+        UserDefaults.standard.set(Array(followedArtistIds), forKey: Self.followedArtistsKey)
+        Task { [innerTube, weak self] in
+            do {
+                try await innerTube.setFollowing(channelId: artistId, follow: follow)
+                await MainActor.run { self?.showToast(follow ? "Following \(name)" : "Unfollowed \(name)") }
+            } catch {
+                await MainActor.run {
+                    guard let self else { return }
+                    if follow { self.followedArtistIds.remove(artistId) } else { self.followedArtistIds.insert(artistId) }
+                    UserDefaults.standard.set(Array(self.followedArtistIds), forKey: Self.followedArtistsKey)
+                    self.showToast("Couldn't \(follow ? "follow" : "unfollow") \(name)")
+                }
+            }
+        }
+    }
+
     /// Cached user-owned playlists for "Add to Playlist" menus. Loaded on
     /// demand when a UI surface needs them; refreshed whenever the user
     /// signs in/out.

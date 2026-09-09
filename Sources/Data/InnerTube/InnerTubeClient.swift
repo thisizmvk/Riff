@@ -1169,6 +1169,12 @@ final class InnerTubeClient: @unchecked Sendable {
         _ = try await postRaw(.dislike, body: ["target": ["videoId": videoId]])
     }
 
+    /// Follow (subscribe) / unfollow an artist channel. Requires cookie
+    /// auth; anonymous calls throw `needsReauth`.
+    func setFollowing(channelId: String, follow: Bool) async throws {
+        _ = try await postRaw(follow ? .subscribe : .unsubscribe, body: ["channelIds": [channelId]])
+    }
+
     /// Completions for a partial search query — the strings YT Music's
     /// own search box shows as you type (includes typo corrections).
     /// Lightweight endpoint; called per keystroke (debounced by the

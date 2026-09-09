@@ -231,6 +231,9 @@ struct DetailView: View {
                     // album/playlist pages already get block via
                     // the per-track context menu.
                     if item.kind == .artist {
+                        if env.isSignedIn {
+                            followArtistButton(page: page)
+                        }
                         blockArtistButton(page: page)
                     }
                 }
@@ -271,6 +274,26 @@ struct DetailView: View {
     /// (e.g. arriving via "Go to artist" from a song row where the
     /// artist name was a subtitle split that lost the full name).
     @ViewBuilder
+    /// Follow / Following toggle on Artist pages — the library already
+    /// has a "New from artists you follow" rail, but there was no way to
+    /// follow anyone without leaving the app.
+    private func followArtistButton(page: InnerTubeClient.DetailPage) -> some View {
+        let following = env.isFollowing(artistId: item.id)
+        return Button {
+            let name = page.title.isEmpty ? item.title : page.title
+            env.toggleFollow(artistId: item.id, name: name)
+        } label: {
+            Label(following ? "Following" : "Follow",
+                  systemImage: following ? "checkmark" : "plus")
+                .font(.system(size: 13, weight: .semibold))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+        }
+        .buttonStyle(.bordered)
+        .tint(following ? Theme.red : nil)
+        .help(following ? "Stop following this artist" : "Follow this artist on YouTube Music")
+    }
+
     private func blockArtistButton(page: InnerTubeClient.DetailPage) -> some View {
         let blocked = env.isBlocked(artistId: item.id)
         Button {

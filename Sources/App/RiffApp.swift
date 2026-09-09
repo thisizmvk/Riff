@@ -76,6 +76,12 @@ struct RiffApp: App {
             CommandGroup(before: .toolbar) {
                 TabSwitchMenuItems()
                 Divider()
+                // Riff can produce share links; this lets it consume one.
+                Button("Open YouTube Music Link from Clipboard") {
+                    environment.openLinkFromPasteboard()
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+                Divider()
             }
             // Transport shortcuts — Space play/pause, ⌘← / ⌘→ for prev/next
             // track, ⌘↑ / ⌘↓ for volume nudge, ⌥⌘← / ⌥⌘→ for ±15 / ±30s

@@ -1362,6 +1362,58 @@ final class PlayerBridge {
     /// practice — YT's radio queues are kind-homogeneous).
     private(set) var currentKind: PlaybackKind = .music
 
+    // MARK: - Spoken-word resume positions (podcasts)
+
+    /// videoId → last known position (seconds) for spoken-word tracks.
+    /// Persisted so an episode you stopped halfway resumes there next
+    /// time instead of restarting from 0. Music is never tracked.
+    @ObservationIgnored private var episodePositions: [String: Double] =
+        (UserDefaults.standard.dictionary(forKey: PlayerBridge.episodePositionsKey) as? [String: Double]) ?? [:]
+    @ObservationIgnored private var lastEpisodePositionSaveAt: Date = .distantPast
+    /// The videoId we already applied a resume seek for (once per track).
+    @ObservationIgnored private var resumeAppliedFor: String? = nil
+    private static let episodePositionsKey = "player.episodePositions"
+    private static let episodeResumeMinSeconds: Double = 30
+    private static let episodeFinishedMarginSeconds: Double = 20
+
+    private func persistEpisodePositions() {
+        // Bound the store: keep the 200 most recently written entries
+        // (dictionary order is arbitrary; dropping any 1+ is fine).
+        if episodePositions.count > 200 {
+            for key in episodePositions.keys.prefix(episodePositions.count - 200) {
+                episodePositions.removeValue(forKey: key)
+            }
+        }
+        UserDefaults.standard.set(episodePositions, forKey: Self.episodePositionsKey)
+    }
+
+    /// Called from the progress handler: record position for spoken
+    /// tracks every ~5s; clear it once the episode is essentially done.
+    private func trackEpisodePosition(videoId: String, elapsed: Double, duration: Double) {
+        guard currentKind == .spoken, duration > 0 else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastEpisodePositionSaveAt) >= 5 else { return }
+        lastEpisodePositionSaveAt = now
+        if elapsed >= duration - Self.episodeFinishedMarginSeconds {
+            if episodePositions.removeValue(forKey: videoId) != nil { persistEpisodePositions() }
+        } else if elapsed >= Self.episodeResumeMinSeconds {
+            episodePositions[videoId] = elapsed
+            persistEpisodePositions()
+        }
+    }
+
+    /// Called when a track's duration first becomes known: seek to the
+    /// saved position for spoken tracks (once per track).
+    private func applyEpisodeResumeIfNeeded(videoId: String, duration: Double) {
+        guard currentKind == .spoken, duration > 0, resumeAppliedFor != videoId,
+              let saved = episodePositions[videoId],
+              saved >= Self.episodeResumeMinSeconds,
+              saved < duration - Self.episodeFinishedMarginSeconds else { return }
+        resumeAppliedFor = videoId
+        Log.bridge.debug("episode resume: \(videoId, privacy: .public) → \(Int(saved))s of \(Int(duration))s")
+        Task { [weak self] in await self?.seek(to: saved / duration) }
+    }
+
     /// Playback rate (0.5x – 2.0x). The setter writes through to the
     /// current kind's UserDefaults entry so the next time that kind
     /// plays, this rate is restored.
@@ -2230,8 +2282,15 @@ final class PlayerBridge {
             // a non-finite value poisons every scrubber Range/Slider
             // downstream (0...NaN traps). Store 0 in that window — the UI
             // treats a 0/unknown duration as "not ready yet".
+            let durationWasUnknown = duration <= 0
             elapsed = t.isFinite ? t : 0
             duration = (d.isFinite && d > 0) ? d : 0
+            if let vid = currentTrack?.videoId {
+                if durationWasUnknown, duration > 0 {
+                    applyEpisodeResumeIfNeeded(videoId: vid, duration: duration)
+                }
+                trackEpisodePosition(videoId: vid, elapsed: elapsed, duration: duration)
+            }
             // Snapshot for "Continue where you left off" — rate-limited
             // to one write per `snapshotEverySeconds` so we're not
             // writing UserDefaults every 500 ms.

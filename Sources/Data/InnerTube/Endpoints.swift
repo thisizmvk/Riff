@@ -17,6 +17,8 @@ enum Endpoint: String {
     /// endpoint isn't reachable.
     case accountMenu = "account/account_menu"
     case searchSuggestions = "music/get_search_suggestions"
+    case subscribe   = "subscription/subscribe"
+    case unsubscribe = "subscription/unsubscribe"
 }
 
 /// Well-known browseId values used by InnerTube.

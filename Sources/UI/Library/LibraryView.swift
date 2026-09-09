@@ -366,6 +366,12 @@ struct LibraryView: View {
         .padding(.horizontal, 32)
     }
 
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .short
+        return f
+    }()
+
     private func load() async {
         // Fan out: library section + Mixed-for-you in parallel. The
         // mixed feed is best-effort — anonymous responses are empty
@@ -382,9 +388,29 @@ struct LibraryView: View {
             // yet" while Home showed hundreds of plays. Local is also
             // instant and works without a network round-trip.
             // Most-recent first, deduped to the latest play of each id.
+            let entries = env.player.playedEntries
+            var counts: [String: Int] = [:]
+            var lastPlayed: [String: Date] = [:]
+            for entry in entries {
+                counts[entry.item.id, default: 0] += 1
+                lastPlayed[entry.item.id] = max(lastPlayed[entry.item.id] ?? .distantPast, entry.playedAt)
+            }
             var seen = Set<String>()
-            items = env.player.playedEntries.reversed().compactMap { entry in
-                seen.insert(entry.item.id).inserted ? entry.item : nil
+            let now = Date()
+            items = entries.reversed().compactMap { entry -> MediaItem? in
+                guard seen.insert(entry.item.id).inserted else { return nil }
+                let item = entry.item
+                // "Artist • 2h ago • 3×" — the journal has the data; the
+                // row should say when and how often, not just who.
+                let artist = item.subtitle
+                    .split(whereSeparator: { $0 == "·" || $0 == "•" })
+                    .first.map { String($0).trimmingCharacters(in: .whitespaces) } ?? item.subtitle
+                let when = Self.relativeFormatter.localizedString(for: lastPlayed[item.id] ?? entry.playedAt, relativeTo: now)
+                let plays = counts[item.id] ?? 1
+                let subtitle = [artist, when, plays > 1 ? "\(plays)×" : nil].compactMap { $0 }.joined(separator: " • ")
+                return MediaItem(id: item.id, kind: item.kind, title: item.title, subtitle: subtitle,
+                                 thumbnailURL: item.thumbnailURL, albumId: item.albumId, artistId: item.artistId,
+                                 setVideoId: item.setVideoId, durationSeconds: item.durationSeconds, year: item.year)
             }
             errorMessage = nil
         } else {
