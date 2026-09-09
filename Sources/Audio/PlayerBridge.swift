@@ -1639,6 +1639,31 @@ final class PlayerBridge {
     /// inclusive: taps deep in the queue would silently drop
     /// every intervening row (C1).
     func skipTo(item: MediaItem) async {
+        // Single-authority: a tapped row of a PAGE-OWNED queue plays in
+        // place via the page's own queue (no navigation). The old path
+        // navigated — a page reload that re-rolled the radio and replaced
+        // the whole list, when the user expected the list to continue
+        // from the tapped row. Scoped to mirrored rows (the page has
+        // them); user-region rows keep the context-preserving navigation.
+        if activeChip == nil, mirrorFresh,
+           !queue.isUserQueued(videoId: item.id),
+           upNext.contains(where: { $0.id == item.id }) {
+            userClickedAt = Date()   // user intent; arrival ≠ old head is expected
+            Log.bridge.debug("skipTo: page-queue jump → \(item.id, privacy: .public)")
+            await eval("window.musicBridge.queuePlayItem(\(item.id.jsonQuoted))")
+            // Verify by arrival: if the page didn't jump (row not
+            // rendered / selector drift), fall back to navigation so the
+            // tap always does SOMETHING — at the cost of a re-roll.
+            let target = item
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 2_500_000_000)
+                guard let self, self.currentTrack?.videoId != target.id else { return }
+                Log.bridge.debug("skipTo: page didn't jump to \(target.id, privacy: .public) in 2.5s → navigation fallback")
+                self.queue.remove(videoId: target.id)
+                await self.play(item: target, clearQueue: false)
+            }
+            return
+        }
         queue.remove(videoId: item.id)
         await play(item: item, clearQueue: false)
     }

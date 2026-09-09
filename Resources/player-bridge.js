@@ -388,6 +388,60 @@
             return false;
         },
 
+        // Play a specific row of the PAGE's queue in place (single-
+        // authority design). A tapped Up Next row used to navigate to
+        // the track — a page reload that RE-ROLLED the radio and
+        // replaced the whole list. Instead, jump within the page's own
+        // queue: it plays the row, keeps the rest, and the mirror simply
+        // continues from there. Strategies, in order:
+        //   1. click the matching row in the page's queue panel (rows
+        //      render in store order: #contents ↔ items,
+        //      #automix-contents ↔ automixItems),
+        //   2. playerApi.playVideoAt(index) when the player holds the
+        //      list.
+        // Reports the attempt via diagnostic; Swift VERIFIES by
+        // trackChanged arrival and falls back to navigation otherwise.
+        queuePlayItem(videoId) {
+            try {
+                const slice = resolveQueueSlice();
+                const items = (slice.q && slice.q.items) || [];
+                const auto = (slice.q && slice.q.automixItems) || [];
+                const findIdx = (arr) => {
+                    for (let i = 0; i < arr.length; i++) {
+                        const r = unwrapQueueItem(arr[i]);
+                        if (r && r.videoId === videoId) return i;
+                    }
+                    return -1;
+                };
+                let idx = findIdx(items);
+                let inAutomix = false;
+                if (idx < 0) { idx = findIdx(auto); inAutomix = idx >= 0; }
+                if (idx < 0) {
+                    postEvent({ event: "diagnostic", msg: "queuePlayItem: " + videoId + " not-in-queue" });
+                    return false;
+                }
+                const listSel = inAutomix ? "#automix-contents" : "#contents";
+                const rows = document.querySelectorAll("ytmusic-player-queue " + listSel + " > ytmusic-player-queue-item");
+                const row = rows && rows[idx];
+                if (row) {
+                    const btn = (row.querySelector && row.querySelector("ytmusic-play-button-renderer, #play-button, .play-button")) || row;
+                    btn.click();
+                    postEvent({ event: "diagnostic", msg: "queuePlayItem: " + videoId + " via queue-row-click idx=" + idx + (inAutomix ? " (automix)" : "") });
+                    return true;
+                }
+                const api = playerApi();
+                if (!inAutomix && api && typeof api.playVideoAt === "function") {
+                    api.playVideoAt(idx);
+                    postEvent({ event: "diagnostic", msg: "queuePlayItem: " + videoId + " via playVideoAt idx=" + idx });
+                    return true;
+                }
+                postEvent({ event: "diagnostic", msg: "queuePlayItem: " + videoId + " no-strategy (rows=" + (rows ? rows.length : 0) + ")" });
+            } catch (e) {
+                postEvent({ event: "diagnostic", msg: "queuePlayItem threw: " + (e && e.message ? e.message : String(e)) });
+            }
+            return false;
+        },
+
         next()     { document.querySelector(".next-button")?.click(); },
         previous() { document.querySelector(".previous-button")?.click(); },
 

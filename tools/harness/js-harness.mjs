@@ -12,11 +12,13 @@ function check(cond, label) {
 // ---- Browser surface stubs ------------------------------------------------
 const posted = [];
 const elements = new Map();   // selector -> element
+const lists = new Map();      // selector -> element[] (querySelectorAll)
 global.window = global;
 global.location = { href: "https://music.youtube.com/watch?v=abc", hash: "", origin: "https://music.youtube.com" };
 global.document = {
   readyState: "complete",
   querySelector: (sel) => elements.get(sel) || null,
+  querySelectorAll: (sel) => lists.get(sel) || [],
   getElementById: () => null,
   addEventListener: () => {},
   documentElement: {},
@@ -270,6 +272,26 @@ const wrap = (id, title, byline, selected = false) => ({
   await settle();
   const r2 = posted.filter((p) => p.event === "queueRemoveResult");
   check(r2.length === 1 && r2[0].ok === false && r2[0].via === "not-in-items", "unknown id → ok=false not-in-items");
+}
+
+// ---- Case 14: queuePlayItem — in-place page-queue jump ---------------------
+{
+  elements.clear(); lists.clear();
+  const state = { queue: { items: [renderer("j1", "J1", "A", true), renderer("j2", "J2", "A"), renderer("j3", "J3", "A")], automixItems: [renderer("m1", "M1", "A")] } };
+  elements.set("ytmusic-app", { store: { getState: () => state, dispatch: () => {} } });
+  const clicked = [];
+  const mkRow = (id) => ({ querySelector: () => ({ click: () => clicked.push(id) }), click: () => clicked.push(id + "-row") });
+  lists.set("ytmusic-player-queue #contents > ytmusic-player-queue-item", [mkRow("j1"), mkRow("j2"), mkRow("j3")]);
+  lists.set("ytmusic-player-queue #automix-contents > ytmusic-player-queue-item", [mkRow("m1")]);
+  posted.length = 0;
+  check(window.musicBridge.queuePlayItem("j3") === true && clicked.at(-1) === "j3", "jump clicks the matching #contents row (index-aligned)");
+  check(window.musicBridge.queuePlayItem("m1") === true && clicked.at(-1) === "m1", "automix rows map to #automix-contents");
+  check(window.musicBridge.queuePlayItem("nope") === false && posted.some((p) => p.event === "diagnostic" && p.msg.includes("not-in-queue")), "unknown id → not-in-queue diagnostic, no click");
+  // No rendered rows → playVideoAt fallback via the player API.
+  lists.clear();
+  const played = [];
+  elements.set("ytmusic-player", { playerApi: { playVideoAt: (i) => played.push(i), getVideoData: () => ({}), addEventListener: () => {} } });
+  check(window.musicBridge.queuePlayItem("j2") === true && played.at(-1) === 1, "no rows → playerApi.playVideoAt(index) fallback");
 }
 
 console.log(`\nJS RESULT: ${passes} passed, ${failures} failed`);
