@@ -246,6 +246,72 @@ do {
     check(none.isEmpty, "context start beyond history clamps safely")
 }
 
+
+// ── 11. QueuePolicy decision table — the BEHAVIOR CONTRACT ──────────
+// Each row is a user-facing promise from docs/QUEUE-DESIGN.md. Changing
+// an answer here is changing the product; do it deliberately, in the
+// docs and the policy together.
+do {
+    typealias A = QueuePolicy.AdvanceInputs
+    let radioRow = A(headIsContextTrack: false, contextPlaylistId: nil, currentPlaylistId: "RDAMVMx",
+                     headIsUserQueued: false, hasActiveChip: false, mirrorFresh: true, isPageDriven: true)
+    check(QueuePolicy.advance(radioRow) == .native, "radio: mirrored head advances page-natively (no reload, no re-roll)")
+
+    var albumInCtx = radioRow
+    albumInCtx.headIsContextTrack = true; albumInCtx.contextPlaylistId = "OLAK5uy_a"; albumInCtx.currentPlaylistId = "OLAK5uy_a"; albumInCtx.isPageDriven = false
+    check(QueuePolicy.advance(albumInCtx) == .native, "album track while page is in the album: native (no per-track radio navigation)")
+
+    var albumAfterInterlude = albumInCtx
+    albumAfterInterlude.currentPlaylistId = "RDAMVMother"
+    check(QueuePolicy.advance(albumAfterInterlude) == .navigateIntoContext("OLAK5uy_a"), "album track after an interlude: navigate back INTO the album list")
+
+    var playNextInjection = radioRow
+    playNextInjection.headIsUserQueued = true
+    check(QueuePolicy.advance(playNextInjection) == .navigateRadio, "unverified Play-Next injection: per-track radio navigation")
+
+    var chipHead = radioRow
+    chipHead.hasActiveChip = true
+    check(QueuePolicy.advance(chipHead) == .navigateDeterministic, "chip-curated head: Swift drives with the current list")
+
+    var preMirrorPlaylist = radioRow
+    preMirrorPlaylist.isPageDriven = false; preMirrorPlaylist.mirrorFresh = false; preMirrorPlaylist.currentPlaylistId = "PLabc"
+    check(QueuePolicy.advance(preMirrorPlaylist) == .navigateDeterministic, "/next-seeded deterministic head before the mirror is live: Swift drives")
+
+    var mirroredPlaylist = preMirrorPlaylist
+    mirroredPlaylist.mirrorFresh = true
+    check(QueuePolicy.advance(mirroredPlaylist) == .native, "deterministic context with a live mirror: native")
+
+    // Enforcement scope
+    check(!QueuePolicy.enforcementApplies(userQueueCount: 0, hasActiveChip: false, mirrorFresh: true, isPageDriven: true), "radio + live mirror: never enforce against the page")
+    check(QueuePolicy.enforcementApplies(userQueueCount: 1, hasActiveChip: false, mirrorFresh: true, isPageDriven: true), "user-queued items are enforced even in radio")
+    check(QueuePolicy.enforcementApplies(userQueueCount: 0, hasActiveChip: true, mirrorFresh: true, isPageDriven: true), "chip queues are enforced")
+    check(QueuePolicy.enforcementApplies(userQueueCount: 0, hasActiveChip: false, mirrorFresh: false, isPageDriven: false), "pre-mirror deterministic seeds are enforced")
+    check(!QueuePolicy.enforcementApplies(userQueueCount: 0, hasActiveChip: false, mirrorFresh: true, isPageDriven: false), "deterministic context with live mirror: not enforced")
+
+    // Mirror scope
+    check(QueuePolicy.mirrorApplies(hasActiveChip: false, userQueueCount: 0), "mirror owns the display when nothing is user-queued and no chip")
+    check(!QueuePolicy.mirrorApplies(hasActiveChip: false, userQueueCount: 2), "mirror never repaints beneath user-queued items")
+    check(!QueuePolicy.mirrorApplies(hasActiveChip: true, userQueueCount: 0), "chip queues are never overwritten by the mirror")
+
+    // Next / shuffle / row tap
+    check(QueuePolicy.nextUsesPageNative(isPageDriven: true, headIsUserQueued: false), "Next in radio uses the page's own next (no reload)")
+    check(!QueuePolicy.nextUsesPageNative(isPageDriven: true, headIsUserQueued: true), "Next with a user-queued head plays THAT head")
+    check(!QueuePolicy.localShuffleAllowed(isPageDriven: true), "no local random pick in radio — shuffle is the page's")
+    check(QueuePolicy.localShuffleAllowed(isPageDriven: false), "local shuffle allowed over Riff-owned server rows")
+    check(QueuePolicy.rowTapUsesPageJump(hasActiveChip: false, mirrorFresh: true, rowIsUserQueued: false, rowIsInQueue: true), "tapping a mirrored row jumps in place (no navigation)")
+    check(!QueuePolicy.rowTapUsesPageJump(hasActiveChip: false, mirrorFresh: true, rowIsUserQueued: true, rowIsInQueue: true), "tapping a user-queued row keeps context-preserving navigation")
+    check(!QueuePolicy.rowTapUsesPageJump(hasActiveChip: true, mirrorFresh: true, rowIsUserQueued: false, rowIsInQueue: true), "chip rows are not page-jumped")
+
+    // Context exhaustion
+    let album: Set<String> = ["a1", "a2", "a3"]
+    check(QueuePolicy.contextExhausted(userQueueCount: 0, contextTrackIds: album, currentId: "a3", headId: "radioX"), "last album track + only autoplay filler ahead = exhausted")
+    check(QueuePolicy.contextExhausted(userQueueCount: 0, contextTrackIds: album, currentId: "a3", headId: nil), "last album track + empty queue = exhausted")
+    check(!QueuePolicy.contextExhausted(userQueueCount: 0, contextTrackIds: album, currentId: "a2", headId: "a3"), "mid-album is not exhausted")
+    check(!QueuePolicy.contextExhausted(userQueueCount: 1, contextTrackIds: album, currentId: "a3", headId: "x"), "user-queued items pending: not exhausted")
+    check(!QueuePolicy.contextExhausted(userQueueCount: 0, contextTrackIds: ["seed"], currentId: "seed", headId: "r1"), "single-track radio seed never exhausts (radio is infinite)")
+    check(!QueuePolicy.contextExhausted(userQueueCount: 0, contextTrackIds: album, currentId: "radioX", headId: "radioY"), "already past the context: not exhausted (no cycle from radio)")
+}
+
 print("")
 print("RESULT: \(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)

@@ -25,16 +25,20 @@ WORK="$(mktemp -d "${TMPDIR:-/tmp}/riff-harness.XXXXXX")"
 cp "$REPO/Sources/Data/InnerTube/Models/MediaItem.swift" "$WORK/"
 cp "$REPO/Sources/Audio/PlayedHistoryStore.swift" "$WORK/"
 cp "$REPO/Sources/Audio/SmartShuffle.swift" "$WORK/"
+cp "$REPO/Sources/Audio/QueuePolicy.swift" "$WORK/"
 cp "$REPO/Sources/Data/Auth/CookieImporter.swift" "$WORK/"
 cp "$REPO/tools/harness/MoveShim.swift" "$WORK/"
 cp "$REPO/tools/harness/QueueLogicTests.swift" "$WORK/main.swift"
 sed -e 's/^import Observation$//' -e 's/^@Observable$//' -e 's/^@MainActor$//' -e 's/@ObservationIgnored //' \
     "$REPO/Sources/Audio/QueueManager.swift" > "$WORK/QueueManager.swift"
 
+echo "── Static behavior guards ──"
+"$REPO/tools/harness/guard.sh"
+
 echo "── Swift queue-logic harness ──"
 if ! xcrun -sdk macosx swiftc -module-cache-path "$WORK/mc" \
     "$WORK/MediaItem.swift" "$WORK/PlayedHistoryStore.swift" "$WORK/QueueManager.swift" \
-    "$WORK/SmartShuffle.swift" "$WORK/CookieImporter.swift" "$WORK/MoveShim.swift" "$WORK/main.swift" \
+    "$WORK/SmartShuffle.swift" "$WORK/QueuePolicy.swift" "$WORK/CookieImporter.swift" "$WORK/MoveShim.swift" "$WORK/main.swift" \
     -o "$WORK/harness" 2> "$WORK/build.err"; then
     grep -v "cache file" "$WORK/build.err" >&2 || true
     exit 1

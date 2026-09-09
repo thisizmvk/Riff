@@ -1283,7 +1283,7 @@ final class PlayerBridge {
         //    navigation re-rolls the radio. There, shuffle is the
         //    PAGE's (toggleShuffle delegates to it) and Next advances
         //    page-natively (3a) into whatever order the page holds.
-        if shuffleEnabled, !isPageDrivenContext {
+        if shuffleEnabled, QueuePolicy.localShuffleAllowed(isPageDriven: isPageDrivenContext) {
             let serverCandidates = Array(upNext.dropFirst(userCount)).filter { $0.id != currentId }
             if let pick = serverCandidates.randomElement() {
                 await skipTo(item: pick)
@@ -1299,9 +1299,9 @@ final class PlayerBridge {
         //     playback looks odd". Native next advances within the
         //     exact queue we're mirroring: no reload, no re-seed, and
         //     the mirrored head is what plays.
-        if isPageDrivenContext,
-           let head = upNext.first(where: { $0.id != currentId }),
-           !queue.isUserQueued(videoId: head.id) {
+        if let head = upNext.first(where: { $0.id != currentId }),
+           QueuePolicy.nextUsesPageNative(isPageDriven: isPageDrivenContext,
+                                          headIsUserQueued: queue.isUserQueued(videoId: head.id)) {
             Log.bridge.debug("next() → page-native advance (mirrored head=\(head.id, privacy: .public))")
             userClickedAt = Date()   // user intent; don't let enforcement misread the jump
             await eval("window.musicBridge.next()")
@@ -1560,27 +1560,25 @@ final class PlayerBridge {
     ///     deterministic server heads).
     private enum AdvancePlan { case native, navigate(String) }
     private func advancePlan(to head: MediaItem) -> AdvancePlan {
-        let headIsUserQueued = queue.isUserQueued(videoId: head.id)
-        if contextTracksIds.contains(head.id),
-           let ctx = contextPlaylistId, !ctx.isEmpty {
-            // Context track (album / playTracks list): keep it IN its
-            // context. If the page is already there, its native advance
-            // plays exactly this head — don't reload. Otherwise (an
-            // interlude pulled the page into some other list) navigate
-            // back into the context at this track.
-            if currentPlaylistId == ctx { return .native }
+        // Decision lives in QueuePolicy (pure, harness-tested); this
+        // only maps the verdict to a URL.
+        let verdict = QueuePolicy.advance(.init(
+            headIsContextTrack: contextTracksIds.contains(head.id),
+            contextPlaylistId: contextPlaylistId,
+            currentPlaylistId: currentPlaylistId,
+            headIsUserQueued: queue.isUserQueued(videoId: head.id),
+            hasActiveChip: activeChip != nil,
+            mirrorFresh: mirrorFresh,
+            isPageDriven: isPageDrivenContext
+        ))
+        switch verdict {
+        case .native:
+            return .native
+        case .navigateIntoContext(let ctx):
             return .navigate(watchURL(videoId: head.id, playlistId: ctx))
-        }
-        if headIsUserQueued {
-            // Play-Next / Add-to-queue injection from outside the
-            // context: per-track auto-radio avoids navigating into a
-            // wrong list=.
+        case .navigateRadio:
             return .navigate(watchURL(videoId: head.id, playlistId: Self.radioPlaylistId(for: head.id)))
-        }
-        if activeChip != nil || (!mirrorFresh && !isPageDrivenContext) {
-            // Chip-curated queues (page-unaware) and deterministic
-            // server heads seeded by /next BEFORE the page mirror went
-            // live: Swift drives, keeping the real context list.
+        case .navigateDeterministic:
             let plid: String
             if let ctx = currentPlaylistId, !ctx.isEmpty, !ctx.hasPrefix("RDAMVM") {
                 plid = ctx
@@ -1589,9 +1587,6 @@ final class PlayerBridge {
             }
             return .navigate(watchURL(videoId: head.id, playlistId: plid))
         }
-        // Mirrored row (radio OR deterministic context with a live
-        // mirror) — the page plays it natively.
-        return .native
     }
 
     private func syncPendingNextURL() async {
@@ -1648,9 +1643,10 @@ final class PlayerBridge {
         // the whole list, when the user expected the list to continue
         // from the tapped row. Scoped to mirrored rows (the page has
         // them); user-region rows keep the context-preserving navigation.
-        if activeChip == nil, mirrorFresh,
-           !queue.isUserQueued(videoId: item.id),
-           upNext.contains(where: { $0.id == item.id }) {
+        if QueuePolicy.rowTapUsesPageJump(
+            hasActiveChip: activeChip != nil, mirrorFresh: mirrorFresh,
+            rowIsUserQueued: queue.isUserQueued(videoId: item.id),
+            rowIsInQueue: upNext.contains(where: { $0.id == item.id })) {
             userClickedAt = Date()   // user intent; arrival ≠ old head is expected
             Log.bridge.debug("skipTo: page-queue jump → \(item.id, privacy: .public)")
             await eval("window.musicBridge.queuePlayItem(\(item.id.jsonQuoted))")
@@ -2061,13 +2057,9 @@ final class PlayerBridge {
                 // track IS a context track, the user region is empty,
                 // and the next shown row is NOT a context track (i.e.
                 // only autoplay filler remains).
-                let contextExhausted: Bool = {
-                    guard queue.userQueueCount == 0, !contextTracksIds.isEmpty,
-                          let cur = currentTrack, contextTracksIds.contains(cur.videoId),
-                          contextTracksIds.count > 1 else { return false }
-                    guard let head else { return true }
-                    return !contextTracksIds.contains(head.id)
-                }()
+                let contextExhausted = QueuePolicy.contextExhausted(
+                    userQueueCount: queue.userQueueCount, contextTrackIds: contextTracksIds,
+                    currentId: currentTrack?.videoId, headId: head?.id)
                 // Repeat All: context over → cycle it. The cycle is
                 // everything played since this context started plus the
                 // track that just finished, in original order. Runs
@@ -2180,13 +2172,13 @@ final class PlayerBridge {
             // except chip-tuned queues (Riff-curated; the page doesn't
             // know the chip). Deterministic contexts included — the page
             // queue in an album/playlist context IS the album/playlist.
-            guard activeChip == nil else { break }
+            guard QueuePolicy.mirrorApplies(hasActiveChip: activeChip != nil,
+                                            userQueueCount: queue.userQueueCount) else { break }
             // While the user region has items, the USER'S list is the
             // queue — repainting radio filler beneath it on every poll
             // is churn ("queue changes dynamically"), and those rows
             // wouldn't play until the user region drains anyway. The
             // mirror resumes automatically once it does.
-            guard queue.userQueueCount == 0 else { break }
             let curId = currentTrack?.videoId
             // Staleness gate: a snapshot posted by the OLD page can be
             // delivered after a navigation reset the queue — mirroring it
@@ -2302,8 +2294,9 @@ final class PlayerBridge {
             // the next-up order — explicit user-queued items and
             // chip-curated queues. Everywhere else the shown queue IS
             // the page's, so "divergence" can only be mirror lag.
-            let wysiwygEnforceable = queue.userQueueCount > 0 || activeChip != nil
-                || (!mirrorFresh && !isPageDrivenContext)
+            let wysiwygEnforceable = QueuePolicy.enforcementApplies(
+                userQueueCount: queue.userQueueCount, hasActiveChip: activeChip != nil,
+                mirrorFresh: mirrorFresh, isPageDriven: isPageDrivenContext)
             // A verified page-owned queued item arriving is EXPECTED —
             // the page inserted it ahead of the shown head by design.
             if !sameVideoId, pageOwnedQueuedIds.contains(id) {

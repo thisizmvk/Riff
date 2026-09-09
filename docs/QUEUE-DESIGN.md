@@ -88,3 +88,39 @@ Every phase keeps the previous mechanism until the new one is
 *verified in the field* via the log audit lines (`queueAddResult`,
 `advance arrived=… match/MISMATCH`, `ready`-per-advance patterns) and
 the offline harnesses (`tools/harness/run.sh`).
+
+## Behavior contract (locked 2026-09-09)
+
+These are user-facing promises. They are encoded in
+`Sources/Audio/QueuePolicy.swift` (pure decision table), asserted by
+`tools/harness/QueueLogicTests.swift` (section 11) and
+`tools/harness/js-harness.mjs`, and fenced by `tools/harness/guard.sh`
+(static guards). **Changing any of them is a product decision**: update
+this list, the policy, and its table row together — never one alone.
+
+1. **What you see is what plays.** The Up Next list is the page's own
+   queue (mirror). A natural advance or Next plays the top row; the
+   list shifts by exactly one; nothing else moves.
+2. **No reloads in radio.** Next uses the page's next control; a
+   tapped row jumps in place via an identity-matched page row; shuffle
+   toggles the page's shuffle. Hard navigation happens only to START a
+   context (song / album / playlist / Repeat-All cycle) or to restore
+   an album context after an interlude.
+3. **Never guess by index** into the page's player (`playVideoAt`) or
+   click queue rows by position — identity match or refuse.
+4. **A failed page action is never turned into a reload.** If the page
+   doesn't jump, keep the queue intact and tell the user.
+5. **Explicit intent wins.** Play-Next / Add-to-queue items are
+   enforced even in radio; verified page-owned adds are expected
+   arrivals, not divergence.
+6. **The mirror never repaints beneath user-queued items**, and never
+   touches chip-curated queues.
+7. **Albums advance in their own context** (page-native), never via
+   per-track radio URLs; Repeat All and autoplay-off act on "context
+   exhausted", not "queue empty" (the mirror shows YT's autoplay
+   padding at the end).
+8. **Sign-in truth is probed, not assumed** from cookie dates.
+
+Run `./tools/harness/run.sh` before committing anything under
+`Sources/Audio/`, `Resources/player-bridge.js`, or `tools/harness/`
+(or enable the hook: `git config core.hooksPath .githooks`).
