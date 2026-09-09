@@ -53,6 +53,10 @@ struct HomeView: View {
             }
             .navigationDestination(for: MediaItem.self) { DetailView(item: $0) }
             .task { await load() }
+            // Signed-in state flipped (sign-in, or the liveness probe
+            // marked the session dead) → the feed shape changes wholesale;
+            // refetch instead of leaving the old feed on screen.
+            .onChange(of: env.isSignedIn) { _, _ in Task { await load() } }
         }
     }
 

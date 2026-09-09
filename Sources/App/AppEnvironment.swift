@@ -49,7 +49,15 @@ final class AppEnvironment {
             if let expires = cookie.expiresDate { return expires > now }
             return true  // session cookie — no explicit expiry
         }) ?? false
-        let nowSignedIn = hasToken || hasLiveCookie
+        var nowSignedIn = hasToken || hasLiveCookie
+        // A cookie set the liveness probe already found DEAD stays
+        // signed-out until the cookies actually change (re-import /
+        // fresh sign-in); otherwise every reactivation would flip us
+        // back to "signed in" on the same dead cookies and re-toast.
+        if nowSignedIn, !hasToken, let dead = deadCookieSignature,
+           dead == Self.currentCookieSignature() {
+            nowSignedIn = false
+        }
         // Session-expiry notice: a user who WAS signed in and comes
         // back to find the account icon silently anonymous has no idea
         // why their library went blank. Say so. `signOut()` clears the
@@ -69,6 +77,46 @@ final class AppEnvironment {
     }
 
     private static let wasSignedInKey = "auth.wasSignedIn"
+
+    // MARK: - Session liveness (server-side invalidation detection)
+
+    /// Signature of the cookie set the probe last found dead.
+    @ObservationIgnored private var deadCookieSignature: String? = nil
+    @ObservationIgnored private var lastLivenessProbeAt: Date = .distantPast
+    private static let livenessProbeMinInterval: TimeInterval = 10 * 60
+
+    private static func currentCookieSignature() -> String? {
+        let auth = HTTPCookieStorage.shared.cookies?
+            .filter { ["SAPISID", "__Secure-3PAPISID"].contains($0.name) }
+            .sorted { $0.name < $1.name }
+            .map { "\($0.name)=\($0.value)" }
+            .joined(separator: ";")
+        return (auth?.isEmpty ?? true) ? nil : auth
+    }
+
+    /// Ask YouTube whether the cookie session is actually honored.
+    /// Cookie expiry dates can't tell us — YouTube invalidates sessions
+    /// server-side while the cookies live on. On a definitive
+    /// anonymous answer (NOT on network failure) flip to signed-out,
+    /// remember the dead cookie set, and tell the user once. Throttled
+    /// unless `force`.
+    func probeSessionLiveness(force: Bool = false) {
+        guard isSignedIn else { return }
+        let now = Date()
+        guard force || now.timeIntervalSince(lastLivenessProbeAt) > Self.livenessProbeMinInterval else { return }
+        lastLivenessProbeAt = now
+        Task { [innerTube, weak self] in
+            let alive = await innerTube.sessionLiveness()
+            await MainActor.run {
+                guard let self, alive == false, self.isSignedIn else { return }
+                Log.innertube.error("session liveness probe: cookies present but YouTube answers anonymously → marking session dead")
+                self.deadCookieSignature = Self.currentCookieSignature()
+                UserDefaults.standard.set(false, forKey: Self.wasSignedInKey)
+                self.isSignedIn = false
+                self.showToast("Your YouTube Music session expired — sign in again for your library, recommendations and ad-free playback")
+            }
+        }
+    }
 
     /// Sign out clears OAuth tokens + cookies and re-evaluates state.
     /// `isSignedIn` flips to false SYNCHRONOUSLY (so the UI updates
@@ -683,6 +731,7 @@ final class AppEnvironment {
         self.nowPlaying = NowPlayingCenter(player: player)
         self.trackOverrides = TrackOverrideStore()
         self.refreshSignedInState()
+        probeSessionLiveness(force: true)
         self.loadBlockedArtists()
         self.loadPinnedLibrary()
         // First-run onboarding: raise the sheet once, then never
@@ -758,6 +807,7 @@ final class AppEnvironment {
                 // the Sign In button) instead of leaving a dead
                 // avatar in the corner.
                 self?.refreshSignedInState()
+                self?.probeSessionLiveness()
             }
         }
 

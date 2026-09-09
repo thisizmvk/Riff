@@ -181,6 +181,10 @@ struct SettingsView: View {
                 let info = await env.innerTube.fetchAccountInfo()
                 accountName = info?.name
                 accountHandle = info?.handle
+                // No account header while "signed in" is the dead-session
+                // fingerprint — let the liveness probe flip the state
+                // rather than showing a generic "Signed in" line.
+                if info == nil { env.probeSessionLiveness(force: true) }
                 accountEmail = await UserInfoService.emailIfAvailable()
             }
         }

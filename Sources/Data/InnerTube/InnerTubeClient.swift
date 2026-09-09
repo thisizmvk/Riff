@@ -1139,6 +1139,23 @@ final class InnerTubeClient: @unchecked Sendable {
         return AccountInfo(name: name, handle: handle)
     }
 
+    /// Tri-state session liveness. YouTube can invalidate a session
+    /// server-side while the cookies remain and their expiry dates sit
+    /// months out — Riff then looks signed in while every call is
+    /// answered anonymously (tiny generic Home, empty Library).
+    ///   - true:  account_menu carries an active-account header
+    ///   - false: request succeeded but came back anonymous-shaped
+    ///   - nil:   transport/HTTP failure — UNKNOWN, never treat as dead
+    func sessionLiveness() async -> Bool? {
+        let body: [String: Any]
+        do { body = try await postRaw(.accountMenu, body: [:]) } catch { return nil }
+        let header = Parsing.dig(body, [
+            "actions", "0", "openPopupAction", "popup",
+            "multiPageMenuRenderer", "header", "activeAccountHeaderRenderer",
+        ]) as? [String: Any]
+        return header != nil
+    }
+
     /// Like the given video. Requires SAPISID cookie auth — anonymous calls
     /// throw `needsReauth`.
     func like(videoId: String) async throws {
