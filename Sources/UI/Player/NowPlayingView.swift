@@ -1385,11 +1385,6 @@ struct NowPlayingView: View {
 
     // MARK: - X-Ray context cards (B4)
 
-    /// "Context" tab: magazine-style stack of LLM-generated cards
-    /// covering people / place / era / sample / trivia for the current
-    /// track. Gated on a configured API key — without one, shows a
-    /// short hint pointing to Settings.
-    @ViewBuilder
     /// "Track details" — the factual card premium players lead with:
     /// album (linked), year, length, and your own listening stats from
     /// the journal. Honest scope: YouTube Music doesn't expose writer /
@@ -1476,6 +1471,11 @@ struct NowPlayingView: View {
         }
     }
 
+    /// "Context" tab: magazine-style stack of LLM-generated cards
+    /// covering people / place / era / sample / trivia for the current
+    /// track. Gated on a configured API key — without one, shows a
+    /// short hint pointing to Settings.
+    @ViewBuilder
     private var contextContent: some View {
         trackDetailsCard
         if !env.hasLLMAPIKey {
