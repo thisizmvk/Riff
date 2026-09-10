@@ -1165,12 +1165,9 @@ final class PlayerBridge {
         // auto-radio, and every track from #3 onward would drift into
         // random recommendations. Seeding + the "don't clobber with
         // nil" guard in handle(trackChanged:) keeps the context.
-        currentPlaylistId = cleaned
         // Playlist context: the tracklist is server-driven (no local
         // ids), but the context playlist id still anchors advances.
-        contextTracksIds = []
-        contextPlaylistId = cleaned
-        contextStartHistoryIndex = queue.playedEntries.count
+        beginNavigatedContext(playlistId: cleaned)
         await navigate(watchURL(videoId: nil, playlistId: cleaned))
     }
 
@@ -1200,11 +1197,11 @@ final class PlayerBridge {
             // Seed Swift-side playlist context before nav — see the
             // longer note in playPlaylist above. Same URL-strip race,
             // same drift-into-radio symptom if we don't seed.
-            currentPlaylistId = playlistId
+            beginNavigatedContext(playlistId: playlistId)
             await navigate(url)
         case let .directPlaylist(plid):
             Log.resolver.debug("\(browseId, privacy: .public) → resolver failed; falling back to direct playlist plid=\(plid, privacy: .public)")
-            currentPlaylistId = plid
+            beginNavigatedContext(playlistId: plid)
             await navigate(watchURL(videoId: nil, playlistId: plid))
         case let .browsePage(url):
             Log.resolver.debug("\(browseId, privacy: .public) → no playable endpoint and no fallback; navigating to browse page")
@@ -1225,6 +1222,27 @@ final class PlayerBridge {
         if let playlistId, !playlistId.isEmpty { items.append(URLQueryItem(name: "list", value: playlistId)) }
         components.queryItems = items.isEmpty ? nil : items
         return components.url?.absoluteString ?? "https://music.youtube.com/"
+    }
+
+    /// A user-initiated hard navigation into a NEW page context
+    /// (playlist / album / artist radio by URL). The rows on screen
+    /// belong to the OLD page: left in place, the new page's first
+    /// trackChanged is judged against a stale head and the WYSIWYG
+    /// enforcement navigates back to it with the NEW list — seen in
+    /// the field as a radio head pushed into an album list (which
+    /// restarts the album). Clear the display (the mirror repaints
+    /// within ~2s), arm the click grace — this IS user intent — and
+    /// anchor the context for advances. `playTracks` does the same
+    /// inline because it then seeds the user region.
+    private func beginNavigatedContext(playlistId: String?) {
+        queue.replaceQueue([])
+        userClickedAt = Date()
+        currentPlaylistId = playlistId
+        contextTracksIds = []
+        contextPlaylistId = playlistId
+        contextIsPageOrdered = true
+        contextStartHistoryIndex = queue.playedEntries.count
+        Log.bridge.debug("context switch → list=\(playlistId ?? "nil", privacy: .public) (display cleared, click grace armed)")
     }
 
     private func navigate(_ url: String) async {

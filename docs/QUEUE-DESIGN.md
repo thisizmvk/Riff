@@ -130,6 +130,10 @@ this list, the policy, and its table row together — never one alone.
     the real autoplay tail appears from the mirror once it drains.
 11. **An off-context track never navigates into a deterministic list**
     (`?v=X&list=<album>` with X outside the album restarts the album).
+12. **A context switch clears the stale display and arms the click
+    grace** before navigating (playlist / album / artist radio). The
+    new page's first track is never judged against the old page's
+    rows.
 
 Run `./tools/harness/run.sh` before committing anything under
 `Sources/Audio/`, `Resources/player-bridge.js`, or `tools/harness/`
