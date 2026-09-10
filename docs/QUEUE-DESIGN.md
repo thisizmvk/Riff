@@ -79,8 +79,32 @@ Invariants:
   the page's automix padding at album end.
 - **Phase D (pending field verification):** delete the pending-URL +
   enforcement + two-region apparatus; `QueueManager` becomes mirror +
-  history. Gate: field logs showing queueAddResult/queueRemoveResult
-  verify reliably across sessions.
+  history. Gate: `tools/harness/fieldcheck.sh` reports PASS on every
+  row against a log captured on the current build (Play Next, row-tap
+  jump, remove-from-queue all verified via the page; no MISMATCH, no
+  enforcement override; legacy end-of-track paths idle).
+
+  Deletion inventory, in order (each step keeps the harness green):
+  1. `PlayerBridge.syncPendingNextURL` + `pendingNextURLArmed` + all
+     call sites; JS `setPendingNextURL` and the `onStateChange===0`
+     navigation. `.ended` keeps only Repeat All, autoplay-off and the
+     sleep-timer stop; a natural advance is always the page's.
+  2. The WYSIWYG enforcement branch in `trackChanged` and
+     `QueuePolicy.enforcementApplies` (+ its table rows). Play Next is
+     page-owned (`pageOwnedQueuedIds`), so "arrived ≠ shown head" can
+     only be mirror lag.
+  3. The "fallback retained" branch of `queueAddResult` and the
+     Swift-side user region for page-owned adds: `QueueManager` keeps
+     the user region only as a *display* of pending page adds until
+     the mirror shows them, then drops it.
+  4. `AdvancePlan.navigateRadio` (unverified injections no longer
+     exist); `navigateIntoContext` stays for shuffled albums.
+  5. Freeze the new call-site counts in `guard.sh` and rewrite the
+     contract rows 3, 5 and 9 to their page-only wording.
+
+  Field status 2026-09-10: rows 1-2 of the gate are unverified (no
+  Play Next / row tap in any capture); the Next path is verified
+  (11 page-native advances, 0 reloads on the new build).
 
 ## Fallback truth
 
