@@ -110,6 +110,18 @@ struct HomeView: View {
                 items: topTracks
             ))
         }
+        // Time-aware shelf: what you tend to play at this hour. Purely
+        // local, from the journal — no network — and only once the
+        // current slot has enough plays to mean something.
+        if let shelf = PersonalizedShelves.timeOfDayShelf(from: entries) {
+            let kept = shelf.items.filter { item in
+                guard let artistId = item.artistId else { return true }
+                return !env.isBlocked(artistId: artistId)
+            }
+            if kept.count >= 4 {
+                out.append(HomeSection(id: "personal.timeOfDay." + shelf.slot.rawValue, title: shelf.title, items: kept))
+            }
+        }
         return out
     }
 

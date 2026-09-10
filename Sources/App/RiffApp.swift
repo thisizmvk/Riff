@@ -80,7 +80,8 @@ struct RiffApp: App {
                 Button("Open YouTube Music Link from Clipboard") {
                     environment.openLinkFromPasteboard()
                 }
-                .keyboardShortcut("l", modifiers: [.command, .shift])
+                // ⌘⇧O — ⌘⇧L is already Sign In.
+                .keyboardShortcut("o", modifiers: [.command, .shift])
                 Divider()
             }
             // Transport shortcuts — Space play/pause, ⌘← / ⌘→ for prev/next
@@ -340,6 +341,7 @@ extension FocusedValues {
 struct RootView: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         @Bindable var env = env
@@ -349,7 +351,7 @@ struct RootView: View {
             // NavigationStack-wrapped tabs, leaking the home content through.
             if env.player.isFullPlayerOpen {
                 NowPlayingView()
-                    .transition(.move(edge: .bottom))
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
             } else {
                 ZStack(alignment: .bottom) {
                     MainTabs()
@@ -360,7 +362,7 @@ struct RootView: View {
                 }
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: env.player.isFullPlayerOpen)
+        .animation(reduceMotion ? nil : Theme.Motion.panel, value: env.player.isFullPlayerOpen)
         .background(Color.black.ignoresSafeArea())
         .focusedSceneValue(\.appEnvironment, env)
         .overlay(alignment: .bottom) {

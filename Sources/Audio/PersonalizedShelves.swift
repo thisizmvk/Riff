@@ -185,4 +185,73 @@ enum PersonalizedShelves {
             .prefix(limit)
             .map { $0 }
     }
+
+    // MARK: - Time-of-day shelf ("daylist"-style)
+
+    enum DaySlot: String, CaseIterable {
+        case morning, afternoon, evening, lateNight
+
+        static func slot(for date: Date, calendar: Calendar = .current) -> DaySlot {
+            let hour = calendar.component(.hour, from: date)
+            switch hour {
+            case 5..<11:  return .morning
+            case 11..<17: return .afternoon
+            case 17..<22: return .evening
+            default:      return .lateNight
+            }
+        }
+
+        var shelfTitle: String {
+            switch self {
+            case .morning:   return "Your morning rotation"
+            case .afternoon: return "Your afternoon rotation"
+            case .evening:   return "Your evening rotation"
+            case .lateNight: return "Your late-night rotation"
+            }
+        }
+    }
+
+    struct TimeOfDayShelf: Equatable {
+        let slot: DaySlot
+        let title: String
+        let items: [MediaItem]
+    }
+
+    /// Tracks you tend to play at THIS time of day, ranked by plays in
+    /// the current slot over the last `days` days (recency tiebreak).
+    /// Nil until the slot has enough signal (≥ `minPlays` plays across
+    /// ≥ `minTracks` distinct tracks) — a shelf built on three plays
+    /// reads as noise, not insight.
+    static func timeOfDayShelf(
+        from entries: [PlayedEntry],
+        now: Date = Date(),
+        since days: Int = 90,
+        limit: Int = 12,
+        minPlays: Int = 15,
+        minTracks: Int = 8,
+        calendar: Calendar = .current
+    ) -> TimeOfDayShelf? {
+        let slot = DaySlot.slot(for: now, calendar: calendar)
+        let cutoff = now.addingTimeInterval(-Double(days) * 24 * 60 * 60)
+        let inSlot = entries.filter { $0.playedAt >= cutoff && DaySlot.slot(for: $0.playedAt, calendar: calendar) == slot }
+        guard inSlot.count >= minPlays else { return nil }
+        struct Agg { var count = 0; var last = Date.distantPast; var item: MediaItem }
+        var byId: [String: Agg] = [:]
+        for e in inSlot where !e.item.id.isEmpty {
+            if var a = byId[e.item.id] {
+                a.count += 1
+                a.last = max(a.last, e.playedAt)
+                byId[e.item.id] = a
+            } else {
+                byId[e.item.id] = Agg(count: 1, last: e.playedAt, item: e.item)
+            }
+        }
+        guard byId.count >= minTracks else { return nil }
+        let ranked = byId.values
+            .sorted { l, r in l.count != r.count ? l.count > r.count : l.last > r.last }
+            .map(\.item)
+            .filter { $0.thumbnailURL != nil }
+            .prefix(limit)
+        return TimeOfDayShelf(slot: slot, title: slot.shelfTitle, items: Array(ranked))
+    }
 }

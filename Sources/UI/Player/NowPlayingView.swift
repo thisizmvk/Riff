@@ -49,6 +49,7 @@ struct NowPlayingView: View {
     @State private var lyricsFullscreen: Bool = false
     /// Volume level to restore when the speaker icon un-mutes.
     @State private var preMuteVolume: Double = 1.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     enum BottomTab: String, CaseIterable, Identifiable {
         case upNext = "Up Next"
@@ -1389,7 +1390,94 @@ struct NowPlayingView: View {
     /// track. Gated on a configured API key — without one, shows a
     /// short hint pointing to Settings.
     @ViewBuilder
+    /// "Track details" — the factual card premium players lead with:
+    /// album (linked), year, length, and your own listening stats from
+    /// the journal. Honest scope: YouTube Music doesn't expose writer /
+    /// producer credits through the endpoints Riff uses, so this shows
+    /// what is verifiably known rather than inventing a credits list.
+    @ViewBuilder
+    private var trackDetailsCard: some View {
+        if let track = env.player.currentTrack {
+            let entries = env.player.playedEntries.filter { $0.item.id == track.videoId }
+            let match = entries.last?.item ?? env.player.upNext.first(where: { $0.id == track.videoId })
+            let segments = track.subtitle
+                .split(whereSeparator: { $0 == "·" || $0 == "•" })
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            let albumName: String? = segments.count >= 2 ? segments[1] : nil
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Track details")
+                    .font(.system(size: 10, weight: .semibold))
+                    .textCase(.uppercase)
+                    .tracking(1.2)
+                    .foregroundStyle(.white.opacity(0.45))
+                VStack(alignment: .leading, spacing: 6) {
+                    detailRow("Artist") {
+                        ArtistLinkLine(subtitle: segments.first ?? track.subtitle, primaryArtistId: track.artistId, fontSize: 12, baseOpacity: 0.9)
+                    }
+                    if let albumName, !Self.detailKindLabels.contains(albumName.lowercased()) {
+                        detailRow("Album") {
+                            if let albumId = track.albumId {
+                                Button(albumName) { env.navigateToBrowseId(albumId, kind: .album, fallbackTitle: albumName) }
+                                    .buttonStyle(.plain)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.white.opacity(0.9))
+                                    .help("Open album")
+                            } else {
+                                Text(albumName).font(.system(size: 12)).foregroundStyle(.white.opacity(0.9))
+                            }
+                        }
+                    }
+                    if let year = match?.year {
+                        detailRow("Year") { Text(String(year)).font(.system(size: 12)).foregroundStyle(.white.opacity(0.9)) }
+                    }
+                    if env.player.duration > 0 {
+                        detailRow("Length") {
+                            Text(Self.formatLength(env.player.duration)).font(.system(size: 12, design: .monospaced)).foregroundStyle(.white.opacity(0.9))
+                        }
+                    }
+                    if !entries.isEmpty {
+                        detailRow("Your plays") {
+                            Text("\(entries.count)× · first \(Self.relative(entries.first!.playedAt)) · last \(Self.relative(entries.last!.playedAt))")
+                                .font(.system(size: 12)).foregroundStyle(.white.opacity(0.9))
+                        }
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Color.white.opacity(0.08), lineWidth: 1))
+            .padding(.bottom, 16)
+        }
+    }
+
+    private static let detailKindLabels: Set<String> = ["song", "video", "album", "single", "ep", "playlist", "artist", "episode", "podcast"]
+    private static let detailRelativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter(); f.unitsStyle = .short; return f
+    }()
+    private static func relative(_ date: Date) -> String {
+        detailRelativeFormatter.localizedString(for: date, relativeTo: Date())
+    }
+    private static func formatLength(_ seconds: Double) -> String {
+        let total = Int(seconds)
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    private func detailRow<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.white.opacity(0.5))
+                .frame(width: 72, alignment: .leading)
+            content()
+            Spacer(minLength: 0)
+        }
+    }
+
     private var contextContent: some View {
+        trackDetailsCard
         if !env.hasLLMAPIKey {
             VStack(alignment: .leading, spacing: 10) {
                 Text("X-Ray")
@@ -1868,6 +1956,8 @@ struct NowPlayingView: View {
                 }
             }
         }
+        // Rows slide when the queue consumes/reorders instead of popping.
+        .animation(reduceMotion ? nil : Theme.Motion.list, value: visibleIds)
     }
 
     /// Compute a drop destination index and hand it to the bridge.

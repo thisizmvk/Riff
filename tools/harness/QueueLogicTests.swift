@@ -312,6 +312,43 @@ do {
     check(!QueuePolicy.contextExhausted(userQueueCount: 0, contextTrackIds: album, currentId: "radioX", headId: "radioY"), "already past the context: not exhausted (no cycle from radio)")
 }
 
+
+// ── 12. Time-of-day shelf (pure) ────────────────────────────────────
+do {
+    var cal = Calendar(identifier: .gregorian)
+    cal.timeZone = TimeZone(identifier: "UTC")!
+    func at(_ day: Int, _ hour: Int) -> Date {
+        cal.date(from: DateComponents(year: 2026, month: 9, day: day, hour: hour))!
+    }
+    let now = at(10, 8)   // a morning
+    check(PersonalizedShelves.DaySlot.slot(for: at(10, 8), calendar: cal) == .morning, "08:00 is morning")
+    check(PersonalizedShelves.DaySlot.slot(for: at(10, 13), calendar: cal) == .afternoon, "13:00 is afternoon")
+    check(PersonalizedShelves.DaySlot.slot(for: at(10, 19), calendar: cal) == .evening, "19:00 is evening")
+    check(PersonalizedShelves.DaySlot.slot(for: at(10, 23), calendar: cal) == .lateNight, "23:00 is late night")
+    check(PersonalizedShelves.DaySlot.slot(for: at(10, 2), calendar: cal) == .lateNight, "02:00 is late night")
+
+    func thumbed(_ id: String) -> MediaItem {
+        MediaItem(id: id, kind: .song, title: id, subtitle: "A", thumbnailURL: URL(string: "https://x/\(id).jpg"))
+    }
+    // Too little signal → nil.
+    let sparse = (0..<5).map { PlayedEntry(item: thumbed("s\($0)"), playedAt: at(1 + $0, 7)) }
+    check(PersonalizedShelves.timeOfDayShelf(from: sparse, now: now, calendar: cal) == nil, "sparse morning history → no shelf")
+
+    // Enough morning plays: m1 played 5×, m2 4×, ..., plus evening plays that must NOT count.
+    var entries: [PlayedEntry] = []
+    for (idx, plays) in [5, 4, 3, 3, 2, 2, 1, 1, 1, 1].enumerated() {
+        for n in 0..<plays { entries.append(PlayedEntry(item: thumbed("m\(idx)"), playedAt: at(1 + n, 7 + idx % 3))) }
+    }
+    for n in 0..<20 { entries.append(PlayedEntry(item: thumbed("e\(n)"), playedAt: at(1 + n % 9, 20))) }
+    let shelf = PersonalizedShelves.timeOfDayShelf(from: entries, now: now, calendar: cal)
+    check(shelf?.slot == .morning && shelf?.title == "Your morning rotation", "shelf targets the current slot")
+    check(shelf?.items.first?.id == "m0" && shelf?.items[1].id == "m1", "ranked by plays within the slot")
+    check(!(shelf?.items.contains { $0.id.hasPrefix("e") } ?? true), "evening plays never leak into the morning shelf")
+    // Same history, evening now → the evening tracks, not the morning ones.
+    let evening = PersonalizedShelves.timeOfDayShelf(from: entries, now: at(10, 20), calendar: cal)
+    check(evening?.slot == .evening && (evening?.items.allSatisfy { $0.id.hasPrefix("e") } ?? false), "evening shelf is built from evening plays only")
+}
+
 print("")
 print("RESULT: \(passes) passed, \(failures) failed")
 exit(failures == 0 ? 0 : 1)
