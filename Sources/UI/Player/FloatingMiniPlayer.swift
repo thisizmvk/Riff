@@ -24,18 +24,6 @@ struct FloatingMiniPlayerView: View {
     var body: some View {
         let track = env.player.currentTrack
         ZStack(alignment: .bottom) {
-            // Artwork backdrop — fills the entire tile. Falls back to a
-            // dark surface when there's no current track or the image is
-            // still loading so the controls always have contrast.
-            AsyncImage(url: track?.thumbnailURL) { phase in
-                if case .success(let img) = phase {
-                    img.resizable().aspectRatio(contentMode: .fill)
-                } else {
-                    Color.black.opacity(0.92)
-                }
-            }
-            .clipped()
-
             // Bottom gradient + title block — always visible so the user
             // can read what's playing without hovering.
             VStack(alignment: .leading, spacing: 2) {
@@ -130,7 +118,25 @@ struct FloatingMiniPlayerView: View {
                 Spacer(minLength: 0)
             }
         }
-        .frame(minWidth: 280, minHeight: 140)
+        .frame(minWidth: 280, idealWidth: 320, maxWidth: 480,
+               minHeight: 140, idealHeight: 180, maxHeight: 270)
+        // Artwork as a BACKGROUND, never a layout sibling. As a ZStack
+        // child, the `.fill` image proposed its natural pixel size and
+        // the resizable window opened at artwork size — "a full screen
+        // of artwork" over the full-screen main window. A background
+        // cannot size the foreground; `.clipped()` keeps the overflow
+        // inside the tile. Falls back to a dark surface while loading so
+        // the controls always have contrast.
+        .background {
+            AsyncImage(url: track?.thumbnailURL) { phase in
+                if case .success(let img) = phase {
+                    img.resizable().aspectRatio(contentMode: .fill)
+                } else {
+                    Color.black.opacity(0.92)
+                }
+            }
+            .clipped()
+        }
         .background(Theme.Bg.base)
         .preferredColorScheme(.dark)
         .onHover { hovering in
@@ -209,6 +215,15 @@ private struct WindowFloater: NSViewRepresentable {
             window.styleMask.insert(.fullSizeContentView)
             window.isMovableByWindowBackground = true
             window.backgroundColor = .black
+            // A tile, not a document: bounded size, no zoom-to-screen,
+            // and no restored oversize frame from a previous session.
+            window.isRestorable = false
+            window.minSize = NSSize(width: 280, height: 140)
+            window.maxSize = NSSize(width: 480, height: 270)
+            window.standardWindowButton(.zoomButton)?.isEnabled = false
+            if window.frame.width > 480 || window.frame.height > 270 {
+                window.setContentSize(NSSize(width: 320, height: 180))
+            }
         }
         return v
     }
