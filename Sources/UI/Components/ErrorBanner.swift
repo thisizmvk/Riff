@@ -31,7 +31,7 @@ struct ErrorBanner: View {
                     .foregroundStyle(.white)
                 Text(message)
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(.Theme.Text.secondary)
                     .lineLimit(3)
             }
             Spacer(minLength: 8)
@@ -43,12 +43,12 @@ struct ErrorBanner: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(Color.white.opacity(0.05))
+        .background(Theme.Fill.soft)
         .overlay(
-            RoundedRectangle(cornerRadius: 8)
+            RoundedRectangle(cornerRadius: Theme.Radius.row)
                 .stroke(Theme.red.opacity(0.4), lineWidth: 1)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.row))
     }
 }
 

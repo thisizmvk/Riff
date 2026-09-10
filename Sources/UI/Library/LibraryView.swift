@@ -152,20 +152,20 @@ struct LibraryView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.Theme.Text.secondary)
                     TextField("Filter \(section.rawValue.lowercased())", text: $filterText)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13))
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 6)
-                .background(Color.white.opacity(0.06))
+                .background(Theme.Fill.soft)
                 .clipShape(Capsule())
 
                 if !filterText.isEmpty {
                     Text("\(displayedItems.count) of \(items.count)")
                         .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.Theme.Text.secondary)
                 }
 
                 Spacer()
@@ -191,8 +191,8 @@ struct LibraryView: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
-                    .background(Color.white.opacity(0.06))
-                    .foregroundStyle(.white.opacity(0.85))
+                    .background(Theme.Fill.soft)
+                    .foregroundStyle(.Theme.Text.secondary)
                     .clipShape(Capsule())
                 }
                 .menuStyle(.borderlessButton)
@@ -485,7 +485,7 @@ struct LibraryView: View {
                     .foregroundStyle(.white)
                 Text("Recent releases, newest first")
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.Theme.Text.secondary)
             }
             .padding(.horizontal, 24)
 
@@ -493,8 +493,8 @@ struct LibraryView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 16) {
                         ForEach(0..<4, id: \.self) { _ in
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(Color.white.opacity(0.06))
+                            RoundedRectangle(cornerRadius: Theme.Radius.tile)
+                                .fill(Theme.Fill.soft)
                                 .frame(width: 180, height: 180)
                         }
                     }

@@ -39,7 +39,7 @@ struct MenuBarMiniPlayer: View {
                 VStack(spacing: 4) {
                     GeometryReader { geo in
                         ZStack(alignment: .leading) {
-                            Capsule().fill(Color.white.opacity(0.12))
+                            Capsule().fill(Theme.Fill.strong)
                             Capsule()
                                 .fill(Theme.red)
                                 .frame(width: geo.size.width * env.player.progress)
@@ -302,7 +302,7 @@ struct MenuBarMiniPlayer: View {
                 .font(.system(size: 11, weight: .semibold))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
-                .background(selected ? Theme.red : Color.white.opacity(0.08))
+                .background(selected ? Theme.red : Theme.Fill.medium)
                 .foregroundStyle(selected ? .white : .primary)
                 .clipShape(Capsule())
         }
@@ -340,8 +340,8 @@ struct MenuBarMiniPlayer: View {
     @ViewBuilder
     private func artwork(url: URL?) -> some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .fill(Color.white.opacity(0.08))
+            RoundedRectangle(cornerRadius: Theme.Radius.thumb, style: .continuous)
+                .fill(Theme.Fill.medium)
             if let url {
                 AsyncImage(url: url) { phase in
                     if case .success(let img) = phase {
@@ -359,7 +359,7 @@ struct MenuBarMiniPlayer: View {
             }
         }
         .frame(width: 44, height: 44)
-        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.thumb, style: .continuous))
     }
 
     private func transport(

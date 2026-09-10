@@ -30,20 +30,20 @@ struct EmptyState: View {
         VStack(spacing: 14) {
             ZStack {
                 Circle()
-                    .fill(Color.white.opacity(0.05))
+                    .fill(Theme.Fill.soft)
                     .frame(width: 88, height: 88)
                 Image(systemName: systemImage)
                     .font(.system(size: 34, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(.Theme.Text.tertiary)
             }
             VStack(spacing: 6) {
                 Text(title)
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(.Theme.Text.secondary)
                     .multilineTextAlignment(.center)
                 Text(subtitle)
                     .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(.Theme.Text.tertiary)
                     .multilineTextAlignment(.center)
                     .lineLimit(3)
             }

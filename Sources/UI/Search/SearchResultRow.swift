@@ -100,7 +100,7 @@ struct SearchResultRow: View {
                     if case .success(let img) = phase {
                         img.resizable().aspectRatio(contentMode: .fill)
                     } else {
-                        Color.white.opacity(0.06)
+                        Theme.Fill.soft
                     }
                 }
                 .frame(width: 48, height: 48)
@@ -127,14 +127,14 @@ struct SearchResultRow: View {
                     if env.hasMetadataOverride(item) {
                         Image(systemName: "pencil")
                             .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(.Theme.Text.secondary)
                             .help("Metadata edited locally")
                             .accessibilityLabel("Metadata edited")
                     }
                 }
                 Text(formattedSubtitle)
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.Theme.Text.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 12)
@@ -142,7 +142,7 @@ struct SearchResultRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(rowBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.row))
         .contentShape(Rectangle())
     }
 
@@ -151,7 +151,7 @@ struct SearchResultRow: View {
             if isFocused {
                 Theme.red.opacity(0.18)
             } else if hovering {
-                Color.white.opacity(0.04)
+                Theme.Fill.faint
             } else {
                 Color.clear
             }
@@ -164,7 +164,7 @@ struct SearchResultRow: View {
         if item.kind == .artist {
             return AnyShape(Circle())
         }
-        return AnyShape(RoundedRectangle(cornerRadius: 6))
+        return AnyShape(RoundedRectangle(cornerRadius: Theme.Radius.thumb))
     }
 
     private var hoverIcon: String {
@@ -253,11 +253,11 @@ struct TopResultCard: View {
                 if case .success(let img) = phase {
                     img.resizable().aspectRatio(contentMode: .fill)
                 } else {
-                    Color.white.opacity(0.06)
+                    Theme.Fill.soft
                 }
             }
             .frame(width: 100, height: 100)
-            .clipShape(item.kind == .artist ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: 10)))
+            .clipShape(item.kind == .artist ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: Theme.Radius.card)))
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -268,14 +268,14 @@ struct TopResultCard: View {
                     if env.hasMetadataOverride(item) {
                         Image(systemName: "pencil")
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(.Theme.Text.secondary)
                             .help("Metadata edited locally")
                             .accessibilityLabel("Metadata edited")
                     }
                 }
                 Text(formattedSubtitle)
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(.Theme.Text.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 4)
                 HStack(spacing: 8) {
@@ -304,8 +304,8 @@ struct TopResultCard: View {
             Spacer(minLength: 8)
         }
         .padding(16)
-        .background(hovering ? Color.white.opacity(0.07) : Color.white.opacity(0.04))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .background(hovering ? Theme.Fill.medium : Theme.Fill.faint)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
         .contentShape(Rectangle())
     }
 

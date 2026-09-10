@@ -372,7 +372,7 @@ struct RootView: View {
             }
         }
         .animation(reduceMotion ? nil : Theme.Motion.panel, value: env.player.isFullPlayerOpen)
-        .background(Color.black.ignoresSafeArea())
+        .background(Theme.Bg.base.ignoresSafeArea())
         .focusedSceneValue(\.appEnvironment, env)
         .overlay(alignment: .bottom) {
             // Toast overlay. Slides in above the mini-player when
@@ -610,7 +610,7 @@ private struct ToastBanner: View {
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(
-            RoundedRectangle(cornerRadius: 10)
+            RoundedRectangle(cornerRadius: Theme.Radius.card)
                 .fill(Color(white: 0.15))
                 .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
         )

@@ -258,7 +258,7 @@ private struct MoodChipPill: View {
         Button(action: action) {
             Text(label)
                 .font(.system(size: 13, weight: isActive ? .semibold : .medium))
-                .foregroundStyle(isActive ? Color.black : .white)
+                .foregroundStyle(isActive ? Theme.Selected.text : Theme.Text.primary)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
                 .background(
@@ -270,7 +270,7 @@ private struct MoodChipPill: View {
                 .overlay(
                     Capsule()
                         .strokeBorder(
-                            isActive ? Color.clear : Color.white.opacity(0.12),
+                            isActive ? Color.clear : Theme.Fill.strong,
                             lineWidth: 1
                         )
                 )
@@ -297,13 +297,13 @@ private struct HomeSkeleton: View {
         VStack(alignment: .leading, spacing: 32) {
             ForEach(0..<2, id: \.self) { _ in
                 VStack(alignment: .leading, spacing: 12) {
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: Theme.Radius.thumb)
                         .fill(Color.white.opacity(pulse ? 0.10 : 0.06))
                         .frame(width: 180, height: 22)
                     HStack(spacing: 16) {
                         ForEach(0..<5, id: \.self) { _ in
                             VStack(alignment: .leading, spacing: 8) {
-                                RoundedRectangle(cornerRadius: 12)
+                                RoundedRectangle(cornerRadius: Theme.Radius.tile)
                                     .fill(Color.white.opacity(pulse ? 0.10 : 0.06))
                                     .frame(width: 180, height: 180)
                                 RoundedRectangle(cornerRadius: 4)
@@ -398,7 +398,7 @@ struct HomeSectionRow: View {
                 .frame(width: 36, height: 36)
                 .background(Color.black.opacity(0.72))
                 .clipShape(Circle())
-                .overlay(Circle().strokeBorder(Color.white.opacity(0.18), lineWidth: 1))
+                .overlay(Circle().strokeBorder(Theme.Fill.strong, lineWidth: 1))
                 .shadow(color: .black.opacity(0.5), radius: 8)
         }
         .buttonStyle(.plain)
@@ -463,11 +463,11 @@ private struct QuickPickRow: View {
                         if case .success(let img) = phase {
                             img.resizable().aspectRatio(contentMode: .fill)
                         } else {
-                            Color.white.opacity(0.06)
+                            Theme.Fill.soft
                         }
                     }
                     .frame(width: 48, height: 48)
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.thumb))
                     if hovering {
                         ZStack {
                             Color.black.opacity(0.5)
@@ -476,7 +476,7 @@ private struct QuickPickRow: View {
                                 .foregroundStyle(.white)
                         }
                         .frame(width: 48, height: 48)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.thumb))
                     }
                 }
                 VStack(alignment: .leading, spacing: 2) {
@@ -486,14 +486,14 @@ private struct QuickPickRow: View {
                         .lineLimit(1)
                     Text(item.subtitle)
                         .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.Theme.Text.secondary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
             }
             .padding(8)
             .background(Color.white.opacity(hovering ? 0.06 : 0.0))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.row))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -537,7 +537,7 @@ private struct SignInNudgeCard: View {
                     .foregroundStyle(.white)
                 Text("Sign in to get your mixes, listen-again shelves, library and ad-free playback.")
                     .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(.Theme.Text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 12)
@@ -549,7 +549,7 @@ private struct SignInNudgeCard: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(.Theme.Text.tertiary)
                     .frame(width: 24, height: 24)
             }
             .buttonStyle(.plain)
@@ -557,8 +557,8 @@ private struct SignInNudgeCard: View {
             .accessibilityLabel("Dismiss sign-in suggestion")
         }
         .padding(14)
-        .background(Color.white.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+        .background(Theme.Fill.soft)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.tile))
+        .overlay(RoundedRectangle(cornerRadius: Theme.Radius.tile).strokeBorder(Theme.Fill.medium, lineWidth: 1))
     }
 }

@@ -227,15 +227,15 @@ struct SearchView: View {
                                 HStack(spacing: 4) {
                                     Image(systemName: "magnifyingglass")
                                         .font(.system(size: 9))
-                                        .foregroundStyle(.white.opacity(0.5))
+                                        .foregroundStyle(.Theme.Text.tertiary)
                                     Text(s)
                                         .font(.system(size: 12))
-                                        .foregroundStyle(.white.opacity(0.9))
+                                        .foregroundStyle(.Theme.Text.secondary)
                                         .lineLimit(1)
                                 }
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 5)
-                                .background(Color.white.opacity(0.07))
+                                .background(Theme.Fill.medium)
                                 .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)
@@ -295,7 +295,7 @@ struct SearchView: View {
                     HStack(spacing: 6) {
                         Text("\(displayedResults.count) of \(results.count) matches")
                             .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(.Theme.Text.secondary)
                         Button("Clear") {
                             yearFilter = .any
                             durationFilter = .any
@@ -338,7 +338,7 @@ struct SearchView: View {
                         ProgressView().controlSize(.small)
                         Text("Searching…")
                             .font(.system(size: 13))
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(.Theme.Text.secondary)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.top, 60)
@@ -368,7 +368,7 @@ struct SearchView: View {
                     VStack(spacing: 8) {
                         Text("No results match these filters.")
                             .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.85))
+                            .foregroundStyle(.Theme.Text.secondary)
                         Button("Clear refinements") {
                             yearFilter = .any
                             durationFilter = .any
@@ -505,7 +505,7 @@ struct SearchView: View {
             HStack(spacing: 8) {
                 Text(err)
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.Theme.Text.secondary)
                 Button("Retry") {
                     loadMoreError = nil
                     Task { await loadMoreIfNeeded() }
@@ -530,7 +530,7 @@ struct SearchView: View {
                     ProgressView().controlSize(.small)
                     Text("Loading more…")
                         .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.Theme.Text.secondary)
                 }
                 .padding(.top, 16)
                 .padding(.bottom, 8)
@@ -601,14 +601,14 @@ struct SearchView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .textCase(.uppercase)
                         .tracking(1.2)
-                        .foregroundStyle(.white.opacity(0.55))
+                        .foregroundStyle(.Theme.Text.tertiary)
                     Spacer()
                     Button("Clear") {
                         SearchView.clearRecentSearches()
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(.Theme.Text.tertiary)
                 }
                 .padding(.horizontal, 24)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -626,8 +626,8 @@ struct SearchView: View {
                                 }
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 7)
-                                .background(Color.white.opacity(0.06))
-                                .foregroundStyle(.white.opacity(0.85))
+                                .background(Theme.Fill.soft)
+                                .foregroundStyle(.Theme.Text.secondary)
                                 .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)
@@ -675,8 +675,8 @@ struct SearchView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
-                    .background(selected ? Color.white : Color.white.opacity(0.08))
-                    .foregroundStyle(selected ? .black : .white)
+                    .background(selected ? Theme.Selected.fill : Theme.Fill.medium)
+                    .foregroundStyle(selected ? Theme.Selected.text : Theme.Text.primary)
                     .clipShape(Capsule())
             }
             .buttonStyle(.plain)
@@ -697,8 +697,8 @@ struct SearchView: View {
                     .font(.system(size: 11, weight: .medium))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
-                    .background(selected ? Theme.red.opacity(0.85) : Color.white.opacity(0.06))
-                    .foregroundStyle(selected ? .white : .white.opacity(0.75))
+                    .background(selected ? Theme.Selected.fill : Theme.Fill.soft)
+                    .foregroundStyle(selected ? Theme.Selected.text : Theme.Text.secondary)
                     .clipShape(Capsule())
             }
             .buttonStyle(.plain)

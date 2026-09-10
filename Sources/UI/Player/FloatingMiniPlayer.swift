@@ -45,7 +45,7 @@ struct FloatingMiniPlayerView: View {
                     .foregroundStyle(.white)
                 Text(track?.subtitle ?? "")
                     .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.Theme.Text.secondary)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -107,7 +107,7 @@ struct FloatingMiniPlayerView: View {
             VStack(spacing: 0) {
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
-                        Rectangle().fill(Color.white.opacity(0.06))
+                        Rectangle().fill(Theme.Fill.soft)
                         Rectangle()
                             .fill(Theme.red)
                             .frame(width: geo.size.width * env.player.progress)
@@ -131,7 +131,7 @@ struct FloatingMiniPlayerView: View {
             }
         }
         .frame(minWidth: 280, minHeight: 140)
-        .background(Color.black)
+        .background(Theme.Bg.base)
         .preferredColorScheme(.dark)
         .onHover { hovering in
             isHovering = hovering
@@ -184,7 +184,7 @@ struct FloatingMiniPlayerView: View {
                 .font(.system(size: 9, weight: .semibold))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
-                .background(selected ? Theme.red : Color.white.opacity(0.15))
+                .background(selected ? Theme.red : Theme.Fill.strong)
                 .foregroundStyle(.white)
                 .clipShape(Capsule())
         }

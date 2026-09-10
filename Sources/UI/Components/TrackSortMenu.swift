@@ -64,8 +64,8 @@ struct TrackSortMenu: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(Color.white.opacity(0.06))
-            .foregroundStyle(.white.opacity(0.85))
+            .background(Theme.Fill.soft)
+            .foregroundStyle(.Theme.Text.secondary)
             .clipShape(Capsule())
         }
         .menuStyle(.borderlessButton)

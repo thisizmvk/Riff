@@ -78,7 +78,7 @@ private struct ExploreHeader: View {
                 .foregroundStyle(.white)
             Text("Charts, new releases, and moods worth a listen.")
                 .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(.Theme.Text.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -90,13 +90,13 @@ private struct ExploreSkeleton: View {
         VStack(alignment: .leading, spacing: 32) {
             ForEach(0..<2, id: \.self) { _ in
                 VStack(alignment: .leading, spacing: 12) {
-                    RoundedRectangle(cornerRadius: 6)
+                    RoundedRectangle(cornerRadius: Theme.Radius.thumb)
                         .fill(Color.white.opacity(pulse ? 0.10 : 0.06))
                         .frame(width: 180, height: 22)
                     HStack(spacing: 16) {
                         ForEach(0..<5, id: \.self) { _ in
                             VStack(alignment: .leading, spacing: 8) {
-                                RoundedRectangle(cornerRadius: 12)
+                                RoundedRectangle(cornerRadius: Theme.Radius.tile)
                                     .fill(Color.white.opacity(pulse ? 0.10 : 0.06))
                                     .frame(width: 180, height: 180)
                                 RoundedRectangle(cornerRadius: 4)

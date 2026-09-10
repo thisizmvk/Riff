@@ -119,8 +119,8 @@ struct OAuthSignInView: View {
                     .foregroundStyle(.white)
                     .padding(.horizontal, 24)
                     .padding(.vertical, 12)
-                    .background(Color.white.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                    .background(Theme.Fill.medium)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
                 Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(code, forType: .string)

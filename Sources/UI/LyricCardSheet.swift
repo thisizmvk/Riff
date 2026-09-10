@@ -44,20 +44,20 @@ struct LyricCardSheet: View {
                                 .font(.system(size: 11, weight: .semibold))
                                 .textCase(.uppercase)
                                 .tracking(1.2)
-                                .foregroundStyle(.white.opacity(0.75))
+                                .foregroundStyle(.Theme.Text.secondary)
                             TextEditor(text: $snippet)
                                 .font(.system(size: 14))
                                 .frame(minHeight: 80, maxHeight: 140)
                                 .scrollContentBackground(.hidden)
                                 .padding(8)
-                                .background(Color.white.opacity(0.06))
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .background(Theme.Fill.soft)
+                                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.thumb))
                         }
                         HStack {
                             if let statusMessage {
                                 Text(statusMessage)
                                     .font(.system(size: 12))
-                                    .foregroundStyle(.white.opacity(0.7))
+                                    .foregroundStyle(.Theme.Text.secondary)
                             }
                             Spacer()
                             Button("Save Image…") {
@@ -70,7 +70,7 @@ struct LyricCardSheet: View {
                     } else {
                         Text("Play a track to create a lyric card.")
                             .font(.system(size: 13))
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(.Theme.Text.secondary)
                             .frame(maxWidth: .infinity, alignment: .center)
                             .padding(.vertical, 32)
                     }
@@ -186,11 +186,11 @@ private struct LyricCardPreview: View {
                         if case .success(let img) = phase {
                             img.resizable().aspectRatio(contentMode: .fill)
                         } else {
-                            Color.white.opacity(0.1)
+                            Theme.Fill.medium
                         }
                     }
                     .frame(width: 72, height: 72)
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.row))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(track.title)
                             .font(.system(size: 18, weight: .semibold))
@@ -198,13 +198,13 @@ private struct LyricCardPreview: View {
                             .lineLimit(1)
                         Text(track.subtitle)
                             .font(.system(size: 14))
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(.Theme.Text.secondary)
                             .lineLimit(1)
                     }
                     Spacer()
                     Text("Riff")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.Theme.Text.secondary)
                         .tracking(2)
                         .textCase(.uppercase)
                 }

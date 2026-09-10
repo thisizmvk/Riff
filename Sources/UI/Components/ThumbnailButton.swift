@@ -45,7 +45,7 @@ struct ThumbnailButton: View {
     /// affordance ("this is a person, not a container") at a
     /// glance before you read the label.
     private var thumbShape: AnyShape {
-        item.kind == .artist ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: 12))
+        item.kind == .artist ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: Theme.Radius.tile))
     }
 
     var body: some View {
@@ -130,8 +130,8 @@ struct ThumbnailButton: View {
                         // by design (all Riff tiles sit on black).
                         LinearGradient(
                             colors: [
-                                Color.white.opacity(0.08),
-                                Color.white.opacity(0.03),
+                                Theme.Fill.medium,
+                                Theme.Fill.faint,
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -143,10 +143,10 @@ struct ThumbnailButton: View {
                         // artist vs playlist). Better than a blank
                         // black square.
                         ZStack {
-                            Color.white.opacity(0.06)
+                            Theme.Fill.soft
                             Image(systemName: placeholderSymbol)
                                 .font(.system(size: 32, weight: .light))
-                                .foregroundStyle(.white.opacity(0.25))
+                                .foregroundStyle(.Theme.Fill.strong)
                         }
                     }
                 }
@@ -264,7 +264,7 @@ struct ThumbnailButton: View {
                 if env.hasMetadataOverride(item) {
                     Image(systemName: "pencil")
                         .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.Theme.Text.secondary)
                         .help("Metadata edited locally")
                         .accessibilityLabel("Metadata edited")
                 }
@@ -276,7 +276,7 @@ struct ThumbnailButton: View {
                 // 75% white on 14pt SF Pro measures ~4.2:1 contrast
                 // (below WCAG AA 4.5:1 for normal text). 85% clears
                 // 5.5:1 while still reading as secondary.
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(.Theme.Text.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
@@ -318,7 +318,7 @@ struct ThumbnailButton: View {
             ZStack {
                 Circle().fill(Color.black.opacity(0.7))
                     .frame(width: 30, height: 30)
-                    .overlay(Circle().strokeBorder(Color.white.opacity(0.15), lineWidth: 1))
+                    .overlay(Circle().strokeBorder(Theme.Fill.strong, lineWidth: 1))
                 Image(systemName: systemImage)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.white)

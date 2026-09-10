@@ -102,7 +102,7 @@ struct DetailView: View {
                     if page.tracks.isEmpty {
                         Text("No tracks")
                             .font(.system(size: 13))
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(.Theme.Text.secondary)
                             .padding(.horizontal, 32)
                     } else {
                         if showsTrackSortMenu {
@@ -140,7 +140,7 @@ struct DetailView: View {
             }
             .padding(.vertical, 24)
         }
-        .background(Color.black.ignoresSafeArea())
+        .background(Theme.Bg.base.ignoresSafeArea())
         .task(id: item.id) {
             await load()
             // Make sure userPlaylists is populated so the
@@ -155,7 +155,7 @@ struct DetailView: View {
             AsyncImage(url: page.artworkURL ?? item.thumbnailURL) { phase in
                 switch phase {
                 case .success(let img): img.resizable().aspectRatio(contentMode: .fill)
-                default: Color.white.opacity(0.06)
+                default: Theme.Fill.soft
                 }
             }
             .frame(width: 220, height: 220)
@@ -167,7 +167,7 @@ struct DetailView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .textCase(.uppercase)
                     .tracking(1.2)
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.Theme.Text.secondary)
                 Text(page.title.isEmpty ? item.title : page.title)
                     .font(.system(size: 32, weight: .bold))
                     .foregroundStyle(.white)
@@ -183,7 +183,7 @@ struct DetailView: View {
                 if let meta = metadataLine(for: page) {
                     Text(meta)
                         .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.Theme.Text.secondary)
                 }
                 Spacer(minLength: 8)
                 HStack(spacing: 10) {
@@ -395,10 +395,10 @@ struct DetailView: View {
             // data is broken.
             if let derived = albumArtistFallback(page: page), !derived.isEmpty {
                 Text(derived)
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.Theme.Text.secondary)
             } else {
                 Text(kindLabel)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(.Theme.Text.secondary)
             }
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 0) {
@@ -409,12 +409,12 @@ struct DetailView: View {
                         } label: {
                             Text(run.text)
                                 .foregroundStyle(.white)
-                                .underline(true, color: .white.opacity(0.5))
+                                .underline(true, color: .Theme.Text.tertiary)
                         }
                         .buttonStyle(.plain)
                     } else {
                         Text(run.text)
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(.Theme.Text.secondary)
                     }
                 }
                 Spacer(minLength: 0)
@@ -705,7 +705,7 @@ private struct TrackRow: View {
                     if case .success(let img) = phase {
                         img.resizable().aspectRatio(contentMode: .fill)
                     } else {
-                        Color.white.opacity(0.06)
+                        Theme.Fill.soft
                     }
                 }
                 .frame(width: 44, height: 44)
@@ -748,7 +748,7 @@ private struct TrackRow: View {
                 if isCurrent {
                     Theme.red.opacity(0.08)
                 } else if hovering {
-                    Color.white.opacity(0.05)
+                    Theme.Fill.soft
                 } else {
                     Color.clear
                 }
@@ -809,7 +809,7 @@ private struct TrackRow: View {
             } label: {
                 Image(systemName: isLiked ? "heart.fill" : "heart")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(isLiked ? Theme.red : .white.opacity(0.7))
+                    .foregroundStyle(isLiked ? Theme.red : .Theme.Text.secondary)
                     .frame(width: 20, height: 20)
                     .contentShape(Rectangle())
             }
@@ -826,7 +826,7 @@ private struct TrackRow: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(.Theme.Text.secondary)
                     .frame(width: 20, height: 20)
                     .contentShape(Rectangle())
             }
@@ -847,7 +847,7 @@ private struct TrackRow: View {
             // playing (replaced by equalizer icon).
             Text("\(index + 1)")
                 .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.45))
+                .foregroundStyle(.Theme.Text.tertiary)
                 .opacity(hovering || isCurrent ? 0 : 1)
             // Currently-playing equalizer indicator. YT Music has an
             // animated wave here; `speaker.wave.2.fill` is the

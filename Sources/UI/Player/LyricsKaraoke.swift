@@ -92,8 +92,8 @@ struct KaraokeLineView: View {
             stops: [
                 .init(color: .white, location: 0),
                 .init(color: .white, location: p),
-                .init(color: Color.white.opacity(0.4), location: min(1, p + feather)),
-                .init(color: Color.white.opacity(0.4), location: 1)
+                .init(color: Theme.Text.disabled, location: min(1, p + feather)),
+                .init(color: Theme.Text.disabled, location: 1)
             ],
             startPoint: .leading,
             endPoint: .trailing

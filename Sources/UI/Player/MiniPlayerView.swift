@@ -16,7 +16,7 @@ struct MiniPlayerView: View {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Rectangle()
-                        .fill(Color.white.opacity(0.06))
+                        .fill(Theme.Fill.soft)
                     Rectangle()
                         .fill(Theme.red)
                         .frame(width: geo.size.width * env.player.progress)
@@ -52,7 +52,7 @@ struct MiniPlayerView: View {
                     }
                 }
                 .frame(width: 52, height: 52)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.row))
                 .shadow(color: .black.opacity(0.4), radius: 6, y: 2)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -88,7 +88,7 @@ struct MiniPlayerView: View {
                                        : env.player.volume < 0.5 ? "speaker.wave.1.fill"
                                        : "speaker.wave.2.fill")
                         .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.Theme.Text.secondary)
                         .frame(width: 18)
                     Slider(
                         value: Binding(

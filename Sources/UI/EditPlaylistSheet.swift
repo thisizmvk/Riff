@@ -43,7 +43,7 @@ struct EditPlaylistSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Name")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.Theme.Text.secondary)
                     .textCase(.uppercase)
                     .tracking(1.2)
                 TextField("Playlist name", text: $title)
@@ -53,7 +53,7 @@ struct EditPlaylistSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Description")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.Theme.Text.secondary)
                     .textCase(.uppercase)
                     .tracking(1.2)
                 TextField("Optional", text: $description, axis: .vertical)
@@ -64,7 +64,7 @@ struct EditPlaylistSheet: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Privacy")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.Theme.Text.secondary)
                     .textCase(.uppercase)
                     .tracking(1.2)
                 Picker("Privacy", selection: $privacy) {
@@ -82,7 +82,7 @@ struct EditPlaylistSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Divider().background(Color.white.opacity(0.1))
+            Divider().background(Theme.Fill.medium)
 
             HStack {
                 Button("Delete Playlist") {

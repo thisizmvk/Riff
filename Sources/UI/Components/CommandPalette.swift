@@ -21,7 +21,7 @@ struct CommandPalette: View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.white.opacity(0.5))
+                    .foregroundStyle(.Theme.Text.tertiary)
                     .font(.system(size: 14, weight: .medium))
                 TextField("Jump to…", text: $query)
                     .textFieldStyle(.plain)
@@ -33,7 +33,7 @@ struct CommandPalette: View {
                         query = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.white.opacity(0.35))
+                            .foregroundStyle(.Theme.Text.disabled)
                     }
                     .buttonStyle(.plain)
                 }
@@ -57,7 +57,7 @@ struct CommandPalette: View {
                         if filteredActions.isEmpty {
                             Text("No matches")
                                 .font(.system(size: 13))
-                                .foregroundStyle(.white.opacity(0.4))
+                                .foregroundStyle(.Theme.Text.disabled)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 20)
                         }
@@ -80,21 +80,21 @@ struct CommandPalette: View {
                 Spacer()
                 Text("\(filteredActions.count) result\(filteredActions.count == 1 ? "" : "s")")
                     .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.4))
+                    .foregroundStyle(.Theme.Text.disabled)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
         }
         .frame(width: 560)
         .background(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: Theme.Radius.tile)
                 .fill(Color(white: 0.12))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+            RoundedRectangle(cornerRadius: Theme.Radius.tile)
+                .strokeBorder(Theme.Fill.medium, lineWidth: 1)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.tile))
         .onAppear {
             searchFocused = true
             selectedIndex = 0
@@ -124,15 +124,15 @@ struct CommandPalette: View {
         HStack(spacing: 12) {
             Image(systemName: action.icon)
                 .frame(width: 22, height: 22)
-                .foregroundStyle(selected ? .white : .white.opacity(0.7))
+                .foregroundStyle(selected ? .white : .Theme.Text.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(action.title)
                     .font(.system(size: 14, weight: selected ? .semibold : .regular))
-                    .foregroundStyle(selected ? .white : .white.opacity(0.85))
+                    .foregroundStyle(selected ? .white : .Theme.Text.secondary)
                 if let subtitle = action.subtitle {
                     Text(subtitle)
                         .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.5))
+                        .foregroundStyle(.Theme.Text.tertiary)
                 }
             }
             Spacer()
@@ -141,9 +141,9 @@ struct CommandPalette: View {
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color.white.opacity(0.08))
+                    .background(Theme.Fill.medium)
                     .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(.Theme.Text.tertiary)
             }
         }
         .padding(.horizontal, 14)
@@ -158,11 +158,11 @@ struct CommandPalette: View {
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .padding(.horizontal, 5)
                 .padding(.vertical, 1)
-                .background(Color.white.opacity(0.08))
+                .background(Theme.Fill.medium)
                 .clipShape(RoundedRectangle(cornerRadius: 3))
             Text(label)
                 .font(.system(size: 10))
-                .foregroundStyle(.white.opacity(0.5))
+                .foregroundStyle(.Theme.Text.tertiary)
         }
     }
 

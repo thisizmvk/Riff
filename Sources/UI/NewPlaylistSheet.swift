@@ -36,7 +36,7 @@ struct NewPlaylistSheet: View {
                 .font(.system(size: 16, weight: .semibold))
             Text(subheadline)
                 .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.65))
+                .foregroundStyle(.Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             TextField("Playlist name", text: $title)
