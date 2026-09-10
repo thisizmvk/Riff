@@ -38,7 +38,7 @@ struct OnboardingSheet: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 18))
-                        .foregroundStyle(.Theme.Text.tertiary)
+                        .foregroundStyle(Theme.Text.tertiary)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Dismiss onboarding")
@@ -126,7 +126,7 @@ struct OnboardingSheet: View {
                 if env.isSignedIn {
                     Text("Your Liked Songs, playlists, and subscriptions are loading into the Library tab.")
                         .font(.system(size: 13))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .multilineTextAlignment(.leading)
                 } else {
@@ -172,7 +172,7 @@ struct OnboardingSheet: View {
                     .foregroundStyle(.white)
                 Text(detail)
                     .font(.system(size: 12))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -219,7 +219,7 @@ struct OnboardingSheet: View {
                 ForEach(body, id: \.self) { paragraph in
                     Text(paragraph)
                         .font(.system(size: 13))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                         .multilineTextAlignment(.leading)
                 }

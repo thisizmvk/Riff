@@ -102,7 +102,7 @@ struct DetailView: View {
                     if page.tracks.isEmpty {
                         Text("No tracks")
                             .font(.system(size: 13))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                             .padding(.horizontal, 32)
                     } else {
                         if showsTrackSortMenu {
@@ -167,7 +167,7 @@ struct DetailView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .textCase(.uppercase)
                     .tracking(1.2)
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                 Text(page.title.isEmpty ? item.title : page.title)
                     .font(.system(size: 32, weight: .bold))
                     .foregroundStyle(.white)
@@ -183,7 +183,7 @@ struct DetailView: View {
                 if let meta = metadataLine(for: page) {
                     Text(meta)
                         .font(.system(size: 12))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                 }
                 Spacer(minLength: 8)
                 HStack(spacing: 10) {
@@ -395,10 +395,10 @@ struct DetailView: View {
             // data is broken.
             if let derived = albumArtistFallback(page: page), !derived.isEmpty {
                 Text(derived)
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
             } else {
                 Text(kindLabel)
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
             }
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 0) {
@@ -409,12 +409,12 @@ struct DetailView: View {
                         } label: {
                             Text(run.text)
                                 .foregroundStyle(.white)
-                                .underline(true, color: .Theme.Text.tertiary)
+                                .underline(true, color: Theme.Text.tertiary)
                         }
                         .buttonStyle(.plain)
                     } else {
                         Text(run.text)
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                     }
                 }
                 Spacer(minLength: 0)
@@ -713,7 +713,7 @@ private struct TrackRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)
                         .font(.system(size: 14, weight: isCurrent ? .semibold : .medium))
-                        .foregroundStyle(isCurrent ? Theme.red : .white)
+                        .foregroundStyle(isCurrent ? Theme.red : Color.white)
                         .lineLimit(2)
                     Text(item.subtitle)
                         .font(.system(size: 12))
@@ -809,7 +809,7 @@ private struct TrackRow: View {
             } label: {
                 Image(systemName: isLiked ? "heart.fill" : "heart")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(isLiked ? Theme.red : .Theme.Text.secondary)
+                    .foregroundStyle(isLiked ? Theme.red : Theme.Text.secondary)
                     .frame(width: 20, height: 20)
                     .contentShape(Rectangle())
             }
@@ -826,7 +826,7 @@ private struct TrackRow: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .frame(width: 20, height: 20)
                     .contentShape(Rectangle())
             }
@@ -847,7 +847,7 @@ private struct TrackRow: View {
             // playing (replaced by equalizer icon).
             Text("\(index + 1)")
                 .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(.Theme.Text.tertiary)
+                .foregroundStyle(Theme.Text.tertiary)
                 .opacity(hovering || isCurrent ? 0 : 1)
             // Currently-playing equalizer indicator. YT Music has an
             // animated wave here; `speaker.wave.2.fill` is the

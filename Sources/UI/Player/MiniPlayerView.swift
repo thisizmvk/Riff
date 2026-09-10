@@ -88,7 +88,7 @@ struct MiniPlayerView: View {
                                        : env.player.volume < 0.5 ? "speaker.wave.1.fill"
                                        : "speaker.wave.2.fill")
                         .font(.system(size: 12))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .frame(width: 18)
                     Slider(
                         value: Binding(

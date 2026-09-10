@@ -146,7 +146,7 @@ struct ThumbnailButton: View {
                             Theme.Fill.soft
                             Image(systemName: placeholderSymbol)
                                 .font(.system(size: 32, weight: .light))
-                                .foregroundStyle(.Theme.Fill.strong)
+                                .foregroundStyle(Theme.Fill.strong)
                         }
                     }
                 }
@@ -257,14 +257,14 @@ struct ThumbnailButton: View {
                     // one so the semantic link between the tile and
                     // the mini-player is instant.
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(isNowPlaying ? Theme.red : .white)
+                    .foregroundStyle(isNowPlaying ? Theme.red : Color.white)
                     .lineLimit(2)
                     .truncationMode(.tail)
                     .multilineTextAlignment(.leading)
                 if env.hasMetadataOverride(item) {
                     Image(systemName: "pencil")
                         .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .help("Metadata edited locally")
                         .accessibilityLabel("Metadata edited")
                 }
@@ -276,7 +276,7 @@ struct ThumbnailButton: View {
                 // 75% white on 14pt SF Pro measures ~4.2:1 contrast
                 // (below WCAG AA 4.5:1 for normal text). 85% clears
                 // 5.5:1 while still reading as secondary.
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
         }

@@ -152,7 +152,7 @@ struct LibraryView: View {
                 HStack(spacing: 6) {
                     Image(systemName: "magnifyingglass")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                     TextField("Filter \(section.rawValue.lowercased())", text: $filterText)
                         .textFieldStyle(.plain)
                         .font(.system(size: 13))
@@ -165,7 +165,7 @@ struct LibraryView: View {
                 if !filterText.isEmpty {
                     Text("\(displayedItems.count) of \(items.count)")
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                 }
 
                 Spacer()
@@ -192,7 +192,7 @@ struct LibraryView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 6)
                     .background(Theme.Fill.soft)
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .clipShape(Capsule())
                 }
                 .menuStyle(.borderlessButton)
@@ -485,7 +485,7 @@ struct LibraryView: View {
                     .foregroundStyle(.white)
                 Text("Recent releases, newest first")
                     .font(.system(size: 12))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
             }
             .padding(.horizontal, 24)
 

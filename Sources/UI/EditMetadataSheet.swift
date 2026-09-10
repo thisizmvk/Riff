@@ -25,7 +25,7 @@ struct EditMetadataSheet: View {
                 .font(.system(size: 16, weight: .semibold))
             Text("Changes apply only to this app on this device. Nothing is sent to YouTube.")
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 10) {
@@ -76,7 +76,7 @@ struct EditMetadataSheet: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
             TextField(label, text: text)
                 .textFieldStyle(.roundedBorder)
         }

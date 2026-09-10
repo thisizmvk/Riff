@@ -21,7 +21,7 @@ struct CommandPalette: View {
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass")
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                     .font(.system(size: 14, weight: .medium))
                 TextField("Jump to…", text: $query)
                     .textFieldStyle(.plain)
@@ -33,7 +33,7 @@ struct CommandPalette: View {
                         query = ""
                     } label: {
                         Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.Theme.Text.disabled)
+                            .foregroundStyle(Theme.Text.disabled)
                     }
                     .buttonStyle(.plain)
                 }
@@ -57,7 +57,7 @@ struct CommandPalette: View {
                         if filteredActions.isEmpty {
                             Text("No matches")
                                 .font(.system(size: 13))
-                                .foregroundStyle(.Theme.Text.disabled)
+                                .foregroundStyle(Theme.Text.disabled)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 20)
                         }
@@ -80,7 +80,7 @@ struct CommandPalette: View {
                 Spacer()
                 Text("\(filteredActions.count) result\(filteredActions.count == 1 ? "" : "s")")
                     .font(.system(size: 11))
-                    .foregroundStyle(.Theme.Text.disabled)
+                    .foregroundStyle(Theme.Text.disabled)
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
@@ -124,15 +124,15 @@ struct CommandPalette: View {
         HStack(spacing: 12) {
             Image(systemName: action.icon)
                 .frame(width: 22, height: 22)
-                .foregroundStyle(selected ? .white : .Theme.Text.secondary)
+                .foregroundStyle(selected ? Color.white : Theme.Text.secondary)
             VStack(alignment: .leading, spacing: 2) {
                 Text(action.title)
                     .font(.system(size: 14, weight: selected ? .semibold : .regular))
-                    .foregroundStyle(selected ? .white : .Theme.Text.secondary)
+                    .foregroundStyle(selected ? Color.white : Theme.Text.secondary)
                 if let subtitle = action.subtitle {
                     Text(subtitle)
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.tertiary)
+                        .foregroundStyle(Theme.Text.tertiary)
                 }
             }
             Spacer()
@@ -143,7 +143,7 @@ struct CommandPalette: View {
                     .padding(.vertical, 2)
                     .background(Theme.Fill.medium)
                     .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
             }
         }
         .padding(.horizontal, 14)
@@ -162,7 +162,7 @@ struct CommandPalette: View {
                 .clipShape(RoundedRectangle(cornerRadius: 3))
             Text(label)
                 .font(.system(size: 10))
-                .foregroundStyle(.Theme.Text.tertiary)
+                .foregroundStyle(Theme.Text.tertiary)
         }
     }
 

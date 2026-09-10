@@ -81,7 +81,7 @@ struct QueueBuilderSheet: View {
                 .font(.system(size: 14, weight: .semibold))
             Text("Add an Anthropic API key in Settings → AI features and Riff can turn a vibe into a queue.")
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button("Open Settings") {
                 dismiss()
@@ -98,7 +98,7 @@ struct QueueBuilderSheet: View {
                 .font(.system(size: 11, weight: .semibold))
                 .textCase(.uppercase)
                 .tracking(1.2)
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
             TextField("e.g. rainy Sunday morning, mellow indie folk", text: $prompt)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(build)
@@ -124,7 +124,7 @@ struct QueueBuilderSheet: View {
             ProgressView().controlSize(.small)
             Text(phase == .generating ? "Asking the model…" : "Finding tracks on YouTube Music…")
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
         }
     }
 
@@ -142,7 +142,7 @@ struct QueueBuilderSheet: View {
                     .font(.system(size: 11, weight: .semibold))
                     .textCase(.uppercase)
                     .tracking(1.2)
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                 Spacer()
                 Button {
                     Task {
@@ -171,20 +171,20 @@ struct QueueBuilderSheet: View {
             if resolved.isEmpty {
                 Text("None of the suggestions matched a track on YouTube Music. Try a more specific vibe.")
                     .font(.system(size: 12))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
             } else {
                 ForEach(resolved) { item in
                     HStack(spacing: 10) {
                         Image(systemName: "music.note")
                             .frame(width: 18)
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(item.title)
                                 .font(.system(size: 13, weight: .medium))
                                 .lineLimit(1)
                             Text(item.subtitle)
                                 .font(.system(size: 11))
-                                .foregroundStyle(.Theme.Text.secondary)
+                                .foregroundStyle(Theme.Text.secondary)
                                 .lineLimit(1)
                         }
                         Spacer()

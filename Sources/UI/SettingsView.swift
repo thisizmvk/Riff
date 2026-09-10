@@ -215,14 +215,14 @@ struct SettingsView: View {
                         // the OAuth email when that path was used.
                         Text(handle)
                             .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                             .textSelection(.enabled)
                     }
                     Text(env.isSignedIn
                          ? "Library + personalized recommendations are available."
                          : "Anonymous browse + click-to-play work; sign in for Library access.")
                         .font(.system(size: 12))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                 }
                 Spacer()
                 if env.isSignedIn {
@@ -301,14 +301,14 @@ struct SettingsView: View {
                 }
                 Text("Riff never sees your password — only the resulting session cookie, stored in your local keychain. This is the recommended path if passkey / 2FA won't complete in the in-app window.")
                     .font(.system(size: 11))
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.top, 6)
         } label: {
             Text("Sign in by pasting browser cookies (advanced)")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
         }
     }
 
@@ -372,7 +372,7 @@ struct SettingsView: View {
                         .foregroundStyle(.white)
                     Text("Keep playing similar music when your queue ends. Turn off to stop at the end of the current queue or album.")
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -390,7 +390,7 @@ struct SettingsView: View {
                         .foregroundStyle(.white)
                     Text("Show a Notification Center banner with the new track when Riff is in the background.")
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -408,7 +408,7 @@ struct SettingsView: View {
                         .foregroundStyle(.white)
                     Text("Smooths loudness between tracks by measuring each new track and adjusting gain toward a fixed target. Approximate — measured in-browser, not LUFS-accurate.")
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -428,7 +428,7 @@ struct SettingsView: View {
                         .foregroundStyle(.white)
                     Text("Fades the end of each track into the beginning of the next over the chosen duration. Volume-only — YouTube Music's audio source can't overlap two tracks, so beat-matched mixing isn't possible.")
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -462,7 +462,7 @@ struct SettingsView: View {
                         .foregroundStyle(.white)
                     Text("Show a compact playback popover next to the system clock. Click the music-note icon for transport controls and a quick way to open the floating Mini Player window.")
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -487,7 +487,7 @@ struct SettingsView: View {
             sectionTitle("Scrobbling")
             Text("Send what you listen to to your last.fm or ListenBrainz profile. Both are opt-in, both stay off until you paste credentials. A track is scrobbled once you've played at least half of it, or 4 minutes — whichever comes first.")
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             // last.fm
@@ -511,7 +511,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Register an API account (link below), then run the one-off Approve flow to grant Riff scrobble permission.")
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     if let url = URL(string: "https://www.last.fm/api/account/create") {
                         Link("last.fm/api/account/create", destination: url)
@@ -530,7 +530,7 @@ struct SettingsView: View {
 
                 Text("Get a session key by running last.fm's desktop-app auth flow once: visit last.fm/api/auth/?api_key=YOUR_KEY in a browser, click Approve, then exchange the resulting token for a session key via auth.getSession. The session key never expires.")
                     .font(.system(size: 11))
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
 
                 HStack {
@@ -570,7 +570,7 @@ struct SettingsView: View {
                     if let name = listenBrainzUsername, !name.isEmpty {
                         Text("• \(name)")
                             .font(.system(size: 12))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                     }
                     Spacer()
                     Toggle("", isOn: Binding(
@@ -587,7 +587,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Grab your user-token from your ListenBrainz profile and paste it below. No additional setup needed.")
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     if let url = URL(string: "https://listenbrainz.org/profile") {
                         Link("listenbrainz.org/profile", destination: url)
@@ -729,7 +729,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
             TextField(placeholder, text: text)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12, design: .monospaced))
@@ -740,7 +740,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
             SecureField(placeholder, text: text)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12, design: .monospaced))
@@ -752,7 +752,7 @@ struct SettingsView: View {
             sectionTitle("Library access (advanced)")
             Text("Riff signs you in via Google's WebView flow which gives you full Library access through the YouTube Music cookie session — no setup required. The OAuth Device Flow path below is only useful if you want to access the YouTube Data API directly. Most users can ignore this.")
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             DisclosureGroup("Configure custom OAuth credentials") {
                 VStack(alignment: .leading, spacing: 16) {
@@ -776,7 +776,7 @@ struct SettingsView: View {
             sectionTitle("AI features")
             Text("Pick a model backend — paid (Anthropic), free hosted (Groq), or fully local (Ollama). Whichever you pick powers the Queue Builder, lyrics translation, and X-Ray context cards. Keys live in Keychain and requests go straight from your Mac to the provider — Riff never proxies.")
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             // Backend picker. Segmented so all three options are
@@ -805,7 +805,7 @@ struct SettingsView: View {
                 }
                 Text(activeProvider.tagline)
                     .font(.system(size: 11))
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
 
@@ -902,7 +902,7 @@ struct SettingsView: View {
             .font(.system(size: 12, design: .monospaced))
             .onSubmit(saveGroqKey)
             Text("Free key at the Groq console — API Keys page. No credit card needed.")
-                .font(.system(size: 11)).foregroundStyle(.Theme.Text.tertiary)
+                .font(.system(size: 11)).foregroundStyle(Theme.Text.tertiary)
             if let url = URL(string: "https://console.groq.com/keys") {
                 Link("console.groq.com/keys", destination: url)
                     .font(.system(size: 11))
@@ -946,7 +946,7 @@ struct SettingsView: View {
                 .font(.system(size: 12, design: .monospaced))
                 .onSubmit(saveOllamaSettings)
             Text("Start the Ollama daemon on this Mac and paste its base URL. Default works for a stock install.")
-                .font(.system(size: 11)).foregroundStyle(.Theme.Text.tertiary)
+                .font(.system(size: 11)).foregroundStyle(Theme.Text.tertiary)
             if let url = URL(string: "https://ollama.com/download") {
                 Link("ollama.com/download", destination: url)
                     .font(.system(size: 11))
@@ -961,7 +961,7 @@ struct SettingsView: View {
                 .font(.system(size: 12, design: .monospaced))
                 .onSubmit(saveOllamaSettings)
             Text("Any model you've pulled locally. Small + capable picks: qwen2.5:3b, gemma2:2b, llama3.2:3b.")
-                .font(.system(size: 11)).foregroundStyle(.Theme.Text.tertiary)
+                .font(.system(size: 11)).foregroundStyle(Theme.Text.tertiary)
         }
         HStack {
             Button("Save") { saveOllamaSettings() }
@@ -1033,7 +1033,7 @@ struct SettingsView: View {
 
             Text("Used when you turn on translation on the Now Playing lyrics tab. Translations are cached per song and language for the current session.")
                 .font(.system(size: 11))
-                .foregroundStyle(.Theme.Text.tertiary)
+                .foregroundStyle(Theme.Text.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -1155,7 +1155,7 @@ struct SettingsView: View {
             sectionTitle("Blocked artists")
             Text("Tracks by these artists are hidden from Home, Search, and the radio queue. Note: when a track ends naturally, YouTube Music's autoplay can still pick a blocked artist — we filter what we show, not what YT plays.")
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             // Display the captured artist name (falls back to id only
             // for legacy entries migrated from the old Set<String>
@@ -1168,7 +1168,7 @@ struct SettingsView: View {
                             .foregroundStyle(.white)
                         Text(id)
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.Theme.Text.tertiary)
+                            .foregroundStyle(Theme.Text.tertiary)
                             .textSelection(.enabled)
                     }
                     Spacer()
@@ -1192,7 +1192,7 @@ struct SettingsView: View {
             sectionTitle("Track metadata overrides")
             Text("Title / artist / album corrections you've applied to individual tracks. Local-only — nothing is sent to YouTube. To re-edit, right-click a track row anywhere in the app.")
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(env.trackOverrides.sortedVideoIds, id: \.self) { videoId in
                 if let override = env.trackOverrides.override(for: videoId) {
@@ -1207,16 +1207,16 @@ struct SettingsView: View {
                             if let a = override.artist, override.title != nil {
                                 Text(a)
                                     .font(.system(size: 11))
-                                    .foregroundStyle(.Theme.Text.secondary)
+                                    .foregroundStyle(Theme.Text.secondary)
                             }
                             if let a = override.album {
                                 Text(a)
                                     .font(.system(size: 11))
-                                    .foregroundStyle(.Theme.Text.secondary)
+                                    .foregroundStyle(Theme.Text.secondary)
                             }
                             Text(videoId)
                                 .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.Theme.Text.tertiary)
+                                .foregroundStyle(Theme.Text.tertiary)
                                 .textSelection(.enabled)
                         }
                         Spacer()
@@ -1265,7 +1265,7 @@ struct SettingsView: View {
             sectionTitle("Diagnostics")
             Text("Export a folder to ~/Downloads with recent Riff logs, your played-history journal, and version info. Useful when filing a bug report. Contains no API keys, cookies, or account identifiers.")
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button {
@@ -1303,12 +1303,12 @@ struct SettingsView: View {
                         .font(.system(size: 14, weight: .semibold))
                     Text("Native macOS YouTube Music client • AGPL-3.0")
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                 }
                 Spacer()
                 Text("v0.1.0")
                     .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
             }
         }
     }
@@ -1318,14 +1318,14 @@ struct SettingsView: View {
             .font(.system(size: 11, weight: .semibold))
             .textCase(.uppercase)
             .tracking(1.2)
-            .foregroundStyle(.Theme.Text.secondary)
+            .foregroundStyle(Theme.Text.secondary)
     }
 
     private func shortcutRow(_ label: String, keys: String) -> some View {
         HStack {
             Text(label)
                 .font(.system(size: 13))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
             Spacer()
             Text(keys)
                 .font(.system(size: 12, design: .monospaced))
@@ -1343,11 +1343,11 @@ struct SettingsView: View {
                 .font(.system(size: 22, weight: .bold))
             Text("Riff signs you in via Google's Device Flow using a public YouTube TV OAuth client. That works for sign-in, but the underlying Google Cloud project doesn't expose the YouTube Data API — which is what we need to read your liked songs and playlists.")
                 .font(.system(size: 13))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Text("To unlock the Library tab, register your own OAuth Limited-Input client in Google Cloud (free, ~5 min) and paste the credentials below.")
                 .font(.system(size: 13))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -1356,7 +1356,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Setup")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .textCase(.uppercase)
                 .tracking(1.2)
 
@@ -1385,7 +1385,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
                     .font(.system(size: 13))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 content()
             }
@@ -1396,7 +1396,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 10) {
             Text("OAuth credentials")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .textCase(.uppercase)
                 .tracking(1.2)
             VStack(alignment: .leading, spacing: 6) {

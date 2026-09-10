@@ -31,7 +31,7 @@ struct ErrorBanner: View {
                     .foregroundStyle(.white)
                 Text(message)
                     .font(.system(size: 12))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .lineLimit(3)
             }
             Spacer(minLength: 8)

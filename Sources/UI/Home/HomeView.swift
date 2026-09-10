@@ -486,7 +486,7 @@ private struct QuickPickRow: View {
                         .lineLimit(1)
                     Text(item.subtitle)
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
@@ -537,7 +537,7 @@ private struct SignInNudgeCard: View {
                     .foregroundStyle(.white)
                 Text("Sign in to get your mixes, listen-again shelves, library and ad-free playback.")
                     .font(.system(size: 11))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 12)
@@ -549,7 +549,7 @@ private struct SignInNudgeCard: View {
             } label: {
                 Image(systemName: "xmark")
                     .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                     .frame(width: 24, height: 24)
             }
             .buttonStyle(.plain)

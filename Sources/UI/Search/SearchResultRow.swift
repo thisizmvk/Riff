@@ -127,14 +127,14 @@ struct SearchResultRow: View {
                     if env.hasMetadataOverride(item) {
                         Image(systemName: "pencil")
                             .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                             .help("Metadata edited locally")
                             .accessibilityLabel("Metadata edited")
                     }
                 }
                 Text(formattedSubtitle)
                     .font(.system(size: 12))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .lineLimit(1)
             }
             Spacer(minLength: 12)
@@ -268,14 +268,14 @@ struct TopResultCard: View {
                     if env.hasMetadataOverride(item) {
                         Image(systemName: "pencil")
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                             .help("Metadata edited locally")
                             .accessibilityLabel("Metadata edited")
                     }
                 }
                 Text(formattedSubtitle)
                     .font(.system(size: 12))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 4)
                 HStack(spacing: 8) {

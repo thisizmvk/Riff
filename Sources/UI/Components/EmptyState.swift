@@ -34,16 +34,16 @@ struct EmptyState: View {
                     .frame(width: 88, height: 88)
                 Image(systemName: systemImage)
                     .font(.system(size: 34, weight: .medium))
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
             }
             VStack(spacing: 6) {
                 Text(title)
                     .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .multilineTextAlignment(.center)
                 Text(subtitle)
                     .font(.system(size: 13))
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                     .multilineTextAlignment(.center)
                     .lineLimit(3)
             }

@@ -227,10 +227,10 @@ struct SearchView: View {
                                 HStack(spacing: 4) {
                                     Image(systemName: "magnifyingglass")
                                         .font(.system(size: 9))
-                                        .foregroundStyle(.Theme.Text.tertiary)
+                                        .foregroundStyle(Theme.Text.tertiary)
                                     Text(s)
                                         .font(.system(size: 12))
-                                        .foregroundStyle(.Theme.Text.secondary)
+                                        .foregroundStyle(Theme.Text.secondary)
                                         .lineLimit(1)
                                 }
                                 .padding(.horizontal, 10)
@@ -295,7 +295,7 @@ struct SearchView: View {
                     HStack(spacing: 6) {
                         Text("\(displayedResults.count) of \(results.count) matches")
                             .font(.system(size: 11))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                         Button("Clear") {
                             yearFilter = .any
                             durationFilter = .any
@@ -338,7 +338,7 @@ struct SearchView: View {
                         ProgressView().controlSize(.small)
                         Text("Searching…")
                             .font(.system(size: 13))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.top, 60)
@@ -368,7 +368,7 @@ struct SearchView: View {
                     VStack(spacing: 8) {
                         Text("No results match these filters.")
                             .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                         Button("Clear refinements") {
                             yearFilter = .any
                             durationFilter = .any
@@ -505,7 +505,7 @@ struct SearchView: View {
             HStack(spacing: 8) {
                 Text(err)
                     .font(.system(size: 12))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                 Button("Retry") {
                     loadMoreError = nil
                     Task { await loadMoreIfNeeded() }
@@ -530,7 +530,7 @@ struct SearchView: View {
                     ProgressView().controlSize(.small)
                     Text("Loading more…")
                         .font(.system(size: 12))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                 }
                 .padding(.top, 16)
                 .padding(.bottom, 8)
@@ -601,14 +601,14 @@ struct SearchView: View {
                         .font(.system(size: 11, weight: .semibold))
                         .textCase(.uppercase)
                         .tracking(1.2)
-                        .foregroundStyle(.Theme.Text.tertiary)
+                        .foregroundStyle(Theme.Text.tertiary)
                     Spacer()
                     Button("Clear") {
                         SearchView.clearRecentSearches()
                     }
                     .buttonStyle(.plain)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                 }
                 .padding(.horizontal, 24)
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -627,7 +627,7 @@ struct SearchView: View {
                                 .padding(.horizontal, 12)
                                 .padding(.vertical, 7)
                                 .background(Theme.Fill.soft)
-                                .foregroundStyle(.Theme.Text.secondary)
+                                .foregroundStyle(Theme.Text.secondary)
                                 .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)

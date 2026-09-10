@@ -284,10 +284,10 @@ struct RecapView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(introHeadline)
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
             Text("Riff tracks your recent plays locally — never uploaded. Up to the last 500 tracks count toward these stats.")
                 .font(.system(size: 11))
-                .foregroundStyle(.Theme.Text.tertiary)
+                .foregroundStyle(Theme.Text.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -334,7 +334,7 @@ struct RecapView: View {
                 .font(.system(size: 11, weight: .semibold))
                 .textCase(.uppercase)
                 .tracking(1.2)
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
@@ -375,7 +375,7 @@ struct RecapView: View {
             HStack(spacing: 12) {
                 Text("\(rank)")
                     .font(.system(size: 13, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                     .frame(width: 22, alignment: .trailing)
                 Text(entry.name)
                     .font(.system(size: 14, weight: .semibold))
@@ -384,7 +384,7 @@ struct RecapView: View {
                 Spacer(minLength: 8)
                 Text("\(entry.count) \(entry.count == 1 ? "play" : "plays")")
                     .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
@@ -418,7 +418,7 @@ struct RecapView: View {
             HStack(spacing: 12) {
                 Text("\(rank)")
                     .font(.system(size: 13, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                     .frame(width: 22, alignment: .trailing)
                 AsyncImage(url: entry.item.thumbnailURL) { phase in
                     if case .success(let img) = phase {
@@ -436,7 +436,7 @@ struct RecapView: View {
                         .lineLimit(1)
                     Text(entry.item.subtitle)
                         .font(.system(size: 11))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 8)
@@ -479,7 +479,7 @@ struct RecapView: View {
                             .lineLimit(1)
                         Text(item.subtitle)
                             .font(.system(size: 12))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                             .lineLimit(1)
                     }
                     Spacer(minLength: 8)
@@ -512,7 +512,7 @@ struct RecapView: View {
         return VStack(spacing: 14) {
             Image(systemName: "waveform")
                 .font(.system(size: 38, weight: .light))
-                .foregroundStyle(.Theme.Text.disabled)
+                .foregroundStyle(Theme.Text.disabled)
             Text(showWidenHint ? "Nothing in this window" : "Nothing to highlight yet")
                 .font(.system(size: 16, weight: .semibold))
                 .foregroundStyle(.white)
@@ -520,7 +520,7 @@ struct RecapView: View {
                 ? "Try a wider window — older plays don't show up in shorter ones."
                 : "Play a few tracks and come back — Riff will summarize what you listened to.")
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
             if showWidenHint {
@@ -541,6 +541,6 @@ struct RecapView: View {
             .font(.system(size: 11, weight: .semibold))
             .textCase(.uppercase)
             .tracking(1.2)
-            .foregroundStyle(.Theme.Text.secondary)
+            .foregroundStyle(Theme.Text.secondary)
     }
 }

@@ -231,7 +231,7 @@ struct NowPlayingView: View {
                        env.trackOverrides.hasOverride(for: vid) {
                         Image(systemName: "pencil")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                             .help("Metadata edited locally")
                             .accessibilityLabel("Metadata edited")
                     }
@@ -322,7 +322,7 @@ struct NowPlayingView: View {
                         VStack(spacing: 6) {
                             Text(t.rawValue)
                                 .font(.system(size: 13, weight: bottomTab == t ? .semibold : .regular))
-                                .foregroundStyle(bottomTab == t ? .white : .Theme.Text.tertiary)
+                                .foregroundStyle(bottomTab == t ? Color.white : Theme.Text.tertiary)
                             Rectangle()
                                 .fill(bottomTab == t ? Theme.red : Color.clear)
                                 .frame(height: 2)
@@ -409,7 +409,7 @@ struct NowPlayingView: View {
             controlButton(
                 systemName: env.player.liked ? "heart.fill" : "heart",
                 size: 20,
-                tint: env.player.liked ? Theme.red : .Theme.Text.secondary,
+                tint: env.player.liked ? Theme.red : Theme.Text.secondary,
                 help: env.player.liked ? "Unlike" : "Like"
             ) {
                 Task { await env.player.toggleLike() }
@@ -425,7 +425,7 @@ struct NowPlayingView: View {
                     ? "shuffle.circle.fill"
                     : "shuffle",
                 size: 18,
-                tint: env.player.shuffleEnabled ? Theme.red : .Theme.Text.secondary,
+                tint: env.player.shuffleEnabled ? Theme.red : Theme.Text.secondary,
                 help: shuffleHelpText
             ) {
                 env.player.toggleShuffle()
@@ -443,7 +443,7 @@ struct NowPlayingView: View {
                 Text("Smart Shuffle injects related-song suggestions every few slots when shuffle is on.")
             }
             // Skip-back -15s — useful for any track but especially podcasts.
-            controlButton(systemName: "gobackward.15", size: 20, tint: .Theme.Text.secondary, help: "Back 15 seconds") {
+            controlButton(systemName: "gobackward.15", size: 20, tint: Theme.Text.secondary, help: "Back 15 seconds") {
                 Task { await env.player.skip(by: -15) }
             }
             controlButton(systemName: "backward.fill", size: 22, tint: .white, help: "Previous") {
@@ -466,7 +466,7 @@ struct NowPlayingView: View {
                 Task { await env.player.next() }
             }
             // Skip-forward +30s.
-            controlButton(systemName: "goforward.30", size: 20, tint: .Theme.Text.secondary, help: "Forward 30 seconds") {
+            controlButton(systemName: "goforward.30", size: 20, tint: Theme.Text.secondary, help: "Forward 30 seconds") {
                 Task { await env.player.skip(by: 30) }
             }
             // Repeat — currently two-state (off / one). The "1" badge
@@ -474,7 +474,7 @@ struct NowPlayingView: View {
             controlButton(
                 systemName: env.player.repeatMode == .one ? "repeat.1" : "repeat",
                 size: 18,
-                tint: env.player.repeatMode == .off ? .Theme.Text.secondary : Theme.red,
+                tint: env.player.repeatMode == .off ? Theme.Text.secondary : Theme.red,
                 help: env.player.repeatMode == .one ? "Repeat one"
                     : env.player.repeatMode == .all ? "Repeat all" : "Repeat"
             ) {
@@ -506,7 +506,7 @@ struct NowPlayingView: View {
                                    : env.player.volume < 0.5 ? "speaker.wave.1.fill"
                                    : "speaker.wave.2.fill")
                     .font(.system(size: 12))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .frame(width: 18)
             }
             .buttonStyle(.plain)
@@ -519,10 +519,10 @@ struct NowPlayingView: View {
                 in: 0...1
             )
             .controlSize(.mini)
-            .tint(.Theme.Text.secondary)
+            .tint(Theme.Text.secondary)
             Image(systemName: "speaker.wave.3.fill")
                 .font(.system(size: 12))
-                .foregroundStyle(.Theme.Text.tertiary)
+                .foregroundStyle(Theme.Text.tertiary)
                 .frame(width: 18)
         }
         .accessibilityLabel("Volume")
@@ -567,7 +567,7 @@ struct NowPlayingView: View {
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
                 }
             }
-            .foregroundStyle(sleepTimerActive ? Theme.red : .Theme.Text.secondary)
+            .foregroundStyle(sleepTimerActive ? Theme.red : Theme.Text.secondary)
             .frame(height: 40)
             .padding(.horizontal, 4)
             .contentShape(Rectangle())
@@ -637,7 +637,7 @@ struct NowPlayingView: View {
         } label: {
             Image(systemName: "airplayaudio")
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .frame(width: 40, height: 40)
                 .contentShape(Rectangle())
         }
@@ -664,7 +664,7 @@ struct NowPlayingView: View {
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .frame(width: 36, height: 40)
                 .contentShape(Rectangle())
         }
@@ -724,7 +724,7 @@ struct NowPlayingView: View {
         } label: {
             Image(systemName: "text.badge.plus")
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .frame(width: 36, height: 40)
                 .contentShape(Rectangle())
         }
@@ -761,7 +761,7 @@ struct NowPlayingView: View {
         } label: {
             Text(env.player.playbackRate == 1.0 ? "1×" : Self.formatRate(env.player.playbackRate) + "×")
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(env.player.playbackRate == 1.0 ? .Theme.Text.secondary : Theme.red)
+                .foregroundStyle(env.player.playbackRate == 1.0 ? Theme.Text.secondary : Theme.red)
                 .frame(width: 44, height: 40)
                 .contentShape(Rectangle())
         }
@@ -838,7 +838,7 @@ struct NowPlayingView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .textCase(.uppercase)
                     .tracking(1.2)
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                 Spacer()
                 // "Save queue" — YT Music's Up-Next save affordance.
                 // Disabled when there's nothing to save, hidden when
@@ -858,7 +858,7 @@ struct NowPlayingView: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                         .background(Theme.Fill.soft)
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .clipShape(Capsule())
                         // Never wrap a chip label mid-word ("Sav e") when
                         // four chips share the pane header; overflow is
@@ -886,7 +886,7 @@ struct NowPlayingView: View {
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
                         .background(Theme.Fill.soft)
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .clipShape(Capsule())
                         // Never wrap a chip label mid-word ("Sav e") when
                         // four chips share the pane header; overflow is
@@ -914,7 +914,7 @@ struct NowPlayingView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
                     .background(Theme.Fill.soft)
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
@@ -932,7 +932,7 @@ struct NowPlayingView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
                     .background(Theme.Fill.soft)
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
@@ -984,7 +984,7 @@ struct NowPlayingView: View {
                         .font(.system(size: 10, weight: .semibold))
                         .textCase(.uppercase)
                         .tracking(1.2)
-                        .foregroundStyle(.Theme.Text.tertiary)
+                        .foregroundStyle(Theme.Text.tertiary)
                     Spacer()
                     if history.count > Self.historyDefaultLimit {
                         Button(historyExpanded ? "Show fewer" : "Show all (\(history.count))") {
@@ -992,7 +992,7 @@ struct NowPlayingView: View {
                         }
                         .buttonStyle(.plain)
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                     }
                 }
                 .padding(.horizontal, 4)
@@ -1016,7 +1016,7 @@ struct NowPlayingView: View {
                     .font(.system(size: 10, weight: .semibold))
                     .textCase(.uppercase)
                     .tracking(1.2)
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                     .padding(.horizontal, 4)
                 queueList(upcoming, faded: false, reorderable: true)
             }
@@ -1038,15 +1038,15 @@ struct NowPlayingView: View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "dot.radiowaves.left.and.right")
                 .font(.system(size: 15, weight: .medium))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .padding(.top, 1)
             VStack(alignment: .leading, spacing: 3) {
                 Text("Autoplay radio")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                 Text("Next tracks are chosen automatically as the station plays. Use “Play next” or “Add to queue” to line up specific songs.")
                     .font(.system(size: 10.5))
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 0)
@@ -1155,7 +1155,7 @@ struct NowPlayingView: View {
                             .font(.system(size: 12, weight: .medium))
                     }
                     .buttonStyle(.borderless)
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .help("Show lyrics fullscreen")
                     Button {
                         env.isLyricCardSheetPresented = true
@@ -1164,7 +1164,7 @@ struct NowPlayingView: View {
                             .font(.system(size: 12, weight: .medium))
                     }
                     .buttonStyle(.borderless)
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                 }
             }
             Group {
@@ -1173,7 +1173,7 @@ struct NowPlayingView: View {
                         ProgressView().controlSize(.small)
                         Text("Loading lyrics…")
                             .font(.system(size: 13))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 16)
@@ -1240,7 +1240,7 @@ struct NowPlayingView: View {
                             .font(.system(size: 12, weight: .medium))
                         Text("(\(env.translationLanguage))")
                             .font(.system(size: 11))
-                            .foregroundStyle(.Theme.Text.tertiary)
+                            .foregroundStyle(Theme.Text.tertiary)
                     }
                 }
                 .toggleStyle(.switch)
@@ -1260,7 +1260,7 @@ struct NowPlayingView: View {
                     .font(.system(size: 11))
             }
             .buttonStyle(.borderless)
-            .foregroundStyle(.Theme.Text.tertiary)
+            .foregroundStyle(Theme.Text.tertiary)
             .help("Add an Anthropic API key in Settings → AI features to unlock lyric translation.")
         }
     }
@@ -1278,7 +1278,7 @@ struct NowPlayingView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(line.isEmpty ? "♪" : line)
                         .font(.system(size: 13))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
                     translatedSubtitle(at: idx)
@@ -1302,7 +1302,7 @@ struct NowPlayingView: View {
                     if let pron = entry.pronunciation, !pron.isEmpty {
                         Text(pron)
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.Theme.Text.tertiary)
+                            .foregroundStyle(Theme.Text.tertiary)
                             .textSelection(.enabled)
                     }
                     if !entry.translated.isEmpty {
@@ -1405,7 +1405,7 @@ struct NowPlayingView: View {
                     .font(.system(size: 10, weight: .semibold))
                     .textCase(.uppercase)
                     .tracking(1.2)
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
                 VStack(alignment: .leading, spacing: 6) {
                     detailRow("Artist") {
                         ArtistLinkLine(subtitle: segments.first ?? track.subtitle, primaryArtistId: track.artistId, fontSize: 12, baseOpacity: 0.9)
@@ -1416,25 +1416,25 @@ struct NowPlayingView: View {
                                 Button(albumName) { env.navigateToBrowseId(albumId, kind: .album, fallbackTitle: albumName) }
                                     .buttonStyle(.plain)
                                     .font(.system(size: 12))
-                                    .foregroundStyle(.Theme.Text.secondary)
+                                    .foregroundStyle(Theme.Text.secondary)
                                     .help("Open album")
                             } else {
-                                Text(albumName).font(.system(size: 12)).foregroundStyle(.Theme.Text.secondary)
+                                Text(albumName).font(.system(size: 12)).foregroundStyle(Theme.Text.secondary)
                             }
                         }
                     }
                     if let year = match?.year {
-                        detailRow("Year") { Text(String(year)).font(.system(size: 12)).foregroundStyle(.Theme.Text.secondary) }
+                        detailRow("Year") { Text(String(year)).font(.system(size: 12)).foregroundStyle(Theme.Text.secondary) }
                     }
                     if env.player.duration > 0 {
                         detailRow("Length") {
-                            Text(Self.formatLength(env.player.duration)).font(.system(size: 12, design: .monospaced)).foregroundStyle(.Theme.Text.secondary)
+                            Text(Self.formatLength(env.player.duration)).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.Text.secondary)
                         }
                     }
                     if !entries.isEmpty {
                         detailRow("Your plays") {
                             Text("\(entries.count)× · first \(Self.relative(entries.first!.playedAt)) · last \(Self.relative(entries.last!.playedAt))")
-                                .font(.system(size: 12)).foregroundStyle(.Theme.Text.secondary)
+                                .font(.system(size: 12)).foregroundStyle(Theme.Text.secondary)
                         }
                     }
                 }
@@ -1464,7 +1464,7 @@ struct NowPlayingView: View {
         HStack(alignment: .top, spacing: 10) {
             Text(label)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.Theme.Text.tertiary)
+                .foregroundStyle(Theme.Text.tertiary)
                 .frame(width: 72, alignment: .leading)
             content()
             Spacer(minLength: 0)
@@ -1485,7 +1485,7 @@ struct NowPlayingView: View {
                     .foregroundStyle(.white)
                 Text("Configure an Anthropic API key in Settings to surface context cards — people, places, era, samples, trivia — for the current song.")
                     .font(.system(size: 12))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button {
                     env.isSettingsSheetPresented = true
@@ -1505,7 +1505,7 @@ struct NowPlayingView: View {
                 ProgressView().controlSize(.small)
                 Text("Reading the room…")
                     .font(.system(size: 13))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.vertical, 16)
@@ -1556,7 +1556,7 @@ struct NowPlayingView: View {
                 Text(card.kind.label.uppercased())
                     .font(.system(size: 10, weight: .semibold))
                     .tracking(0.8)
-                    .foregroundStyle(.Theme.Text.tertiary)
+                    .foregroundStyle(Theme.Text.tertiary)
             }
             if !card.title.isEmpty {
                 Text(card.title)
@@ -1568,7 +1568,7 @@ struct NowPlayingView: View {
             if !card.body.isEmpty {
                 Text(card.body)
                     .font(.system(size: 12))
-                    .foregroundStyle(.Theme.Text.secondary)
+                    .foregroundStyle(Theme.Text.secondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .lineSpacing(2)
@@ -1650,7 +1650,7 @@ struct NowPlayingView: View {
                         .lineLimit(1)
                     Text(env.player.currentTrack?.subtitle ?? "")
                         .font(.system(size: 13))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                         .lineLimit(1)
                 }
                 Spacer()
@@ -1659,7 +1659,7 @@ struct NowPlayingView: View {
                 } label: {
                     Label("Exit fullscreen", systemImage: "arrow.down.right.and.arrow.up.left")
                         .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(.Theme.Text.secondary)
+                        .foregroundStyle(Theme.Text.secondary)
                 }
                 .buttonStyle(.borderless)
                 .help("Exit fullscreen lyrics (Esc)")
@@ -1874,7 +1874,7 @@ struct NowPlayingView: View {
                                 if !item.subtitle.isEmpty {
                                     Text(item.subtitle)
                                         .font(.system(size: 10))
-                                        .foregroundStyle(.Theme.Text.secondary)
+                                        .foregroundStyle(Theme.Text.secondary)
                                         .lineLimit(1)
                                         .truncationMode(.tail)
                                 }
@@ -1997,7 +1997,7 @@ struct NowPlayingView: View {
                             Theme.Fill.soft
                             Image(systemName: "music.note")
                                 .font(.system(size: 14, weight: .light))
-                                .foregroundStyle(.Theme.Text.disabled)
+                                .foregroundStyle(Theme.Text.disabled)
                         }
                     }
                 }
@@ -2017,12 +2017,12 @@ struct NowPlayingView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(env.displayTitle(for: item))
                         .font(.system(size: 12, weight: isCurrent ? .semibold : .medium))
-                        .foregroundStyle(isCurrent ? Theme.red : .white)
+                        .foregroundStyle(isCurrent ? Theme.red : Color.white)
                         .lineLimit(1)
                     if env.hasMetadataOverride(item) {
                         Image(systemName: "pencil")
                             .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(.Theme.Text.secondary)
+                            .foregroundStyle(Theme.Text.secondary)
                             .help("Metadata edited locally")
                             .accessibilityLabel("Metadata edited")
                     }
@@ -2056,7 +2056,7 @@ struct NowPlayingView: View {
                 } label: {
                     Image(systemName: "ellipsis")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.Theme.Text.tertiary)
+                        .foregroundStyle(Theme.Text.tertiary)
                         .frame(width: 22, height: 22)
                 }
                 .menuStyle(.borderlessButton)
@@ -2138,7 +2138,7 @@ struct NowPlayingView: View {
     private func emptyHint(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 12))
-            .foregroundStyle(.Theme.Text.secondary)
+            .foregroundStyle(Theme.Text.secondary)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.vertical, 12)
     }
@@ -2179,7 +2179,7 @@ private struct ScrubberSection: View {
                 Text("-" + format(time: max(0, duration - displayed)))
             }
             .font(.system(size: 11, weight: .medium, design: .monospaced))
-            .foregroundStyle(.Theme.Text.secondary)
+            .foregroundStyle(Theme.Text.secondary)
         }
     }
 
@@ -2348,7 +2348,7 @@ private struct TunePopover: View {
                 .font(.system(size: 10, weight: .semibold))
                 .textCase(.uppercase)
                 .tracking(1.2)
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
             FlowLayout(spacing: 6) {
                 ForEach(chips) { chip in
                     let isSelected = (selectedChipId ?? chips.first(where: \.isSelected)?.id) == chip.id
@@ -2368,7 +2368,7 @@ private struct TunePopover: View {
             }
             Text("Tap a chip to retune the queue. The currently-playing track keeps playing.")
                 .font(.system(size: 11))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -2381,7 +2381,7 @@ private struct TunePopover: View {
                 .font(.system(size: 10, weight: .semibold))
                 .textCase(.uppercase)
                 .tracking(1.2)
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
             HStack(spacing: 6) {
                 ForEach(NowPlayingView.QueueMode.allCases) { mode in
                     Button {
@@ -2396,7 +2396,7 @@ private struct TunePopover: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
                         .background(fallbackSelection == mode ? Theme.red : Theme.Fill.soft)
-                        .foregroundStyle(fallbackSelection == mode ? .white : .Theme.Text.secondary)
+                        .foregroundStyle(fallbackSelection == mode ? Color.white : Theme.Text.secondary)
                         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.row))
                     }
                     .buttonStyle(.plain)
@@ -2404,7 +2404,7 @@ private struct TunePopover: View {
             }
             Text(description(for: fallbackSelection))
                 .font(.system(size: 11))
-                .foregroundStyle(.Theme.Text.secondary)
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
