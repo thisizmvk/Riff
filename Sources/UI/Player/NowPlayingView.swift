@@ -828,18 +828,20 @@ struct NowPlayingView: View {
     @State private var historyExpanded: Bool = false
     private static let historyDefaultLimit = 4
 
-    private var upNextContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Header row: queue mode label on the left, "Tune" affordance
-            // on the right — mirrors YT Music's popover-driven pattern
-            // instead of always-visible mode pills.
-            HStack(spacing: 6) {
-                Text(queueModeHeader)
-                    .font(.system(size: 11, weight: .semibold))
-                    .textCase(.uppercase)
-                    .tracking(1.2)
-                    .foregroundStyle(Theme.Text.secondary)
-                Spacer()
+    private var queueModeLabel: some View {
+        Text(queueModeHeader)
+            .font(.system(size: 11, weight: .semibold))
+            .textCase(.uppercase)
+            .tracking(1.2)
+            .foregroundStyle(Theme.Text.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+
+    /// Save / Clear / Build / Tune — mirrors YT Music's popover-driven
+    /// pattern instead of always-visible mode pills.
+    @ViewBuilder
+    private var queueHeaderChips: some View {
                 // "Save queue" — YT Music's Up-Next save affordance.
                 // Disabled when there's nothing to save, hidden when
                 // the user is anonymous (the createPlaylist endpoint
@@ -919,6 +921,7 @@ struct NowPlayingView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Build a queue from a vibe with AI")
+                .fixedSize()
 
                 Button {
                     tunePopoverOpen = true
@@ -936,6 +939,7 @@ struct NowPlayingView: View {
                     .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
                 .popover(isPresented: $tunePopoverOpen, arrowEdge: .top) {
                     TunePopover(
                         chips: env.player.availableChips,
@@ -943,6 +947,28 @@ struct NowPlayingView: View {
                         onSelectChip: { chip in env.player.applyChip(chip) },
                         fallbackSelection: $queueMode
                     )
+                }
+    }
+
+    private var upNextContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // Header: mode label + Save / Clear / Build / Tune chips.
+            // One row when the pane is wide enough; otherwise the label
+            // takes its own line above the chips. Chips are fixed-size
+            // so they never wrap mid-word ("Buil d", "Tu ne") and the
+            // label truncates instead of breaking ("INSTRUM ENTAL").
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) {
+                    queueModeLabel
+                    Spacer()
+                    queueHeaderChips
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    queueModeLabel
+                    HStack(spacing: 6) {
+                        queueHeaderChips
+                        Spacer(minLength: 0)
+                    }
                 }
             }
 
