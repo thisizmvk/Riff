@@ -202,7 +202,46 @@ const wrap = (id, title, byline, selected = false) => ({
   window.musicBridge.queueAddViaPage("d2", "next");
   await settle();
   const rd = posted.filter((p) => p.event === "queueAddResult");
-  check(rd.length === 1 && rd[0].ok === false && rd[0].via === "store-dispatch-disabled", "default: no store dispatch for add → ok=false store-dispatch-disabled (Swift keeps its path)");
+  check(rd.length === 1 && rd[0].ok === false && rd[0].via === "no-page-command", "default: no store dispatch; no page command resolver → ok=false no-page-command (Swift keeps its path)");
+
+  // 11b — the page's command resolver performs the add (store + player).
+  elements.clear(); lists.clear();
+  const state = { queue: { items: [renderer("d1", "D1", "A", true), renderer("d3", "D3", "A")] } };
+  const commands = [];
+  elements.set("ytmusic-app", { store: { getState: () => state, dispatch: () => { throw new Error("must not dispatch"); } } });
+  elements.set("ytmusic-player-bar", {
+    resolveCommand: (cmd, el) => {
+      commands.push(cmd);
+      const v = cmd.queueAddEndpoint.queueTarget.videoId;
+      const pos = cmd.queueAddEndpoint.queueInsertPosition;
+      setTimeout(() => {   // the page fetches the renderer first
+        if (pos === "INSERT_AFTER_CURRENT_VIDEO") state.queue.items.splice(1, 0, renderer(v, v, "A"));
+        else state.queue.items.push(renderer(v, v, "A"));
+      }, 200);
+    },
+  });
+  posted.length = 0; window.__riffQueueSig = undefined;
+  window.musicBridge.queueAddViaPage("d2", "next");
+  await settle(); await settle();
+  const rb = posted.filter((p) => p.event === "queueAddResult");
+  check(rb.length === 1 && rb[0].ok === true && rb[0].via === "endpoint:resolveCommand@ytmusic-player-bar", "page command add verified → ok=true endpoint:resolveCommand (got " + JSON.stringify(rb) + ")");
+  check(commands.length === 1 && commands[0].queueAddEndpoint.queueTarget.videoId === "d2" && commands[0].queueAddEndpoint.queueInsertPosition === "INSERT_AFTER_CURRENT_VIDEO", "queueAddEndpoint carries the video and INSERT_AFTER_CURRENT_VIDEO for Play next");
+  check(state.queue.items[1].playlistPanelVideoRenderer.videoId === "d2", "row landed after the selected row");
+  check(posted.some((p) => p.event === "queueSnapshot" && p.items.some((r) => r.videoId === "d2")), "mirror re-emitted with the page-owned row");
+
+  // 11c — "end" maps to INSERT_AT_END.
+  posted.length = 0; commands.length = 0;
+  window.musicBridge.queueAddViaPage("d4", "end");
+  await settle(); await settle();
+  check(commands[0]?.queueAddEndpoint.queueInsertPosition === "INSERT_AT_END" && state.queue.items[state.queue.items.length - 1].playlistPanelVideoRenderer.videoId === "d4", "Add to queue → INSERT_AT_END, row at the end");
+
+  // 11d — resolver runs but nothing lands → honest failure (Swift keeps its copy).
+  elements.set("ytmusic-player-bar", { resolveCommand: () => {} });
+  posted.length = 0;
+  window.musicBridge.queueAddViaPage("d5", "next");
+  await settle(); await settle();
+  const rdd = posted.filter((p) => p.event === "queueAddResult");
+  check(rdd.length === 1 && rdd[0].ok === false && rdd[0].via === "endpoint:resolveCommand:unverified", "command with no effect → ok=false unverified");
 }
 
 // ---- Case 11: queueAddViaPage happy path (dispatch + verify, opt-in) -------
@@ -311,6 +350,53 @@ const wrap = (id, title, byline, selected = false) => ({
   const rc = posted.filter((p) => p.event === "queueRemoveResult");
   check(rc.length === 1 && rc[0].ok === false && rc[0].via === "menu:no-remove-item", "no remove item in the menu → ok=false menu:no-remove-item");
   check(state2.queue.automixItems.length === 2, "failed removal leaves the queue untouched");
+
+  // (c2) the page's queue controller removes it (preferred over the menu).
+  elements.clear(); lists.clear();
+  const state3 = { queue: { items: [renderer("r1", "R1", "A", true), renderer("k2", "K2", "A"), renderer("k3", "K3", "A")] } };
+  const removed = [];
+  elements.set("ytmusic-app", mkStore(state3, []));
+  elements.set("ytmusic-player-bar", { queue: {
+    getItems: () => state3.queue.items,
+    removeItem: (i) => { removed.push(i); if (typeof i === "number") state3.queue.items.splice(i, 1); },
+  } });
+  const opened3 = [];
+  lists.set("ytmusic-player-queue-item", [mkRow("k2", opened3), mkRow("k3", opened3)]);
+  posted.length = 0; window.__riffQueueSig = undefined;
+  window.musicBridge.queueRemoveViaPage("k3");
+  await settle();
+  const rk = posted.filter((p) => p.event === "queueRemoveResult");
+  check(rk.length === 1 && rk[0].ok === true && rk[0].via === "ytmusic-player-bar.queue:removeItem(index)", "controller removeItem(index) verified → ok=true (got " + JSON.stringify(rk) + ")");
+  check(removed.length === 1 && removed[0] === 2 && opened3.length === 0, "index looked up in the controller's own list; menu never opened");
+  check(state3.queue.items.length === 2 && state3.queue.items[1].playlistPanelVideoRenderer.videoId === "k2", "only the target row left");
+
+  // (c3) controller that ignores an index but accepts the item object.
+  state3.queue.items.push(renderer("k4", "K4", "A"));
+  elements.set("ytmusic-player-bar", { queue: {
+    getItems: () => state3.queue.items,
+    removeItem: (arg) => { if (typeof arg === "object" && arg) state3.queue.items = state3.queue.items.filter((r) => r !== arg); },
+  } });
+  posted.length = 0;
+  window.musicBridge.queueRemoveViaPage("k4");
+  await settle();
+  const rk2 = posted.filter((p) => p.event === "queueRemoveResult");
+  check(rk2.length === 1 && rk2[0].ok === true && rk2[0].via === "ytmusic-player-bar.queue:removeItem(item)", "falls back to removeItem(item) when the index form is a no-op");
+
+  // (c4) controller with no effect → the row menu path runs.
+  state3.queue.items.push(renderer("k5", "K5", "A"));
+  elements.set("ytmusic-player-bar", { queue: { getItems: () => state3.queue.items, removeItem: () => {} } });
+  lists.set("ytmusic-player-queue-item", [mkRow("k5", opened3)]);
+  lists.set(MENU_ITEMS_SEL, [{ textContent: "Remove from queue", querySelector: () => null,
+    click: () => { state3.queue.items = state3.queue.items.filter((r) => r.playlistPanelVideoRenderer.videoId !== "k5"); } }]);
+  posted.length = 0;
+  window.musicBridge.queueRemoveViaPage("k5");
+  await settle();
+  const rk3 = posted.filter((p) => p.event === "queueRemoveResult");
+  check(rk3.length === 1 && rk3[0].ok === true && rk3[0].via === "menu:removed" && opened3.length === 1, "controller no-op → row menu path removes it");
+  elements.set("ytmusic-app", mkStore(state2, dispatched2));
+  lists.set("ytmusic-player-queue-item", [mkRow("m1", opened2), mkRow("m3", opened2)]);
+  lists.set(MENU_ITEMS_SEL, []);
+  elements.delete("ytmusic-player-bar");
 
   // (d) unknown id → not-in-items, no menu opened.
   posted.length = 0; opened2.length = 0;
@@ -521,8 +607,9 @@ const storeOf = (state, dispatched = []) => ({ store: { getState: () => state, d
   // (g) the queueApi diagnostic is one-shot across calls.
   posted.length = 0; window.__riffQueueApiReported = false;
   window.musicBridge.queueRemoveViaPage("c"); await settle();
+  const probeLines = posted.filter((p) => p.event === "diagnostic" && p.msg.startsWith("queueApi:")).length;
   window.musicBridge.queueRemoveViaPage("c"); await settle();
-  check(posted.filter((p) => p.event === "diagnostic" && p.msg.startsWith("queueApi:")).length === 1, "queueApi: diagnostic emitted exactly once per page");
+  check(probeLines >= 1 && posted.filter((p) => p.event === "diagnostic" && p.msg.startsWith("queueApi:")).length === probeLines, "queueApi: probe is one-shot per page (several lines, emitted once)");
   // (h) return value is always true (fire-and-forget contract).
   check(window.musicBridge.queueRemoveViaPage("whatever") === true, "queueRemoveViaPage returns true synchronously");
 }
@@ -537,7 +624,7 @@ const storeOf = (state, dispatched = []) => ({ store: { getState: () => state, d
   const ret = window.musicBridge.queueAddViaPage("z9", "end");
   await settle();
   const r = posted.filter((p) => p.event === "queueAddResult");
-  check(ret === true && r.length === 1 && r[0].ok === false && r[0].via === "store-dispatch-disabled" && !fetched, "dispatch disabled: no get_queue fetch is made, result is store-dispatch-disabled");
+  check(ret === true && r.length === 1 && r[0].ok === false && r[0].via === "no-page-command" && !fetched, "dispatch disabled + no page command: no get_queue fetch is made, result is no-page-command");
   check(r[0].videoId === "z9" && r[0].position === "end", "result echoes videoId and position for Swift's per-id bookkeeping");
   check(posted.filter((p) => p.event === "queueSnapshot").length === 0, "a refused add never re-emits the mirror");
 }

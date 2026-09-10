@@ -216,7 +216,10 @@ struct LibraryView: View {
                 // mixes (Supermix, Discover Mix, …) before the
                 // explicit library content. Anonymous responses are
                 // empty — the section hides itself entirely.
-                if !mixedForYou.isEmpty {
+                // Mixes are playlists: shown on the Playlists section
+                // only. Above Albums / Artists / Podcasts they read as
+                // rows that leaked in from another kind.
+                if section == .playlists, !mixedForYou.isEmpty {
                     LazyVStack(alignment: .leading, spacing: 24) {
                         ForEach(mixedForYou) { section in
                             HomeSectionRow(section: section)

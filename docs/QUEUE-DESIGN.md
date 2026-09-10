@@ -159,14 +159,23 @@ this list, the policy, and its table row together — never one alone.
     new page's first track is never judged against the old page's
     rows.
 13. **Queue edits go through the page's own actions, never its store.**
-    Remove = the row's "⋯ → Remove from queue" (identity-matched row,
-    verified against the store). On failure the row returns to the
-    display and the user is told. Direct `REMOVE_ITEM` / `ADD_ITEMS`
-    dispatches are off (field 2026-09-10: one REMOVE_ITEM desynced the
-    page's store from its player; every later Next played an unseen
-    track and row taps stopped working). Play Next keeps Riff's own
-    path until a page-native add is found — the bridge logs the page's
-    queue API surface once per page (`queueApi:` diagnostic) for that.
+    Field probe 2026-09-10 (`queueApi:` diagnostic): the page exposes a
+    queue CONTROLLER (`ytmusic-player-bar.queue`: `getItems`,
+    `removeItem`, `selectQueueItem`, `shuffle`) and a command resolver
+    (`ytmusic-player-bar.resolveCommand`). Remove = controller
+    `removeItem` (index looked up in the controller's own list, verified
+    against the store; item-object form second; the row's "⋯ → Remove
+    from queue" menu third). Play Next / Add to queue = the page's own
+    `queueAddEndpoint` through `resolveCommand`, verified by store
+    presence; on success Swift drops its copy and the row is page-owned
+    (plays natively, no pending-URL navigation). On any failure the
+    legacy path stays and the user is told. Direct `REMOVE_ITEM` /
+    `ADD_ITEMS` store dispatches stay off (one desynced the page's
+    store from its player).
+14. **A track that is about to play is never an upcoming row.**
+    `play(item:)` removes its row from the queue before setting the
+    current track (the real arrival is same-id and would not consume
+    it; the ghost row replayed later).
 
 Run `./tools/harness/run.sh` before committing anything under
 `Sources/Audio/`, `Resources/player-bridge.js`, or `tools/harness/`

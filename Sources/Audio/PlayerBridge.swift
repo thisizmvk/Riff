@@ -573,6 +573,14 @@ final class PlayerBridge {
             contextTracksIds = [item.id]
             contextPlaylistId = nil
             contextIsPageOrdered = true
+        } else {
+            // A track that is about to play is never an upcoming row.
+            // currentTrack is set optimistically below, so the real
+            // arrival is `sameVideoId` and the consume path skips it —
+            // a force-played Play-Next row stayed in the user region as
+            // a ghost and was played AGAIN when the page moved on
+            // (field 2026-09-10, "the previous song repeats").
+            queue.remove(videoId: item.id)
         }
         // A pending resume from restoreLastSession only applies to the
         // very first play. An explicit click of a different song

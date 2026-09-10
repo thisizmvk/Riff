@@ -254,9 +254,14 @@
                 try {
                     reportQueueApiOnce();
                     if (!storeDispatchEnabled()) {
-                        // Swift keeps its own Play-Next path (pending URL);
-                        // see STORE DISPATCH note above resolveQueueDispatch.
-                        postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: false, via: "store-dispatch-disabled" });
+                        // Page-native add: hand the page ITS OWN
+                        // queueAddEndpoint (what a "Play next" menu item
+                        // carries) through its command resolver, so the
+                        // page updates store AND player coherently. Field
+                        // probe 2026-09-10: ytmusic-player-bar exposes
+                        // resolveCommand. Verified by store presence; the
+                        // next advance's "match" audit is the player check.
+                        await queueAddViaPageCommand(videoId, position);
                         return;
                     }
                     const disp = resolveQueueDispatch();
@@ -344,7 +349,14 @@
             try {
                 reportQueueApiOnce();
                 if (!queueHoldsVideo(videoId)) { finish(false, "not-in-items"); return true; }
-                removeViaRowMenu(videoId, finish);
+                // The page's queue CONTROLLER (field probe 2026-09-10:
+                // getItems / removeItem / selectQueueItem on
+                // ytmusic-player-bar.queue) keeps store and player
+                // coherent — one level below the row menu, same effect.
+                removeViaController(videoId, (ok, via) => {
+                    if (ok) { finish(true, via); return; }
+                    removeViaRowMenu(videoId, finish);
+                });
             } catch (e) {
                 finish(false, "threw:" + (e && e.message ? e.message : String(e)));
             }
@@ -728,16 +740,32 @@
                 }
                 return Array.from(names);
             };
-            const out = [];
+            // One event per element: a single long line is truncated by
+            // the unified log.
+            let any = false;
             for (const sel of ["ytmusic-player-bar", "ytmusic-player-queue", "ytmusic-app"]) {
                 const el = document.querySelector(sel);
                 if (!el) continue;
+                any = true;
                 const q = el.queue;
-                if (q) out.push(sel + ".queue fns=" + fnNames(q, 4).slice(0, 80).join(","));
-                const elFns = fnNames(el, 6).filter((n) => /queue|endpoint|action|command|navigate|resolve|play/i.test(n));
-                if (elFns.length) out.push(sel + " fns~=" + elFns.slice(0, 60).join(","));
+                if (q) postEvent({ event: "diagnostic", msg: "queueApi: " + sel + ".queue fns=" + fnNames(q, 4).slice(0, 60).join(",") });
+                const elFns = fnNames(el, 6).filter((n) => /queue|endpoint|action|command|navigate|resolve/i.test(n));
+                if (elFns.length) postEvent({ event: "diagnostic", msg: "queueApi: " + sel + " fns~=" + elFns.slice(0, 40).join(",") });
             }
-            postEvent({ event: "diagnostic", msg: "queueApi: " + (out.join(" || ") || "none") });
+            const row = document.querySelector("ytmusic-player-queue-item");
+            if (row && row.querySelectorAll) {
+                const tags = new Set();
+                for (const n of row.querySelectorAll("*")) {
+                    const t = (n.tagName || "").toLowerCase();
+                    if (/menu|button|icon/.test(t) || (n.id && /menu|button/.test(n.id))) tags.add(t + (n.id ? "#" + n.id : ""));
+                    if (tags.size >= 20) break;
+                }
+                postEvent({ event: "diagnostic", msg: "queueApi: row parts=" + Array.from(tags).join(",") });
+            }
+            // Always one summary line: what the page-native paths can use.
+            postEvent({ event: "diagnostic", msg: "queueApi: summary elements=" + any
+                + " controller=" + (resolveQueueController() ? "yes" : "no")
+                + " command=" + (resolveCommandHost() ? "yes" : "no") });
         } catch (e) {
             postEvent({ event: "diagnostic", msg: "queueApi probe threw: " + (e && e.message ? e.message : String(e)) });
         }
@@ -785,6 +813,89 @@
     // bound data (property names vary across builds) or, failing that,
     // an inner watch link. Null when the row can't be identified —
     // callers must treat that as "don't click".
+    // The page's queue controller object (not the store): exposes the
+    // page's own queue operations. Shape from the field probe.
+    function resolveQueueController() {
+        for (const sel of ["ytmusic-player-bar", "ytmusic-player-queue"]) {
+            const el = document.querySelector(sel);
+            const q = el && el.queue;
+            if (q && typeof q.getItems === "function") return { q: q, via: sel + ".queue" };
+        }
+        return null;
+    }
+
+    function controllerItemVideoId(it) {
+        if (!it) return null;
+        const r = unwrapQueueItem(it) || (it.data && unwrapQueueItem(it.data));
+        if (r && typeof r.videoId === "string") return r.videoId;
+        if (typeof it.videoId === "string") return it.videoId;
+        return null;
+    }
+
+    // Remove through the controller. removeItem's argument shape is not
+    // documented: try the row's index in the controller's OWN list, then
+    // the item object; each attempt is verified against the store so a
+    // no-op never reports success and a wrong row is impossible (the
+    // index is looked up in the same list the controller holds).
+    function removeViaController(videoId, done) {
+        const c = resolveQueueController();
+        if (!c || typeof c.q.removeItem !== "function") { done(false, "controller:absent"); return; }
+        let items = [];
+        try { items = c.q.getItems() || []; } catch (e) { done(false, "controller:getItems-threw"); return; }
+        let idx = -1;
+        for (let i = 0; i < items.length; i++) { if (controllerItemVideoId(items[i]) === videoId) { idx = i; break; } }
+        if (idx < 0) { done(false, "controller:not-in-items"); return; }
+        const attempt = (arg, label, next) => {
+            try { c.q.removeItem(arg); } catch (e) { next(); return; }
+            setTimeout(() => {
+                if (!queueHoldsVideo(videoId)) done(true, c.via + ":removeItem(" + label + ")");
+                else next();
+            }, 300);
+        };
+        attempt(idx, "index", () => attempt(items[idx], "item", () => done(false, "controller:no-effect")));
+    }
+
+    // Find an element exposing the page's command resolver.
+    function resolveCommandHost() {
+        for (const sel of ["ytmusic-player-bar", "ytmusic-app", "ytmusic-player-queue"]) {
+            const el = document.querySelector(sel);
+            if (el && typeof el.resolveCommand === "function") return { el: el, via: sel };
+            if (el && el.inst && typeof el.inst.resolveCommand === "function") return { el: el.inst, via: sel + ".inst" };
+        }
+        return null;
+    }
+
+    // Play next / add to queue through the page's own command: the same
+    // queueAddEndpoint a "Play next" menu item carries. Verified by
+    // polling the store (the page fetches the renderer first), up to
+    // ~3s. On success Swift drops its fallback copy; the item is then
+    // page-owned and plays natively.
+    async function queueAddViaPageCommand(videoId, position) {
+        const post = (ok, via) => {
+            postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: ok, via: via });
+            if (ok) { window.__riffQueueSig = undefined; emitQueueSnapshot(); }
+        };
+        const host = resolveCommandHost();
+        if (!host) { post(false, "no-page-command"); return; }
+        const command = {
+            queueAddEndpoint: {
+                queueTarget: { videoId: videoId },
+                queueInsertPosition: position === "next" ? "INSERT_AFTER_CURRENT_VIDEO" : "INSERT_AT_END",
+            },
+        };
+        try {
+            host.el.resolveCommand(command, host.el);
+        } catch (e) {
+            post(false, "endpoint:resolveCommand:threw:" + (e && e.message ? e.message : String(e)));
+            return;
+        }
+        for (let i = 0; i < 12; i++) {
+            await new Promise((r) => setTimeout(r, 250));
+            if (queueHoldsVideo(videoId)) { post(true, "endpoint:resolveCommand@" + host.via); return; }
+        }
+        post(false, "endpoint:resolveCommand:unverified");
+    }
+
     // Is `videoId` still anywhere in the page's queue (items ∪ automix)?
     function queueHoldsVideo(videoId) {
         const after = resolveQueueSlice();
