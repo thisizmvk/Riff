@@ -26,6 +26,8 @@ c() { printf '%s\n' "$BODY" | grep -c -- "$1" || true; }
 
 nativeNext=$(c "next() → page-native advance")
 match=$(c "advance arrived=.* match")
+jumps=$(c "jump (row tap)")
+ctxStart=$(c "context start (no shown head)")
 mismatch=$(c "MISMATCH")
 reloads=$(c "] ready$")
 ctxSwitch=$(c "context switch → list=")
@@ -42,7 +44,7 @@ stale=$(c "dropped stale snapshot")
 
 echo
 printf '%-44s %s\n' "Next presses advanced page-natively:" "$nativeNext"
-printf '%-44s %s / %s\n' "advance audit  match / MISMATCH:" "$match" "$mismatch"
+printf '%-44s %s / %s / %s / %s\n' "advance audit  match / jump / ctx-start / MISMATCH:" "$match" "$jumps" "$ctxStart" "$mismatch"
 printf '%-44s %s\n' "page reloads (ready):" "$reloads"
 printf '%-44s %s\n' "context switches (album/playlist starts):" "$ctxSwitch"
 printf '%-44s %s\n' "enforcement overrides (overriding to head):" "$override"

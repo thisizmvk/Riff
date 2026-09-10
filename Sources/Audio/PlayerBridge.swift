@@ -337,6 +337,9 @@ final class PlayerBridge {
     /// user region — WYSIWYG enforcement must not snap them away.
     /// Consumed on arrival; cleared on navigation (new page, new queue).
     @ObservationIgnored private var pageOwnedQueuedIds: Set<String> = []
+    /// The row the user just tapped (page-queue jump). Its arrival is a
+    /// deliberate jump, not divergence — the audit line labels it so.
+    @ObservationIgnored private var pendingJumpTarget: String? = nil
     /// Wall-clock deadline for pause enforcement. After a sleep-timer
     /// end-of-track or an autoplay-off end-of-queue pause, the page can
     /// still natively start the next track; any `stateChanged(playing)`
@@ -1730,6 +1733,7 @@ final class PlayerBridge {
             rowIsUserQueued: queue.isUserQueued(videoId: item.id),
             rowIsInQueue: upNext.contains(where: { $0.id == item.id })) {
             userClickedAt = Date()   // user intent; arrival ≠ old head is expected
+            pendingJumpTarget = item.id
             Log.bridge.debug("skipTo: page-queue jump → \(item.id, privacy: .public)")
             await eval("window.musicBridge.queuePlayItem(\(item.id.jsonQuoted))")
             // Verify by arrival: if the page didn't jump (row not
@@ -2414,7 +2418,14 @@ final class PlayerBridge {
                 // showing. "match" is the healthy case; "MISMATCH" in a
                 // log capture pinpoints display-vs-playback divergence.
                 let shownHead = upNext.first(where: { $0.id != currentTrack?.videoId })?.id ?? "nil"
-                Log.bridge.debug("advance arrived=\(id, privacy: .public) shownHead=\(shownHead, privacy: .public) \(shownHead == id ? "match" : "MISMATCH", privacy: .public)")
+                let isJump = pendingJumpTarget == id
+                if isJump { pendingJumpTarget = nil }
+                let label: String
+                if shownHead == id { label = "match" }
+                else if isJump { label = "jump (row tap)" }
+                else if shownHead == "nil" { label = "context start (no shown head)" }
+                else { label = "MISMATCH" }
+                Log.bridge.debug("advance arrived=\(id, privacy: .public) shownHead=\(shownHead, privacy: .public) \(label, privacy: .public)")
             }
             if !sameVideoId, upNext.contains(where: { $0.id == id }) {
                 _ = queue.consumeUpTo(videoId: id)
