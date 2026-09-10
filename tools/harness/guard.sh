@@ -61,6 +61,16 @@ while IFS= read -r f; do
   [ -n "$dups" ] && say "$f declares a type more than once: $(echo "$dups" | tr '\n' ' ')"
 done < <(find "$REPO/Sources" -name '*.swift')
 
+# 9. An attribute line (@ViewBuilder, @MainActor, …) immediately
+#    followed by a doc-comment line means an insertion slid between an
+#    attribute and its declaration — the attribute now binds to the
+#    NEXT declaration ("only one result builder attribute" / "opaque
+#    return type … no return statements"). Broke the real build twice.
+while IFS= read -r f; do
+  hit=$(awk 'prev ~ /^[[:space:]]*@[A-Za-z]+[[:space:]]*$/ && $0 ~ /^[[:space:]]*\/\/\// { print NR": "prev } { prev=$0 }' "$f")
+  [ -n "$hit" ] && say "$f has an attribute separated from its declaration by a doc comment (line $hit)"
+done < <(find "$REPO/Sources" -name '*.swift')
+
 if [ "$fail" -ne 0 ]; then
   echo "Static guards FAILED — see docs/QUEUE-DESIGN.md (Behavior contract)."
   exit 1
