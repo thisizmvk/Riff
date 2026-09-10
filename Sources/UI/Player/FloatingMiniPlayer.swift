@@ -200,16 +200,32 @@ struct FloatingMiniPlayerView: View {
 }
 
 /// Reaches into the hosting NSWindow to set window level + appearance to
-/// match a floating utility panel: always-on-top, joins all spaces,
-/// hidden from Mission Control. Has to be done via NSViewRepresentable
-/// because SwiftUI doesn't expose `.windowLevel(.floating)` directly.
+/// match a floating utility panel: always-on-top (above other apps'
+/// windows too), joins all spaces, hidden from Mission Control. Done via
+/// NSViewRepresentable because SwiftUI doesn't expose `.windowLevel`.
+///
+/// Applied from `viewDidMoveToWindow`, not a one-shot `DispatchQueue.main
+/// .async` after `makeNSView`: the SwiftUI `Window` scene attaches the
+/// view to its NSWindow later than that tick, so the old guard returned
+/// early and the tile stayed a normal-level window — behind every other
+/// app ("mini player isn't hovering over Comet / Claude"). Re-applied on
+/// each update so nothing SwiftUI resets can stick.
 private struct WindowFloater: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let v = NSView()
-        DispatchQueue.main.async {
-            guard let window = v.window else { return }
-            window.level = .floating
+    func makeNSView(context: Context) -> NSView { FloaterView() }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? FloaterView)?.configureWindow()
+    }
+
+    final class FloaterView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            configureWindow()
+        }
+        func configureWindow() {
+            guard let window else { return }
+            if window.level != .floating { window.level = .floating }
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            window.hidesOnDeactivate = false
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
             window.styleMask.insert(.fullSizeContentView)
@@ -225,7 +241,5 @@ private struct WindowFloater: NSViewRepresentable {
                 window.setContentSize(NSSize(width: 320, height: 180))
             }
         }
-        return v
     }
-    func updateNSView(_ nsView: NSView, context: Context) {}
 }
