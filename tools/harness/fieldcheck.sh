@@ -57,8 +57,10 @@ echo
 
 verdict() { printf '  %-8s %s\n' "$1" "$2"; }
 echo "Phase D gate:"
+addDisabled=$(c "via=store-dispatch-disabled")
 [ "$addVerified" -gt 0 ] && [ "$addFallback" -eq 0 ] && verdict PASS "page-owned add verified, no fallback needed" \
-    || verdict OPEN "need ≥1 'queueAddResult VERIFIED' and 0 fallbacks — Play Next a song, let it arrive"
+    || { [ "$addDisabled" -gt 0 ] && verdict OPEN "page store dispatch is disabled (desyncs the player); Play Next uses Riff's own path until a page-native add exists — see queueApi below" \
+    || verdict OPEN "need ≥1 'queueAddResult VERIFIED' and 0 fallbacks — Play Next a song, let it arrive"; }
 [ "$jump" -gt 0 ] && [ "$jumpFail" -eq 0 ] && verdict PASS "row-tap page jump verified" \
     || verdict OPEN "need ≥1 'skipTo: page-queue jump' and 0 failures — tap a row further down Up Next"
 [ "$removeOk" -gt 0 ] && [ "$removeFail" -eq 0 ] && verdict PASS "page-owned remove verified" \
@@ -67,3 +69,10 @@ echo "Phase D gate:"
     || verdict OPEN "MISMATCH/override present — inspect: grep -n 'MISMATCH\\|overriding' $LOG"
 [ "$swiftFallback" -eq 0 ] && [ "$jsArmed" -eq 0 ] && verdict PASS "legacy end-of-track paths idle" \
     || verdict OPEN "legacy end-of-track path still used — which context? grep '.ended' $LOG"
+
+api="$(printf '%s\n' "$BODY" | grep -o 'queueApi: .*' | head -1)"
+if [ -n "$api" ]; then
+    echo
+    echo "page queue API surface (one-shot probe):"
+    printf '%s\n' "$api" | cut -c1-900
+fi

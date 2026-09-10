@@ -193,8 +193,21 @@ const wrap = (id, title, byline, selected = false) => ({
   check(snapshots[0]?.items?.length === 1 && snapshots[0].items[0].videoId === "ok1", "id-less rows skipped");
 }
 
-// ---- Case 11: queueAddViaPage happy path (dispatch + verify) --------------
+// ---- Case 11a: queueAddViaPage — store dispatch OFF by default -------------
 {
+  elements.clear(); lists.clear();
+  elements.set("ytmusic-app", { store: { getState: () => ({ queue: { items: [renderer("d1", "D1", "A", true)] } }), dispatch: () => { throw new Error("must not dispatch"); } } });
+  posted.length = 0;
+  window.__riffStoreDispatchEnabled = undefined;
+  window.musicBridge.queueAddViaPage("d2", "next");
+  await settle();
+  const rd = posted.filter((p) => p.event === "queueAddResult");
+  check(rd.length === 1 && rd[0].ok === false && rd[0].via === "store-dispatch-disabled", "default: no store dispatch for add → ok=false store-dispatch-disabled (Swift keeps its path)");
+}
+
+// ---- Case 11: queueAddViaPage happy path (dispatch + verify, opt-in) -------
+{
+  window.__riffStoreDispatchEnabled = true;
   elements.clear();
   const dispatched = [];
   // Fake store whose dispatch behaves like YT's ADD_ITEMS reducer:
@@ -243,100 +256,68 @@ const wrap = (id, title, byline, selected = false) => ({
   check(r.length === 1 && r[0].ok === false && r[0].via.startsWith("no-items"), "no renderers fetchable → ok=false no-items");
 }
 
-// ---- Case 13: queueRemoveViaPage (dispatch + verify) ----------------------
+// ---- Case 13: queueRemoveViaPage — page's own row menu, never the store ----
 {
-  elements.clear();
-  const dispatched = [];
-  const state = { queue: { items: [renderer("r1", "R1", "A", true), renderer("r2", "R2", "A"), renderer("r3", "R3", "A")] } };
-  elements.set("ytmusic-app", {
-    store: {
-      getState: () => state,
-      dispatch: (a) => {
-        dispatched.push(a);
-        if (a.type === "REMOVE_ITEM") state.queue.items.splice(a.payload, 1);
-      },
-    },
+  window.__riffStoreDispatchEnabled = undefined;
+  const MENU_ITEMS_SEL = "ytmusic-menu-popup-renderer ytmusic-menu-navigation-item-renderer, ytmusic-menu-popup-renderer ytmusic-menu-service-item-renderer, tp-yt-paper-listbox ytmusic-menu-service-item-renderer";
+  const mkRow = (id, opened) => ({
+    data: renderer(id, id, "A"),
+    querySelector: (sel) => sel.startsWith("a[") ? { href: "https://music.youtube.com/watch?v=" + id } : { click: () => opened.push(id) },
   });
-  posted.length = 0;
-  window.__riffQueueSig = undefined;
+  const mkStore = (state, dispatched) => ({ store: { getState: () => state, dispatch: (a) => { dispatched.push(a); } } });
+
+  // (a) list row: removed through the row menu; the store is never dispatched to.
+  elements.clear(); lists.clear();
+  const dispatched = []; const opened = [];
+  const state = { queue: { items: [renderer("r1", "R1", "A", true), renderer("r2", "R2", "A"), renderer("r3", "R3", "A")] } };
+  elements.set("ytmusic-app", mkStore(state, dispatched));
+  lists.set("ytmusic-player-queue-item", [mkRow("r1", opened), mkRow("r2", opened), mkRow("r3", opened)]);
+  lists.set(MENU_ITEMS_SEL, [
+    { textContent: "Save to playlist", querySelector: () => null, click: () => {} },
+    { textContent: " Remove from queue ", querySelector: () => null,
+      click: () => { state.queue.items = state.queue.items.filter((r) => r.playlistPanelVideoRenderer.videoId !== "r2"); } },
+  ]);
+  posted.length = 0; window.__riffQueueSig = undefined;
   window.musicBridge.queueRemoveViaPage("r2");
   await settle();
   const r = posted.filter((p) => p.event === "queueRemoveResult");
-  check(r.length === 1 && r[0].ok === true, "verified remove reports ok=true");
-  check(dispatched.some((a) => a.type === "REMOVE_ITEM" && a.payload === 1), "REMOVE_ITEM dispatched with the row's index");
+  check(r.length === 1 && r[0].ok === true && r[0].via === "menu:removed", "list row removed via the row's own menu → ok=true menu:removed");
+  check(opened.length === 1 && opened[0] === "r2", "menu opened on the identity-matched row only");
+  check(dispatched.length === 0, "no store dispatch for removal (desyncs store from player)");
   check(posted.some((p) => p.event === "queueSnapshot" && !p.items.some((row) => row.videoId === "r2")), "mirror re-emitted without the removed row");
 
-  // Unknown id → not-in-items failure, no dispatch.
-  posted.length = 0;
-  window.musicBridge.queueRemoveViaPage("nope");
-  await settle();
-  const r2 = posted.filter((p) => p.event === "queueRemoveResult");
-  check(r2.length === 1 && r2[0].ok === false && r2[0].via === "not-in-items", "unknown id → ok=false not-in-items");
-}
-
-// ---- Case 13b: queueRemoveViaPage — automix rows (store index, then menu) --
-{
-  // (a) Reducer honours the combined items∪automix index.
+  // (b) automix row: same path.
   elements.clear(); lists.clear();
-  const state = { queue: { items: [renderer("r1", "R1", "A", true)], automixItems: [renderer("a1", "A1", "A"), renderer("a2", "A2", "A")] } };
-  elements.set("ytmusic-app", {
-    store: {
-      getState: () => state,
-      dispatch: (a) => {
-        if (a.type !== "REMOVE_ITEM") return;
-        const n = state.queue.items.length;
-        if (a.payload < n) state.queue.items.splice(a.payload, 1);
-        else state.queue.automixItems.splice(a.payload - n, 1);
-      },
-    },
-  });
-  posted.length = 0;
-  window.__riffQueueSig = undefined;
-  window.musicBridge.queueRemoveViaPage("a2");
-  await settle();
-  const ra = posted.filter((p) => p.event === "queueRemoveResult");
-  check(ra.length === 1 && ra[0].ok === true && /automix/.test(ra[0].via), "automix row removed via store with the combined index");
-  check(state.queue.items.length === 1 && state.queue.automixItems.length === 1 && state.queue.automixItems[0].playlistPanelVideoRenderer.videoId === "a1", "only the target row left the automix tail");
-
-  // (b) Reducer ignores automix indexes → fall back to the row's own menu.
-  elements.clear(); lists.clear();
+  const opened2 = []; const dispatched2 = [];
   const state2 = { queue: { items: [renderer("r1", "R1", "A", true)], automixItems: [renderer("m1", "M1", "A"), renderer("m2", "M2", "A")] } };
-  elements.set("ytmusic-app", {
-    store: {
-      getState: () => state2,
-      dispatch: (a) => { if (a.type === "REMOVE_ITEM" && a.payload < state2.queue.items.length) state2.queue.items.splice(a.payload, 1); },
-    },
-  });
-  const opened = [];
-  const mkRow = (id) => ({
-    data: renderer(id, id, "A"),
-    querySelector: (sel) => sel.startsWith("a[") ? { href: "https://music.youtube.com/watch?v=" + id }
-      : { click: () => opened.push(id) },
-  });
-  lists.set("ytmusic-player-queue-item", [mkRow("m1"), mkRow("m2")]);
-  const menuItem = { textContent: " Remove from queue ", querySelector: () => null,
-    click: () => { state2.queue.automixItems = state2.queue.automixItems.filter((r) => r.playlistPanelVideoRenderer.videoId !== "m2"); } };
-  lists.set("ytmusic-menu-popup-renderer ytmusic-menu-navigation-item-renderer, ytmusic-menu-popup-renderer ytmusic-menu-service-item-renderer, tp-yt-paper-listbox ytmusic-menu-service-item-renderer",
-    [{ textContent: "Save to playlist", querySelector: () => null, click: () => {} }, menuItem]);
-  posted.length = 0;
-  window.__riffQueueSig = undefined;
+  elements.set("ytmusic-app", mkStore(state2, dispatched2));
+  lists.set("ytmusic-player-queue-item", [mkRow("m1", opened2), mkRow("m2", opened2)]);
+  lists.set(MENU_ITEMS_SEL, [{ textContent: "Remove from queue", querySelector: () => null,
+    click: () => { state2.queue.automixItems = state2.queue.automixItems.filter((x) => x.playlistPanelVideoRenderer.videoId !== "m2"); } }]);
+  posted.length = 0; window.__riffQueueSig = undefined;
   window.musicBridge.queueRemoveViaPage("m2");
   await settle();
   const rb = posted.filter((p) => p.event === "queueRemoveResult");
-  check(opened.length === 1 && opened[0] === "m2", "row menu opened on the identity-matched row only");
-  check(rb.length === 1 && rb[0].ok === true && rb[0].via === "menu:removed", "automix row removed via the row menu when the store ignores it");
-  check(state2.queue.automixItems.length === 1 && state2.queue.automixItems[0].playlistPanelVideoRenderer.videoId === "m1", "menu path removed only the target");
+  check(rb.length === 1 && rb[0].ok === true && rb[0].via === "menu:removed", "automix row removed via the row menu");
+  check(state2.queue.automixItems.length === 1 && state2.queue.automixItems[0].playlistPanelVideoRenderer.videoId === "m1" && dispatched2.length === 0, "only the target left the tail; no store dispatch");
 
-  // (c) Nothing works → ok=false, reported honestly (Swift restores the row).
+  // (c) menu has no remove item → honest failure, queue untouched (Swift restores the row + toasts).
   state2.queue.automixItems.push(renderer("m3", "M3", "A"));
-  lists.set("ytmusic-player-queue-item", [mkRow("m1"), mkRow("m3")]);
-  lists.set("ytmusic-menu-popup-renderer ytmusic-menu-navigation-item-renderer, ytmusic-menu-popup-renderer ytmusic-menu-service-item-renderer, tp-yt-paper-listbox ytmusic-menu-service-item-renderer", []);
+  lists.set("ytmusic-player-queue-item", [mkRow("m1", opened2), mkRow("m3", opened2)]);
+  lists.set(MENU_ITEMS_SEL, []);
   posted.length = 0;
   window.musicBridge.queueRemoveViaPage("m3");
   await settle();
   const rc = posted.filter((p) => p.event === "queueRemoveResult");
-  check(rc.length === 1 && rc[0].ok === false && rc[0].via === "menu:no-remove-item", "no store effect + no menu item → ok=false menu:no-remove-item");
+  check(rc.length === 1 && rc[0].ok === false && rc[0].via === "menu:no-remove-item", "no remove item in the menu → ok=false menu:no-remove-item");
   check(state2.queue.automixItems.length === 2, "failed removal leaves the queue untouched");
+
+  // (d) unknown id → not-in-items, no menu opened.
+  posted.length = 0; opened2.length = 0;
+  window.musicBridge.queueRemoveViaPage("nope");
+  await settle();
+  const r2 = posted.filter((p) => p.event === "queueRemoveResult");
+  check(r2.length === 1 && r2[0].ok === false && r2[0].via === "not-in-items" && opened2.length === 0, "unknown id → ok=false not-in-items, nothing opened");
 }
 
 // ---- Case 14: queuePlayItem — identity-verified in-place jump -----------

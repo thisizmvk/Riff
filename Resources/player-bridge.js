@@ -252,6 +252,13 @@
         queueAddViaPage(videoId, position) {
             (async () => {
                 try {
+                    reportQueueApiOnce();
+                    if (!storeDispatchEnabled()) {
+                        // Swift keeps its own Play-Next path (pending URL);
+                        // see STORE DISPATCH note above resolveQueueDispatch.
+                        postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: false, via: "store-dispatch-disabled" });
+                        return;
+                    }
                     const disp = resolveQueueDispatch();
                     if (!disp) {
                         postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: false, via: "no-dispatcher" });
@@ -324,50 +331,20 @@
         queueRemoveViaPage(videoId) {
             // Rows live in TWO store arrays: `items` (the list / user
             // adds) and `automixItems` (the autoplay tail after an album
-            // or playlist drains). Both are the page's queue and both
-            // render as rows, so both are removable. Field log 2026-09-10:
-            // removing an automix row reported not-in-items, Riff dropped
-            // it locally, the page kept it and played it next.
+            // or playlist drains). Both render as rows and both are
+            // removable — through the row's OWN menu, the page's action.
+            // Field 2026-09-10: a direct REMOVE_ITEM store dispatch
+            // "succeeded" (row gone from the store) and desynced store
+            // and player — every later Next played an unseen track and
+            // row taps stopped working. See STORE DISPATCH note.
             const finish = (ok, via) => {
                 postEvent({ event: "queueRemoveResult", videoId: videoId, ok: ok, via: via });
                 if (ok) { window.__riffQueueSig = undefined; emitQueueSnapshot(); }
             };
             try {
-                const disp = resolveQueueDispatch();
-                if (!disp) { finish(false, "no-dispatcher"); return true; }
-                const slice = resolveQueueSlice();
-                const items = (slice.q && slice.q.items) || [];
-                const automix = (slice.q && slice.q.automixItems) || [];
-                const findIn = (arr) => {
-                    for (let i = 0; i < arr.length; i++) {
-                        const r = unwrapQueueItem(arr[i]);
-                        if (r && r.videoId === videoId) return i;
-                    }
-                    return -1;
-                };
-                let idx = findIn(items);
-                let region = "items";
-                if (idx < 0) {
-                    const j = findIn(automix);
-                    if (j >= 0) { idx = items.length + j; region = "automix"; }
-                }
-                if (idx < 0) { finish(false, "not-in-items"); return true; }
-                // 1. Store dispatch with the row's index in the rendered
-                //    (items ∪ automix) order. If the reducer only indexes
-                //    `items`, an automix index is out of range → no-op,
-                //    never a wrong row; the verify below catches it.
-                disp.dispatch({ type: "REMOVE_ITEM", payload: idx });
-                setTimeout(() => {
-                    try {
-                        if (!queueHoldsVideo(videoId)) { finish(true, disp.via + ":" + region); return; }
-                        // 2. The page's own row menu ("Remove from queue") —
-                        //    the same action the user would take in the
-                        //    page; verified against the store afterwards.
-                        removeViaRowMenu(videoId, finish);
-                    } catch (e) {
-                        finish(false, "verify-threw");
-                    }
-                }, 300);
+                reportQueueApiOnce();
+                if (!queueHoldsVideo(videoId)) { finish(false, "not-in-items"); return true; }
+                removeViaRowMenu(videoId, finish);
             } catch (e) {
                 finish(false, "threw:" + (e && e.message ? e.message : String(e)));
             }
@@ -718,6 +695,54 @@
     // Find a dispatch function into the page's queue store. Ordered by
     // directness; mirrors resolveQueueSlice's host list (the store and
     // its dispatch usually live together).
+    // STORE DISPATCH — off by default. The ytmusic-app store is not the
+    // player's playlist: dispatching ADD_ITEMS / REMOVE_ITEM edits what
+    // the queue panel shows without telling the player, and the two
+    // never resync (field 2026-09-10: after one REMOVE_ITEM every Next
+    // played an off-screen track and identity row clicks stopped
+    // playing). Queue edits go through the page's own UI actions; the
+    // dispatcher stays for diagnostics and can be re-enabled per page
+    // via window.__riffStoreDispatchEnabled = true once a page-native
+    // add is verified.
+    function storeDispatchEnabled() {
+        return window.__riffStoreDispatchEnabled === true;
+    }
+
+    // One-shot dump of the page's queue API surface (method names on
+    // the queue object and queue/endpoint-related methods on the app
+    // elements) so a field log tells us the page-native add/remove
+    // calls instead of guessing at store actions.
+    function reportQueueApiOnce() {
+        if (window.__riffQueueApiReported) return;
+        window.__riffQueueApiReported = true;
+        try {
+            const fnNames = (obj, depth) => {
+                const names = new Set();
+                let o = obj;
+                for (let d = 0; o && d < depth; d++) {
+                    for (const n of Object.getOwnPropertyNames(o)) {
+                        if (n === "constructor" || n.startsWith("__")) continue;
+                        try { if (typeof obj[n] === "function") names.add(n); } catch (e) { /* getter threw */ }
+                    }
+                    o = Object.getPrototypeOf(o);
+                }
+                return Array.from(names);
+            };
+            const out = [];
+            for (const sel of ["ytmusic-player-bar", "ytmusic-player-queue", "ytmusic-app"]) {
+                const el = document.querySelector(sel);
+                if (!el) continue;
+                const q = el.queue;
+                if (q) out.push(sel + ".queue fns=" + fnNames(q, 4).slice(0, 80).join(","));
+                const elFns = fnNames(el, 6).filter((n) => /queue|endpoint|action|command|navigate|resolve|play/i.test(n));
+                if (elFns.length) out.push(sel + " fns~=" + elFns.slice(0, 60).join(","));
+            }
+            postEvent({ event: "diagnostic", msg: "queueApi: " + (out.join(" || ") || "none") });
+        } catch (e) {
+            postEvent({ event: "diagnostic", msg: "queueApi probe threw: " + (e && e.message ? e.message : String(e)) });
+        }
+    }
+
     function resolveQueueDispatch() {
         const app = document.querySelector("ytmusic-app");
         const store = app && (app.store || (app.inst && app.inst.store));

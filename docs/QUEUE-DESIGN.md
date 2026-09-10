@@ -158,10 +158,15 @@ this list, the policy, and its table row together — never one alone.
     grace** before navigating (playlist / album / artist radio). The
     new page's first track is never judged against the old page's
     rows.
-13. **Remove from queue is page-owned and verified** for list rows AND
-    autoplay-tail rows (store dispatch, then the row's own menu). On
-    failure the row returns to the display and the user is told;
-    Riff never shows a row removed that the page will still play.
+13. **Queue edits go through the page's own actions, never its store.**
+    Remove = the row's "⋯ → Remove from queue" (identity-matched row,
+    verified against the store). On failure the row returns to the
+    display and the user is told. Direct `REMOVE_ITEM` / `ADD_ITEMS`
+    dispatches are off (field 2026-09-10: one REMOVE_ITEM desynced the
+    page's store from its player; every later Next played an unseen
+    track and row taps stopped working). Play Next keeps Riff's own
+    path until a page-native add is found — the bridge logs the page's
+    queue API surface once per page (`queueApi:` diagnostic) for that.
 
 Run `./tools/harness/run.sh` before committing anything under
 `Sources/Audio/`, `Resources/player-bridge.js`, or `tools/harness/`
