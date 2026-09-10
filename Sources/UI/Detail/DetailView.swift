@@ -4,6 +4,13 @@ import SwiftUI
 /// four use the same InnerTube /browse response shape (header + tracklist),
 /// they just style slightly differently. Pushed onto the active tab's
 /// NavigationStack when the user taps a non-song tile.
+/// A tracklist row with a per-ENTRY identity (see `tracklist`).
+private struct IndexedTrack: Identifiable {
+    let id: String
+    let index: Int
+    let track: MediaItem
+}
+
 struct DetailView: View {
     @Environment(AppEnvironment.self) private var env
     let item: MediaItem
@@ -330,7 +337,18 @@ struct DetailView: View {
         // called from inside signedInBody where `page` is non-nil.
         let backfilled: [MediaItem] = page.map { p in tracks.map { backfillMetadata($0, page: p) } } ?? tracks
         return LazyVStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(backfilled.enumerated()), id: \.element.id) { index, track in
+            // Row identity: a playlist may legally hold the same song
+            // twice (that is what `setVideoId` is for). Keying by videoId
+            // alone made SwiftUI diffing undefined — double highlights,
+            // the wrong row animating out. setVideoId is unique per
+            // entry; otherwise id + position.
+            let rows: [IndexedTrack] = backfilled.enumerated().map { pair in
+                IndexedTrack(id: pair.element.setVideoId.map { "s:" + $0 } ?? "\(pair.element.id)#\(pair.offset)",
+                             index: pair.offset, track: pair.element)
+            }
+            ForEach(rows) { row in
+                let index = row.index
+                let track = row.track
                 TrackRow(
                     index: index,
                     item: track,
@@ -480,6 +498,7 @@ struct DetailView: View {
             page = detail
             error = nil
         } catch {
+            if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
             self.error = LoadErrorPresenter.message(for: error, env: env)
         }
     }

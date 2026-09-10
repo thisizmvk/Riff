@@ -73,7 +73,12 @@ final class AppEnvironment {
         } else if nowSignedIn {
             UserDefaults.standard.set(true, forKey: Self.wasSignedInKey)
         }
+        let becameSignedIn = nowSignedIn && !isSignedIn
         isSignedIn = nowSignedIn
+        // A fresh sign-in (or account switch) owns its own playlists;
+        // the `isEmpty` guard in loadUserPlaylistsIfNeeded would
+        // otherwise keep whatever was loaded before.
+        if becameSignedIn { reloadUserPlaylists() }
     }
 
     private static let wasSignedInKey = "auth.wasSignedIn"
@@ -106,6 +111,9 @@ final class AppEnvironment {
         guard force || now.timeIntervalSince(lastLivenessProbeAt) > Self.livenessProbeMinInterval else { return }
         lastLivenessProbeAt = now
         Task { [innerTube, weak self] in
+            // Judge the session on CURRENT cookies: the WebView may have
+            // rotated them since the last bridge.
+            await CookieJar.syncFromWebView()
             let alive = await innerTube.sessionLiveness()
             await MainActor.run {
                 guard let self, alive == false, self.isSignedIn else { return }
@@ -131,6 +139,16 @@ final class AppEnvironment {
             .filter { $0.domain.contains("youtube.com") || $0.domain.contains("google.com") }
             .forEach { HTTPCookieStorage.shared.deleteCookie($0) }
         refreshSignedInState()
+        // Per-account state must not leak into the next sign-in: the
+        // playlist picker showed the OLD account's playlists (and every
+        // add failed), Home painted the old account's cached shelves,
+        // Settings kept the old e-mail.
+        userPlaylists = []
+        userPlaylistsLoading = false
+        followedArtistIds = []
+        UserDefaults.standard.removeObject(forKey: Self.followedArtistsKey)
+        HomeFeedCache.clear()
+        UserInfoService.cachedEmail = nil
         // Full WebView session purge — cookies + localStorage +
         // IndexedDB for Google/YouTube. Backgrounded because
         // removeData is async; isSignedIn is already false so the
@@ -801,6 +819,7 @@ final class AppEnvironment {
     }
 
     init() {
+        CookieJar.startObserving()
         // Bump URLCache.shared for thumbnail reuse. SwiftUI's
         // AsyncImage uses URLSession.shared which reads from
         // URLCache.shared; the system default (~4 MB memory /
@@ -897,8 +916,12 @@ final class AppEnvironment {
                 // and this flips the UI back to signed-out (showing
                 // the Sign In button) instead of leaving a dead
                 // avatar in the corner.
-                self?.refreshSignedInState()
-                self?.probeSessionLiveness()
+                Task { [weak self] in
+                    // Re-bridge rotated WebView cookies before judging.
+                    await CookieJar.syncFromWebView()
+                    self?.refreshSignedInState()
+                    self?.probeSessionLiveness()
+                }
             }
         }
 

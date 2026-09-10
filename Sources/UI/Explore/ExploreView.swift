@@ -64,6 +64,7 @@ struct ExploreView: View {
             }
             errorMessage = nil
         } catch {
+            if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
             errorMessage = LoadErrorPresenter.message(for: error, env: env)
         }
     }

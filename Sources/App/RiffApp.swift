@@ -346,20 +346,29 @@ struct RootView: View {
     var body: some View {
         @Bindable var env = env
         ZStack {
-            // Swap the entire main content rather than overlay it. SwiftUI's
-            // .overlay was rendering around (rather than over) the
-            // NavigationStack-wrapped tabs, leaking the home content through.
+            // The tabs stay MOUNTED while Now Playing is open. They used
+            // to be swapped out, which re-created every tab view on each
+            // close: Search lost its query and results, Library and
+            // Explore refetched, scroll positions reset. Now Playing is
+            // opaque; the covered tabs layer is hidden, non-hit-testable
+            // and disabled (so no stray keyboard focus lives under it).
+            // The old "content leaked through" was the ZStack backdrop-
+            // inflation bug, since fixed by moving backdrops into
+            // `.background {}`.
+            ZStack(alignment: .bottom) {
+                MainTabs()
+                if env.player.hasTrack {
+                    MiniPlayerView()
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .opacity(env.player.isFullPlayerOpen ? 0 : 1)
+            .allowsHitTesting(!env.player.isFullPlayerOpen)
+            .disabled(env.player.isFullPlayerOpen)
+            .accessibilityHidden(env.player.isFullPlayerOpen)
             if env.player.isFullPlayerOpen {
                 NowPlayingView()
                     .transition(.move(edge: .bottom).combined(with: .opacity))
-            } else {
-                ZStack(alignment: .bottom) {
-                    MainTabs()
-                    if env.player.hasTrack {
-                        MiniPlayerView()
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
-                }
             }
         }
         .animation(reduceMotion ? nil : Theme.Motion.panel, value: env.player.isFullPlayerOpen)
@@ -421,20 +430,47 @@ struct RootView: View {
 
 struct MainTabs: View {
     @Environment(AppEnvironment.self) private var env
+    /// Tabs mount on first visit and STAY mounted. A `switch` gave each
+    /// tab a distinct structural identity, so every switch destroyed
+    /// the outgoing view: Search lost its query and results, Explore
+    /// re-skeletoned and refetched, Library refired its loads (27
+    /// requests on Artists), Home re-pulled seven shelves. Unvisited
+    /// tabs cost nothing until first shown.
+    @State private var mounted: Set<AppTab> = []
 
     var body: some View {
         VStack(spacing: 0) {
             TopTabBar()
-            Group {
-                switch env.activeTab {
-                case .home:    HomeView()
-                case .explore: ExploreView()
-                case .search:  SearchView()
-                case .library: LibraryView()
-                }
+            ZStack {
+                if mounted.contains(.home)    { HomeView().tabPane(active: env.activeTab == .home) }
+                if mounted.contains(.explore) { ExploreView().tabPane(active: env.activeTab == .explore) }
+                if mounted.contains(.search)  { SearchView().tabPane(active: env.activeTab == .search) }
+                if mounted.contains(.library) { LibraryView().tabPane(active: env.activeTab == .library) }
+            }
+            .onChange(of: env.activeTab, initial: true) { _, tab in
+                mounted.insert(tab)
             }
         }
     }
+}
+
+/// An inactive, still-mounted tab: invisible, untouchable, disabled
+/// (no keyboard focus or shortcuts fire underneath the visible tab),
+/// hidden from accessibility, and below the active one.
+private struct TabPane: ViewModifier {
+    let active: Bool
+    func body(content: Content) -> some View {
+        content
+            .opacity(active ? 1 : 0)
+            .allowsHitTesting(active)
+            .disabled(!active)
+            .accessibilityHidden(!active)
+            .zIndex(active ? 1 : 0)
+    }
+}
+
+private extension View {
+    func tabPane(active: Bool) -> some View { modifier(TabPane(active: active)) }
 }
 
 struct TopTabBar: View {

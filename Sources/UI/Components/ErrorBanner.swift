@@ -57,6 +57,20 @@ struct ErrorBanner: View {
 /// every load site treats errors consistently.
 @MainActor
 enum LoadErrorPresenter {
+    /// True for the cancellation a `.task(id:)` change or a newer
+    /// keystroke produces (`URLSession` honours cooperative
+    /// cancellation by THROWING `URLError.cancelled`). Callers return
+    /// without touching state: the cancelled load's results are stale
+    /// by definition and the replacement task owns the screen. Left
+    /// unguarded, this wiped Search results and flashed "Network
+    /// error: cancelled" on every keystroke that landed mid-request.
+    static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let url = error as? URLError, url.code == .cancelled { return true }
+        let ns = error as NSError
+        return ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled
+    }
+
     static func message(for error: Error, env: AppEnvironment) -> String {
         if let inner = error as? InnerTubeClient.InnerTubeError {
             switch inner {

@@ -404,7 +404,7 @@ final class InnerTubeClient: @unchecked Sendable {
 
     /// Walk a list of search shelves and flatten to a MediaItem list.
     static func parseSearchShelves(_ shelves: [[String: Any]]) -> [MediaItem] {
-        shelves.flatMap { shelf -> [MediaItem] in
+        let flat: [MediaItem] = shelves.flatMap { shelf -> [MediaItem] in
             if let items = Parsing.array(shelf, "musicShelfRenderer", "contents") {
                 return items.compactMap(Self.parseListItem)
             }
@@ -419,6 +419,11 @@ final class InnerTubeClient: @unchecked Sendable {
             }
             return []
         }
+        // Under "All" the top-result card repeats the Songs shelf's
+        // first row: duplicate ids broke row identity and pinned
+        // keyboard focus to the first occurrence.
+        var seen = Set<String>()
+        return flat.filter { seen.insert($0.kind.rawValue + ":" + $0.id).inserted }
     }
 
     /// Library contents — InnerTube `/browse` with the section-specific
@@ -433,15 +438,84 @@ final class InnerTubeClient: @unchecked Sendable {
         case .liked:     browseId = BrowseID.likedSongs
         case .playlists: browseId = BrowseID.likedPlaylists
         case .albums:    browseId = BrowseID.libraryAlbums
-        case .artists:   browseId = BrowseID.libraryArtists
+        case .artists:   browseId = BrowseID.librarySubscriptions
         case .podcasts:  browseId = BrowseID.libraryPodcasts
         case .history:   browseId = BrowseID.history
         }
         Log.innertube.debug("library section=\(String(describing: section), privacy: .public) browseId=\(browseId, privacy: .public)")
         let body = try await postRaw(.browse, body: ["browseId": browseId])
-        let results = Self.scanForMediaItems(body)
-        Log.innertube.debug("library section=\(String(describing: section), privacy: .public) results=\(results.count)")
+        var results = Self.scanForMediaItems(body)
+        // Page the shelf. YT returns ~25–100 rows per page; a 600-song
+        // Liked list was silently truncated to page one, and Play /
+        // Shuffle queued only what had loaded.
+        var token = Self.findShelfContinuation(in: body)
+        var pages = 0
+        while let t = token, pages < Self.libraryMaxPages, results.count < Self.libraryRowCap {
+            pages += 1
+            do {
+                let resp = try await postRaw(.browse, body: ["continuation": t])
+                let more = Self.scanForMediaItems(resp)
+                if more.isEmpty { break }
+                results.append(contentsOf: more)
+                token = Self.findShelfContinuation(in: resp)
+            } catch {
+                Log.innertube.error("library continuation \(pages) failed: \(error.localizedDescription, privacy: .public)")
+                break
+            }
+        }
+        // Section pages carry "suggestions" / "recent activity" shelves
+        // of other kinds; keep only what the section is FOR.
+        if let kinds = Self.expectedKinds(for: section) {
+            results = results.filter { kinds.contains($0.kind) }
+        }
+        var seen = Set<String>()
+        results = results.filter { seen.insert($0.id).inserted }
+        Log.innertube.debug("library section=\(String(describing: section), privacy: .public) results=\(results.count) pages=\(pages + 1)")
         return results
+    }
+
+    private static let libraryMaxPages = 20
+    private static let libraryRowCap = 2000
+    private static let detailMaxPages = 10
+
+    private static func expectedKinds(for section: LibraryView.Section) -> Set<MediaItem.Kind>? {
+        switch section {
+        case .liked:     return [.song]
+        case .playlists: return [.playlist]
+        case .albums:    return [.album]
+        case .artists:   return [.artist]
+        case .podcasts:  return [.podcast, .episode]
+        case .history:   return nil
+        }
+    }
+
+    /// First `nextContinuationData.continuation` anywhere in a browse
+    /// body — the initial shelf or a `continuationContents.*Continuation`
+    /// envelope. Library pages carry one paged shelf; a deep walk avoids
+    /// enumerating every wrapper shape. Never a reload token.
+    private static func findShelfContinuation(in body: Any?) -> String? {
+        var found: String? = nil
+        func walk(_ node: Any?) {
+            if found != nil { return }
+            if let dict = node as? [String: Any] {
+                if let next = dict["nextContinuationData"] as? [String: Any],
+                   let token = next["continuation"] as? String, !token.isEmpty {
+                    found = token
+                    return
+                }
+                for (_, v) in dict {
+                    walk(v)
+                    if found != nil { return }
+                }
+            } else if let arr = node as? [Any] {
+                for v in arr {
+                    walk(v)
+                    if found != nil { return }
+                }
+            }
+        }
+        walk(body)
+        return found
     }
 
     /// Deep-walk a response tree pulling any `musicResponsiveListItemRenderer`
@@ -1035,6 +1109,7 @@ final class InnerTubeClient: @unchecked Sendable {
         var tracks: [MediaItem] = []
         var tracklistTreeIndex: Int? = nil
         var tracklistShelfIndex: Int? = nil
+        var tracklistContinuation: String? = nil
         outer: for (treeIdx, shelves) in allShelfTrees.enumerated() {
             for (i, shelf) in shelves.enumerated() {
                 if let r = shelf["musicShelfRenderer"] as? [String: Any],
@@ -1042,6 +1117,7 @@ final class InnerTubeClient: @unchecked Sendable {
                     tracks = contents.compactMap(Self.parseListItem)
                     tracklistTreeIndex = treeIdx
                     tracklistShelfIndex = i
+                    tracklistContinuation = Parsing.dig(r, ["continuations", "0", "nextContinuationData", "continuation"]) as? String
                     break outer
                 }
                 if let r = shelf["musicPlaylistShelfRenderer"] as? [String: Any],
@@ -1049,8 +1125,29 @@ final class InnerTubeClient: @unchecked Sendable {
                     tracks = contents.compactMap(Self.parseListItem)
                     tracklistTreeIndex = treeIdx
                     tracklistShelfIndex = i
+                    tracklistContinuation = Parsing.dig(r, ["continuations", "0", "nextContinuationData", "continuation"]) as? String
                     break outer
                 }
+            }
+        }
+        // Long playlists page (~100 rows each): follow the shelf's
+        // continuation so the page — and Play / Shuffle — hold the
+        // WHOLE list, not the first page.
+        var detailPages = 0
+        while let token = tracklistContinuation, detailPages < Self.detailMaxPages, tracks.count < Self.libraryRowCap {
+            detailPages += 1
+            do {
+                let resp = try await postRaw(.browse, body: ["continuation": token])
+                let cont = (Parsing.dig(resp, ["continuationContents", "musicPlaylistShelfContinuation"]) as? [String: Any])
+                    ?? (Parsing.dig(resp, ["continuationContents", "musicShelfContinuation"]) as? [String: Any])
+                guard let cont, let contents = cont["contents"] as? [[String: Any]] else { break }
+                let more = contents.compactMap(Self.parseListItem)
+                if more.isEmpty { break }
+                tracks.append(contentsOf: more)
+                tracklistContinuation = Parsing.dig(cont, ["continuations", "0", "nextContinuationData", "continuation"]) as? String
+            } catch {
+                Log.innertube.error("detail continuation \(detailPages) failed: \(error.localizedDescription, privacy: .public)")
+                break
             }
         }
         if tracks.isEmpty {

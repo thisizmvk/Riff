@@ -6,8 +6,43 @@ import WebKit
 /// music.youtube.com without re-prompting the user.
 ///
 /// The user signs in once via the WebView; both surfaces then share the session.
+/// Watches the WebView's cookie store and re-bridges on change.
+/// Google rotates `__Secure-*PSIDTS` / `SIDCC` in the signed-in page
+/// every 10–30 minutes; a one-time copy at sign-in let the two jars
+/// drift until InnerTube answered anonymously while the page still
+/// played ("session expired" for a live session). Changes come in
+/// bursts, so the sync is coalesced.
+@MainActor
+private final class CookieChangeObserver: NSObject, WKHTTPCookieStoreObserver {
+    private var pending: Task<Void, Never>? = nil
+
+    nonisolated func cookiesDidChange(in cookieStore: WKHTTPCookieStore) {
+        Task { @MainActor in self.schedule() }
+    }
+
+    private func schedule() {
+        pending?.cancel()
+        pending = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled else { return }
+            await CookieJar.syncFromWebView()
+        }
+    }
+}
+
 @MainActor
 enum CookieJar {
+    private static var observer: CookieChangeObserver? = nil
+
+    /// Start mirroring WebView cookie changes into `HTTPCookieStorage`
+    /// for the life of the process. Idempotent.
+    static func startObserving() {
+        guard observer == nil else { return }
+        let o = CookieChangeObserver()
+        observer = o
+        WKWebsiteDataStore.default().httpCookieStore.add(o)
+    }
+
     static func syncFromWebView() async {
         let store = WKWebsiteDataStore.default().httpCookieStore
         let cookies = await store.allCookies()

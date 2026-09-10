@@ -715,6 +715,7 @@ struct SearchView: View {
             results = []
             nextPageToken = nil
             loadMoreError = nil
+            errorMessage = nil   // a cancelled in-flight search must not leave its banner on an empty screen
             searching = false
             return
         }
@@ -722,6 +723,7 @@ struct SearchView: View {
         defer { searching = false }
         do {
             let page = try await env.innerTube.searchPaged(query: query, filter: filter)
+            guard !Task.isCancelled else { return }
             results = page.items.filter { !env.isBlocked($0) }
             nextPageToken = page.continuation
             loadMoreError = nil
@@ -735,6 +737,7 @@ struct SearchView: View {
                 Self.rememberRecentSearch(query.trimmingCharacters(in: .whitespaces))
             }
         } catch {
+            if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
             results = []
             nextPageToken = nil
             errorMessage = LoadErrorPresenter.message(for: error, env: env)
@@ -803,6 +806,7 @@ struct SearchView: View {
             nextPageToken = page.continuation
             loadMoreError = nil
         } catch {
+            if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
             // Don't wipe `results` — the user is mid-scroll. Surface
             // a retry chip under the list instead.
             guard issuedQuery == query, issuedFilter == filter else { return }

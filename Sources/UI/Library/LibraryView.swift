@@ -415,7 +415,17 @@ struct LibraryView: View {
             errorMessage = nil
         } else {
             do {
-                let fetched = try await env.innerTube.library(section: section)
+                var fetched = try await env.innerTube.library(section: section)
+                guard !Task.isCancelled else { return }
+                if fetched.isEmpty, env.isSignedIn {
+                    // The WebView rotates Google's session cookies; if
+                    // the InnerTube jar fell behind, the library answers
+                    // anonymously (empty). Re-bridge and retry once
+                    // before believing an empty library.
+                    await CookieJar.syncFromWebView()
+                    fetched = (try? await env.innerTube.library(section: section)) ?? []
+                    guard !Task.isCancelled else { return }
+                }
                 items = fetched
                 errorMessage = nil
                 // Silent auth decay: a stale-but-unexpired cookie makes
@@ -429,6 +439,10 @@ struct LibraryView: View {
                     errorMessage = "Your YouTube Music session looks expired — sign in again to see your library."
                 }
             } catch {
+                // A section switch cancels the previous load; its
+                // stale catch must not blank the NEW section or show
+                // "Network error: cancelled".
+                if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
                 items = []
                 errorMessage = LoadErrorPresenter.message(for: error, env: env)
             }
@@ -437,6 +451,7 @@ struct LibraryView: View {
         // into the same hide-the-carousels code path — exactly what we
         // want for a best-effort secondary surface.
         let mixedRaw = (try? await mixedFetch) ?? []
+        guard !Task.isCancelled else { return }
         mixedForYou = mixedRaw.compactMap { sec in
             let kept = sec.items.filter { !env.isBlocked($0) }
             guard !kept.isEmpty else { return nil }
