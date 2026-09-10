@@ -238,7 +238,13 @@ final class QueueManager {
         // dedupes, a duplicate that slips in via any other path must
         // degrade gracefully instead of crashing a drag gesture.
         let byId: [String: MediaItem] = Dictionary(upNext.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let visibleSet = Set(visibleIds)
+        // The view captured `visibleIds` at render time; a mirror
+        // snapshot landing mid-drag can leave STALE ids in it. Drop them
+        // AFTER the move (so real rows keep their intended relative
+        // order) — otherwise a stale slot consumed the iterator and the
+        // real row that stood there was silently lost.
+        visible = visible.filter { byId[$0] != nil }
+        let visibleSet = Set(visible)
         var out: [MediaItem] = []
         var reorderedIter = visible.makeIterator()
         var newUserCount = 0

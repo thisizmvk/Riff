@@ -696,7 +696,7 @@ final class AppEnvironment {
     func openYouTubeMusicLink(_ url: URL) -> Bool {
         guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
               let site = comps.host?.lowercased(),
-              site.hasSuffix("youtube.com") || site == "youtu.be" else { return false }
+              site == "youtube.com" || site.hasSuffix(".youtube.com") || site == "youtu.be" else { return false }
         var params: [String: String] = [:]
         for item in comps.queryItems ?? [] where params[item.name] == nil {
             params[item.name] = item.value ?? ""

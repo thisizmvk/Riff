@@ -65,8 +65,9 @@ enum PersonalizedShelves {
                 if lhs.value.count != rhs.value.count { return lhs.value.count > rhs.value.count }
                 return lhs.value.lastPlayed > rhs.value.lastPlayed
             }
-            .prefix(limit)
-        return ranked.compactMap { (artistId, agg) -> MediaItem? in
+        // Filter BEFORE the limit (as topTracks does): a skipped artist
+        // must not cost a tile slot, or rails render short.
+        let tiles = ranked.compactMap { (artistId, agg) -> MediaItem? in
             let name = extractArtistName(fromSubtitle: agg.mostRecentItem.subtitle)
             // Skip entries where we couldn't derive a real artist
             // name — rendering "Song" or "Artist" as a tile name
@@ -84,6 +85,7 @@ enum PersonalizedShelves {
                 thumbnailURL: thumb
             )
         }
+        return Array(tiles.prefix(limit))
     }
 
     /// Pull the artist name out of a played-track subtitle. Handles
@@ -246,12 +248,15 @@ enum PersonalizedShelves {
                 byId[e.item.id] = Agg(count: 1, last: e.playedAt, item: e.item)
             }
         }
-        guard byId.count >= minTracks else { return nil }
-        let ranked = byId.values
+        // Thresholds count RENDERABLE tracks (with artwork) so the shelf
+        // is nil — not an empty shelf — when the signal can't be shown.
+        let renderable = byId.values.filter { $0.item.thumbnailURL != nil }
+        guard renderable.count >= minTracks else { return nil }
+        let ranked = renderable
             .sorted { l, r in l.count != r.count ? l.count > r.count : l.last > r.last }
             .map(\.item)
-            .filter { $0.thumbnailURL != nil }
             .prefix(limit)
+        guard !ranked.isEmpty else { return nil }
         return TimeOfDayShelf(slot: slot, title: slot.shelfTitle, items: Array(ranked))
     }
 }
