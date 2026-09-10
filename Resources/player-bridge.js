@@ -322,44 +322,64 @@
         // dispatches; unknown-type worst case is a redux no-op, and the
         // verification reports either way.
         queueRemoveViaPage(videoId) {
+            // Rows live in TWO store arrays: `items` (the list / user
+            // adds) and `automixItems` (the autoplay tail after an album
+            // or playlist drains). Both are the page's queue and both
+            // render as rows, so both are removable. Field log 2026-09-10:
+            // removing an automix row reported not-in-items, Riff dropped
+            // it locally, the page kept it and played it next.
+            const finish = (ok, via) => {
+                postEvent({ event: "queueRemoveResult", videoId: videoId, ok: ok, via: via });
+                if (ok) { window.__riffQueueSig = undefined; emitQueueSnapshot(); }
+            };
             try {
                 const disp = resolveQueueDispatch();
-                if (!disp) {
-                    postEvent({ event: "queueRemoveResult", videoId: videoId, ok: false, via: "no-dispatcher" });
-                    return true;
-                }
+                if (!disp) { finish(false, "no-dispatcher"); return true; }
                 const slice = resolveQueueSlice();
                 const items = (slice.q && slice.q.items) || [];
-                let idx = -1;
-                for (let i = 0; i < items.length; i++) {
-                    const r = unwrapQueueItem(items[i]);
-                    if (r && r.videoId === videoId) { idx = i; break; }
-                }
+                const automix = (slice.q && slice.q.automixItems) || [];
+                const findIn = (arr) => {
+                    for (let i = 0; i < arr.length; i++) {
+                        const r = unwrapQueueItem(arr[i]);
+                        if (r && r.videoId === videoId) return i;
+                    }
+                    return -1;
+                };
+                let idx = findIn(items);
+                let region = "items";
                 if (idx < 0) {
-                    postEvent({ event: "queueRemoveResult", videoId: videoId, ok: false, via: "not-in-items" });
-                    return true;
+                    const j = findIn(automix);
+                    if (j >= 0) { idx = items.length + j; region = "automix"; }
                 }
+                if (idx < 0) { finish(false, "not-in-items"); return true; }
+                // 1. Store dispatch with the row's index in the rendered
+                //    (items ∪ automix) order. If the reducer only indexes
+                //    `items`, an automix index is out of range → no-op,
+                //    never a wrong row; the verify below catches it.
                 disp.dispatch({ type: "REMOVE_ITEM", payload: idx });
                 setTimeout(() => {
                     try {
-                        const after = resolveQueueSlice();
-                        const all = (((after.q && after.q.items) || [])).concat((after.q && after.q.automixItems) || []);
-                        const gone = !all.some((it) => {
-                            const r = unwrapQueueItem(it);
-                            return !!r && r.videoId === videoId;
-                        });
-                        postEvent({ event: "queueRemoveResult", videoId: videoId, ok: gone, via: disp.via });
-                        if (gone) {
-                            window.__riffQueueSig = undefined;
-                            emitQueueSnapshot();
-                        }
+                        if (!queueHoldsVideo(videoId)) { finish(true, disp.via + ":" + region); return; }
+                        // 2. The page's own row menu ("Remove from queue") —
+                        //    the same action the user would take in the
+                        //    page; verified against the store afterwards.
+                        removeViaRowMenu(videoId, finish);
                     } catch (e) {
-                        postEvent({ event: "queueRemoveResult", videoId: videoId, ok: false, via: "verify-threw" });
+                        finish(false, "verify-threw");
                     }
                 }, 300);
             } catch (e) {
-                postEvent({ event: "queueRemoveResult", videoId: videoId, ok: false, via: "threw:" + (e && e.message ? e.message : String(e)) });
+                finish(false, "threw:" + (e && e.message ? e.message : String(e)));
             }
+            return true;
+        },
+
+        // Force a fresh mirror emit (bypasses the change signature). Used
+        // after a failed page-side action so the display returns to the
+        // page's truth now, not at the next page change.
+        requestQueueSnapshot() {
+            window.__riffQueueSig = undefined;
+            emitQueueSnapshot();
             return true;
         },
 
@@ -740,6 +760,54 @@
     // bound data (property names vary across builds) or, failing that,
     // an inner watch link. Null when the row can't be identified —
     // callers must treat that as "don't click".
+    // Is `videoId` still anywhere in the page's queue (items ∪ automix)?
+    function queueHoldsVideo(videoId) {
+        const after = resolveQueueSlice();
+        const all = (((after.q && after.q.items) || [])).concat((after.q && after.q.automixItems) || []);
+        return all.some((it) => {
+            const r = unwrapQueueItem(it);
+            return !!r && r.videoId === videoId;
+        });
+    }
+
+    // Remove a queue row through its own "⋯" menu — the page's action,
+    // for rows the store dispatch can't reach. Identity-matched row
+    // (never positional); result verified against the store.
+    function removeViaRowMenu(videoId, done) {
+        const rows = document.querySelectorAll("ytmusic-player-queue-item");
+        let row = null;
+        for (const r of rows) { if (rowVideoId(r) === videoId) { row = r; break; } }
+        if (!row) { done(false, "menu:no-row"); return; }
+        const btn = row.querySelector && row.querySelector(QUEUE_ROW_MENU_BUTTON);
+        if (!btn) { done(false, "menu:no-button"); return; }
+        btn.click();
+        setTimeout(() => {
+            try {
+                const candidates = document.querySelectorAll(QUEUE_MENU_ITEMS);
+                let item = null;
+                for (const c of candidates) {
+                    const t = (c.textContent || "").trim().toLowerCase();
+                    if (t.indexOf("remove from queue") >= 0) { item = c; break; }
+                }
+                if (!item) {
+                    if (document.body && document.body.click) document.body.click();   // close the menu
+                    done(false, "menu:no-remove-item");
+                    return;
+                }
+                ((item.querySelector && item.querySelector("a, tp-yt-paper-item, #navigation-endpoint")) || item).click();
+                setTimeout(() => {
+                    const present = queueHoldsVideo(videoId);
+                    done(!present, present ? "menu:still-present" : "menu:removed");
+                }, 400);
+            } catch (e) {
+                done(false, "menu:threw");
+            }
+        }, 250);
+    }
+    // Selectors are the fragile external API — kept in one place.
+    const QUEUE_ROW_MENU_BUTTON = "ytmusic-menu-renderer #button, ytmusic-menu-renderer yt-icon-button, ytmusic-menu-renderer tp-yt-paper-icon-button, #menu button";
+    const QUEUE_MENU_ITEMS = "ytmusic-menu-popup-renderer ytmusic-menu-navigation-item-renderer, ytmusic-menu-popup-renderer ytmusic-menu-service-item-renderer, tp-yt-paper-listbox ytmusic-menu-service-item-renderer";
+
     function rowVideoId(row) {
         try {
             const cands = [row.data, row.queueItem, row.item, row.__data && row.__data.data];

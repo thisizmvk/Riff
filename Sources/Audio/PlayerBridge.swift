@@ -116,6 +116,10 @@ final class PlayerBridge {
     /// Invoked when a tapped Up Next row could not be played in place
     /// (page-queue jump didn't take). AppEnvironment shows a toast.
     var onJumpFailed: ((MediaItem) -> Void)? = nil
+    /// The page refused to remove a queue row (both the store dispatch
+    /// and the row menu failed). The row is put back on screen; the UI
+    /// tells the user.
+    var onRemoveFailed: ((String) -> Void)? = nil
 
     // NOTE: The old `userQueuedIds` set was replaced by
     // `QueueManager.userQueueCount` — a positional region at the
@@ -2234,10 +2238,16 @@ final class PlayerBridge {
                 Log.bridge.debug("queueAddResult ok=\(ok, privacy: .public) pos=\(position, privacy: .public) via=\(via, privacy: .public) id=\(videoId, privacy: .public) (fallback retained)")
             }
         case .queueRemoveResult(let videoId, let ok, let via):
-            // Log-only: on ok the JS re-emits the mirror (display
-            // already updated locally); on failure the next snapshot
-            // truthfully resurfaces the row the page still holds.
             Log.bridge.debug("queueRemoveResult ok=\(ok, privacy: .public) via=\(via, privacy: .public) id=\(videoId, privacy: .public)")
+            // On ok the JS re-emits the mirror (display already updated
+            // locally). On failure the page still holds the row and WILL
+            // play it: put it back on screen NOW (a change-gated snapshot
+            // would only arrive at the next page change — the field log
+            // showed the "removed" row playing next) and say so.
+            if !ok, activeChip == nil {
+                Task { [weak self] in await self?.eval("window.musicBridge.requestQueueSnapshot()") }
+                onRemoveFailed?(videoId)
+            }
         case .queueSnapshot(let items, let pageShuffle):
             // Page-driven contexts: the page's shuffle state is the
             // truth — a lit local shuffle icon the display can't honor

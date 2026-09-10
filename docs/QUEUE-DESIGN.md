@@ -158,6 +158,10 @@ this list, the policy, and its table row together — never one alone.
     grace** before navigating (playlist / album / artist radio). The
     new page's first track is never judged against the old page's
     rows.
+13. **Remove from queue is page-owned and verified** for list rows AND
+    autoplay-tail rows (store dispatch, then the row's own menu). On
+    failure the row returns to the display and the user is told;
+    Riff never shows a row removed that the page will still play.
 
 Run `./tools/harness/run.sh` before committing anything under
 `Sources/Audio/`, `Resources/player-bridge.js`, or `tools/harness/`

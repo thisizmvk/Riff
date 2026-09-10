@@ -1058,6 +1058,9 @@ final class AppEnvironment {
         self.player.onJumpFailed = { [weak self] item in
             self?.showToast("Couldn't jump to “\(item.title)” — try tapping it again")
         }
+        self.player.onRemoveFailed = { [weak self] _ in
+            self?.showToast("Couldn't remove that song from the queue — it's back in the list")
+        }
 
         // B9 — drain any widget command that landed while the app was
         // backgrounded. The widget's transport buttons enqueue a

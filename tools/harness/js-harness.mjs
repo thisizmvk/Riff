@@ -274,6 +274,71 @@ const wrap = (id, title, byline, selected = false) => ({
   check(r2.length === 1 && r2[0].ok === false && r2[0].via === "not-in-items", "unknown id → ok=false not-in-items");
 }
 
+// ---- Case 13b: queueRemoveViaPage — automix rows (store index, then menu) --
+{
+  // (a) Reducer honours the combined items∪automix index.
+  elements.clear(); lists.clear();
+  const state = { queue: { items: [renderer("r1", "R1", "A", true)], automixItems: [renderer("a1", "A1", "A"), renderer("a2", "A2", "A")] } };
+  elements.set("ytmusic-app", {
+    store: {
+      getState: () => state,
+      dispatch: (a) => {
+        if (a.type !== "REMOVE_ITEM") return;
+        const n = state.queue.items.length;
+        if (a.payload < n) state.queue.items.splice(a.payload, 1);
+        else state.queue.automixItems.splice(a.payload - n, 1);
+      },
+    },
+  });
+  posted.length = 0;
+  window.__riffQueueSig = undefined;
+  window.musicBridge.queueRemoveViaPage("a2");
+  await settle();
+  const ra = posted.filter((p) => p.event === "queueRemoveResult");
+  check(ra.length === 1 && ra[0].ok === true && /automix/.test(ra[0].via), "automix row removed via store with the combined index");
+  check(state.queue.items.length === 1 && state.queue.automixItems.length === 1 && state.queue.automixItems[0].playlistPanelVideoRenderer.videoId === "a1", "only the target row left the automix tail");
+
+  // (b) Reducer ignores automix indexes → fall back to the row's own menu.
+  elements.clear(); lists.clear();
+  const state2 = { queue: { items: [renderer("r1", "R1", "A", true)], automixItems: [renderer("m1", "M1", "A"), renderer("m2", "M2", "A")] } };
+  elements.set("ytmusic-app", {
+    store: {
+      getState: () => state2,
+      dispatch: (a) => { if (a.type === "REMOVE_ITEM" && a.payload < state2.queue.items.length) state2.queue.items.splice(a.payload, 1); },
+    },
+  });
+  const opened = [];
+  const mkRow = (id) => ({
+    data: renderer(id, id, "A"),
+    querySelector: (sel) => sel.startsWith("a[") ? { href: "https://music.youtube.com/watch?v=" + id }
+      : { click: () => opened.push(id) },
+  });
+  lists.set("ytmusic-player-queue-item", [mkRow("m1"), mkRow("m2")]);
+  const menuItem = { textContent: " Remove from queue ", querySelector: () => null,
+    click: () => { state2.queue.automixItems = state2.queue.automixItems.filter((r) => r.playlistPanelVideoRenderer.videoId !== "m2"); } };
+  lists.set("ytmusic-menu-popup-renderer ytmusic-menu-navigation-item-renderer, ytmusic-menu-popup-renderer ytmusic-menu-service-item-renderer, tp-yt-paper-listbox ytmusic-menu-service-item-renderer",
+    [{ textContent: "Save to playlist", querySelector: () => null, click: () => {} }, menuItem]);
+  posted.length = 0;
+  window.__riffQueueSig = undefined;
+  window.musicBridge.queueRemoveViaPage("m2");
+  await settle();
+  const rb = posted.filter((p) => p.event === "queueRemoveResult");
+  check(opened.length === 1 && opened[0] === "m2", "row menu opened on the identity-matched row only");
+  check(rb.length === 1 && rb[0].ok === true && rb[0].via === "menu:removed", "automix row removed via the row menu when the store ignores it");
+  check(state2.queue.automixItems.length === 1 && state2.queue.automixItems[0].playlistPanelVideoRenderer.videoId === "m1", "menu path removed only the target");
+
+  // (c) Nothing works → ok=false, reported honestly (Swift restores the row).
+  state2.queue.automixItems.push(renderer("m3", "M3", "A"));
+  lists.set("ytmusic-player-queue-item", [mkRow("m1"), mkRow("m3")]);
+  lists.set("ytmusic-menu-popup-renderer ytmusic-menu-navigation-item-renderer, ytmusic-menu-popup-renderer ytmusic-menu-service-item-renderer, tp-yt-paper-listbox ytmusic-menu-service-item-renderer", []);
+  posted.length = 0;
+  window.musicBridge.queueRemoveViaPage("m3");
+  await settle();
+  const rc = posted.filter((p) => p.event === "queueRemoveResult");
+  check(rc.length === 1 && rc[0].ok === false && rc[0].via === "menu:no-remove-item", "no store effect + no menu item → ok=false menu:no-remove-item");
+  check(state2.queue.automixItems.length === 2, "failed removal leaves the queue untouched");
+}
+
 // ---- Case 14: queuePlayItem — identity-verified in-place jump -----------
 {
   elements.clear(); lists.clear();
