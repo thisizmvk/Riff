@@ -120,6 +120,16 @@ this list, the policy, and its table row together — never one alone.
    exhausted", not "queue empty" (the mirror shows YT's autoplay
    padding at the end).
 8. **Sign-in truth is probed, not assumed** from cookie dates.
+9. **Next follows the advance verdict.** The Next button is page-native
+   exactly when the natural advance would be (radio rows, an in-order
+   album the page is inside, autoplay rows after an album); otherwise
+   Swift drives. A shuffled album is Swift-driven (the page's order
+   would be wrong).
+10. **No speculative tail beneath a user-owned list.** While the user
+    region holds the album/queued songs, nothing is painted under it;
+    the real autoplay tail appears from the mirror once it drains.
+11. **An off-context track never navigates into a deterministic list**
+    (`?v=X&list=<album>` with X outside the album restarts the album).
 
 Run `./tools/harness/run.sh` before committing anything under
 `Sources/Audio/`, `Resources/player-bridge.js`, or `tools/harness/`

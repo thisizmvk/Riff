@@ -30,6 +30,11 @@ enum QueuePolicy {
         var mirrorFresh: Bool
         /// Plain radio, no chip — the page is the queue authority.
         var isPageDriven: Bool
+        /// The context list Riff holds is in the PAGE's order (an album
+        /// played in order). False for a shuffled/custom order — then
+        /// the page's native next would play the wrong track, so
+        /// context heads must navigate into the list explicitly.
+        var contextIsPageOrdered: Bool = true
     }
 
     enum Advance: Equatable {
@@ -50,7 +55,8 @@ enum QueuePolicy {
 
     static func advance(_ i: AdvanceInputs) -> Advance {
         if i.headIsContextTrack, let ctx = i.contextPlaylistId, !ctx.isEmpty {
-            return i.currentPlaylistId == ctx ? .native : .navigateIntoContext(ctx)
+            if i.contextIsPageOrdered, i.currentPlaylistId == ctx { return .native }
+            return .navigateIntoContext(ctx)
         }
         if i.headIsUserQueued { return .navigateRadio }
         if i.hasActiveChip || (!i.mirrorFresh && !i.isPageDriven) { return .navigateDeterministic }
@@ -77,10 +83,15 @@ enum QueuePolicy {
 
     // MARK: - Next button / shuffle / row tap
 
-    /// Next advances via the page's own control (no reload) whenever the
-    /// page owns the head.
-    static func nextUsesPageNative(isPageDriven: Bool, headIsUserQueued: Bool) -> Bool {
-        isPageDriven && !headIsUserQueued
+    /// The Next button advances via the page's own control (no reload)
+    /// exactly when the NATURAL advance would be page-native — radio
+    /// rows, an in-order album the page is already inside, mirrored
+    /// autoplay rows after an album. Otherwise Swift drives. Keeping
+    /// Next and end-of-track on one verdict is what stops Next from
+    /// reloading (re-rolling the autoplay tail) or navigating an
+    /// off-list row into an album list (which restarts the album).
+    static func nextUsesPageNative(_ i: AdvanceInputs) -> Bool {
+        advance(i) == .native
     }
 
     /// A local random pick is only legitimate where the shown list is

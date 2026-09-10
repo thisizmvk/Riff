@@ -549,7 +549,7 @@ struct DetailView: View {
         // playTracks so the entire shuffle chains via the queue.
         guard !page.tracks.isEmpty else { return }
         let shuffled = page.tracks.shuffled().map { backfillArtwork($0, page: page) }
-        await env.player.playTracks(shuffled, playlistId: page.playablePlaylistId)
+        await env.player.playTracks(shuffled, playlistId: page.playablePlaylistId, preservesListOrder: false)
     }
 
     /// Returns `track` with its missing thumbnail filled from the

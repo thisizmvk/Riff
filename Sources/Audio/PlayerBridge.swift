@@ -322,6 +322,10 @@ final class PlayerBridge {
     /// the page radio took over ("returns to a new radio").
     @ObservationIgnored private var contextTracksIds: Set<String> = []
     @ObservationIgnored private var contextPlaylistId: String? = nil
+    /// False when the context list was handed to us in a non-page order
+    /// (shuffled album): the page's native next would be wrong, so
+    /// context heads navigate explicitly. See QueuePolicy.
+    @ObservationIgnored private var contextIsPageOrdered: Bool = true
     /// Phase C (docs/QUEUE-DESIGN.md): true once a queueSnapshot from
     /// the CURRENT page has been applied. While fresh, the mirror owns
     /// the server region in every non-chip context and /next refreshes
@@ -561,6 +565,7 @@ final class PlayerBridge {
             contextStartHistoryIndex = queue.playedEntries.count
             contextTracksIds = [item.id]
             contextPlaylistId = nil
+            contextIsPageOrdered = true
         }
         // A pending resume from restoreLastSession only applies to the
         // very first play. An explicit click of a different song
@@ -659,7 +664,15 @@ final class PlayerBridge {
         onUpdate?()
         // Thread the effective playlist context to the JS bridge so
         // YT autoplay stays inside the playlist when advancing.
-        let effectiveList = clearQueue ? radio : (currentPlaylistId ?? radio)
+        // Never navigate an OFF-context track into a deterministic list:
+        // `?v=X&list=<album>` with X outside the album makes YouTube
+        // restart the album from track 1 ("album repeated"). Known
+        // context tracks keep their list; anything else gets its own
+        // radio.
+        let offContext = !clearQueue
+            && !contextTracksIds.isEmpty && !contextTracksIds.contains(item.id)
+            && !(currentPlaylistId ?? "").hasPrefix("RD")
+        let effectiveList = clearQueue || offContext ? radio : (currentPlaylistId ?? radio)
         await play(videoId: item.id, explicitPlaylistId: effectiveList)
     }
 
@@ -842,6 +855,18 @@ final class PlayerBridge {
                 // (the page doesn't know the chip); only plain radio
                 // defers to the page mirror.
                 let isRadio = chip == nil && (playlistId?.hasPrefix("RD") ?? true)
+                // While the user region holds the list (album via
+                // playTracks, queued songs), a /next tail beneath it is
+                // speculative: it is re-fetched on every navigation and
+                // re-rolls each time ("songs next to the album keep
+                // changing"). Paint nothing there; the REAL tail arrives
+                // from the mirror once the user region drains — same
+                // rule as mirrorApplies (never repaint beneath user rows).
+                // Scoped to tracklist-seeded contexts (album/playlist
+                // via playTracks): a Play-Next row in a page playlist
+                // keeps the playlist's rows beneath it.
+                let userOwnsList = chip == nil && self.queue.userQueueCount > 0
+                    && !self.contextTracksIds.isEmpty && self.contextPlaylistId != nil
                 // Exclude tracks already played this session. /next (and
                 // the playlistDetail fallback, which returns the FULL
                 // tracklist) includes tracks BEFORE the current one; the
@@ -857,7 +882,7 @@ final class PlayerBridge {
                 // /next-driven.
                 let mirrorOwnsQueue = self.mirrorFresh && self.activeChip == nil
                 if updateQueue, !mirrorOwnsQueue {
-                    let serverItems: [MediaItem] = isRadio ? [] : fetched.filter { item in
+                    let serverItems: [MediaItem] = (isRadio || userOwnsList) ? [] : fetched.filter { item in
                         item.id != curId && !playedIds.contains(item.id) && !self.shouldBlock(item)
                     }
                     self.queue.replaceServerRegion(serverItems)
@@ -1082,7 +1107,7 @@ final class PlayerBridge {
     /// which navigates to `upNext.first` — always the correct next
     /// album track because the user region preserves insertion
     /// order.
-    func playTracks(_ tracks: [MediaItem], playlistId: String? = nil) async {
+    func playTracks(_ tracks: [MediaItem], playlistId: String? = nil, preservesListOrder: Bool = true) async {
         guard let first = tracks.first else { return }
         let rest = Array(tracks.dropFirst())
         Log.bridge.debug("playTracks ENTRY firstId=\(first.id, privacy: .public) restCount=\(rest.count) plid=\(playlistId ?? "nil", privacy: .public)")
@@ -1093,6 +1118,7 @@ final class PlayerBridge {
         // context (page-native / list=<plid>), never via per-track radio.
         contextTracksIds = Set(tracks.map(\.id))
         contextPlaylistId = playlistId
+        contextIsPageOrdered = preservesListOrder
         // Seed the user region with the tail of the album in order.
         for track in rest {
             queue.addToEnd(track)
@@ -1265,58 +1291,37 @@ final class PlayerBridge {
     ///   4. YT's own autoplay as a last resort.
     func next() async {
         let currentId = currentTrack?.videoId
-        let userCount = queue.userQueueCount
-
-        // 1. User region has items → advance its head, in order,
-        //    regardless of shuffle.
-        if userCount > 0, let head = upNext.first(where: { $0.id != currentId }),
-           queue.isUserQueued(videoId: head.id) {
+        guard let head = upNext.first(where: { $0.id != currentId }) else {
+            // Nothing surfaced — let YT's autoplay continue.
+            await eval("window.musicBridge.next()")
+            return
+        }
+        // 1. Page-native whenever the natural advance would be (policy):
+        //    radio rows, an in-order album the page is already inside,
+        //    mirrored autoplay rows after an album. No reload → no
+        //    re-rolled tail; no off-list row pushed into an album list.
+        if QueuePolicy.nextUsesPageNative(advanceInputs(for: head)) {
+            Log.bridge.debug("next() → page-native advance (head=\(head.id, privacy: .public))")
+            userClickedAt = Date()   // user intent; don't let enforcement misread the jump
+            await eval("window.musicBridge.next()")
+            return
+        }
+        // 2. User region (explicit intent / shuffled album order) —
+        //    advance its head in order, regardless of shuffle.
+        if queue.isUserQueued(videoId: head.id) {
             await skipTo(item: head)
             return
         }
-
-        // 2. Shuffle over the SERVER region only (user region is
-        //    empty or exhausted at this point). NOT in page-driven
-        //    contexts: a local random pick from the 49 mirrored rows
-        //    plays a row the user can't see while the list still shows
-        //    sequential order ("queue order seems off"), and the
-        //    navigation re-rolls the radio. There, shuffle is the
-        //    PAGE's (toggleShuffle delegates to it) and Next advances
-        //    page-natively (3a) into whatever order the page holds.
+        // 3. Local shuffle over Riff-owned server rows only.
         if shuffleEnabled, QueuePolicy.localShuffleAllowed(isPageDriven: isPageDrivenContext) {
-            let serverCandidates = Array(upNext.dropFirst(userCount)).filter { $0.id != currentId }
+            let serverCandidates = Array(upNext.dropFirst(queue.userQueueCount)).filter { $0.id != currentId }
             if let pick = serverCandidates.randomElement() {
                 await skipTo(item: pick)
                 return
             }
         }
-
-        // 3a. Page-driven radio with a mirrored head → advance via the
-        //     PAGE's own next control. A play(item:) here would
-        //     location.href-navigate: a full page reload that
-        //     RE-ROLLS the radio (non-deterministic per fetch), so
-        //     every Next press rebuilt a brand-new queue — "queue
-        //     playback looks odd". Native next advances within the
-        //     exact queue we're mirroring: no reload, no re-seed, and
-        //     the mirrored head is what plays.
-        if let head = upNext.first(where: { $0.id != currentId }),
-           QueuePolicy.nextUsesPageNative(isPageDriven: isPageDrivenContext,
-                                          headIsUserQueued: queue.isUserQueued(videoId: head.id)) {
-            Log.bridge.debug("next() → page-native advance (mirrored head=\(head.id, privacy: .public))")
-            userClickedAt = Date()   // user intent; don't let enforcement misread the jump
-            await eval("window.musicBridge.next()")
-            return
-        }
-
-        // 3b. Plain head of upNext (deterministic contexts).
-        //     clearQueue:false keeps the rest stable.
-        if let head = upNext.first(where: { $0.id != currentId }) {
-            await play(item: head, clearQueue: false)
-            return
-        }
-
-        // 4. Nothing surfaced — let YT's autoplay continue.
-        await eval("window.musicBridge.next()")
+        // 4. Swift drives the head (chip queues, pre-mirror seeds).
+        await play(item: head, clearQueue: false)
     }
     func previous()   async {
         // The incoming trackChanged (the PRIOR track) is the user's own
@@ -1611,18 +1616,25 @@ final class PlayerBridge {
     ///     injections, context restoration after an interlude,
     ///     deterministic server heads).
     private enum AdvancePlan { case native, navigate(String) }
-    private func advancePlan(to head: MediaItem) -> AdvancePlan {
-        // Decision lives in QueuePolicy (pure, harness-tested); this
-        // only maps the verdict to a URL.
-        let verdict = QueuePolicy.advance(.init(
+    /// The policy inputs for a candidate head — one builder so Next and
+    /// end-of-track can never disagree about the same row.
+    private func advanceInputs(for head: MediaItem) -> QueuePolicy.AdvanceInputs {
+        .init(
             headIsContextTrack: contextTracksIds.contains(head.id),
             contextPlaylistId: contextPlaylistId,
             currentPlaylistId: currentPlaylistId,
             headIsUserQueued: queue.isUserQueued(videoId: head.id),
             hasActiveChip: activeChip != nil,
             mirrorFresh: mirrorFresh,
-            isPageDriven: isPageDrivenContext
-        ))
+            isPageDriven: isPageDrivenContext,
+            contextIsPageOrdered: contextIsPageOrdered
+        )
+    }
+
+    private func advancePlan(to head: MediaItem) -> AdvancePlan {
+        // Decision lives in QueuePolicy (pure, harness-tested); this
+        // only maps the verdict to a URL.
+        let verdict = QueuePolicy.advance(advanceInputs(for: head))
         switch verdict {
         case .native:
             return .native

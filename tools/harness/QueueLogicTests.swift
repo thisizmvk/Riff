@@ -294,8 +294,17 @@ do {
     check(!QueuePolicy.mirrorApplies(hasActiveChip: true, userQueueCount: 0), "chip queues are never overwritten by the mirror")
 
     // Next / shuffle / row tap
-    check(QueuePolicy.nextUsesPageNative(isPageDriven: true, headIsUserQueued: false), "Next in radio uses the page's own next (no reload)")
-    check(!QueuePolicy.nextUsesPageNative(isPageDriven: true, headIsUserQueued: true), "Next with a user-queued head plays THAT head")
+    check(QueuePolicy.nextUsesPageNative(radioRow), "Next in radio uses the page's own next (no reload)")
+    check(!QueuePolicy.nextUsesPageNative(playNextInjection), "Next with a user-queued injection plays THAT head (Swift drives)")
+    check(QueuePolicy.nextUsesPageNative(albumInCtx), "Next inside an in-order album is page-native (no reload → autoplay tail doesn't re-roll)")
+    var shuffledAlbum = albumInCtx
+    shuffledAlbum.contextIsPageOrdered = false
+    check(QueuePolicy.advance(shuffledAlbum) == .navigateIntoContext("OLAK5uy_a"), "shuffled album: heads navigate INTO the list explicitly (page order would be wrong)")
+    check(!QueuePolicy.nextUsesPageNative(shuffledAlbum), "Next in a shuffled album is Swift-driven")
+    var afterAlbum = radioRow
+    afterAlbum.isPageDriven = false; afterAlbum.currentPlaylistId = "OLAK5uy_a"   // deterministic ctx, mirrored autoplay row
+    check(QueuePolicy.nextUsesPageNative(afterAlbum), "after an album drains, Next on a mirrored autoplay row is page-native (never ?v=X&list=<album>, which restarts the album)")
+    check(!QueuePolicy.nextUsesPageNative(chipHead), "Next on a chip queue is Swift-driven")
     check(!QueuePolicy.localShuffleAllowed(isPageDriven: true), "no local random pick in radio — shuffle is the page's")
     check(QueuePolicy.localShuffleAllowed(isPageDriven: false), "local shuffle allowed over Riff-owned server rows")
     check(QueuePolicy.rowTapUsesPageJump(hasActiveChip: false, mirrorFresh: true, rowIsUserQueued: false, rowIsInQueue: true), "tapping a mirrored row jumps in place (no navigation)")
