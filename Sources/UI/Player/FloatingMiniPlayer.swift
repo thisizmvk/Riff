@@ -118,8 +118,12 @@ struct FloatingMiniPlayerView: View {
                 Spacer(minLength: 0)
             }
         }
-        .frame(minWidth: 280, idealWidth: 320, maxWidth: 480,
-               minHeight: 140, idealHeight: 180, maxHeight: 270)
+        // Bounds are generous (a square or portrait tile is fine — the
+        // user settled on roughly 280×300) but finite, so the window can
+        // never open at artwork or screen size. The user's own size is
+        // persisted by the scene and honoured within these bounds.
+        .frame(minWidth: 220, idealWidth: 280, maxWidth: 600,
+               minHeight: 200, idealHeight: 300, maxHeight: 600)
         // Artwork as a BACKGROUND, never a layout sibling. As a ZStack
         // child, the `.fill` image proposed its natural pixel size and
         // the resizable window opened at artwork size — "a full screen
@@ -231,14 +235,14 @@ private struct WindowFloater: NSViewRepresentable {
             window.styleMask.insert(.fullSizeContentView)
             window.isMovableByWindowBackground = true
             window.backgroundColor = .black
-            // A tile, not a document: bounded size, no zoom-to-screen,
-            // and no restored oversize frame from a previous session.
-            window.isRestorable = false
-            window.minSize = NSSize(width: 280, height: 140)
-            window.maxSize = NSSize(width: 480, height: 270)
+            // A tile, not a document: bounded size and no zoom-to-screen.
+            // The user's chosen size IS restored (they resize it once and
+            // expect it back); only an oversize frame is reset.
+            window.minSize = NSSize(width: 220, height: 200)
+            window.maxSize = NSSize(width: 600, height: 600)
             window.standardWindowButton(.zoomButton)?.isEnabled = false
-            if window.frame.width > 480 || window.frame.height > 270 {
-                window.setContentSize(NSSize(width: 320, height: 180))
+            if window.frame.width > 600 || window.frame.height > 600 {
+                window.setContentSize(NSSize(width: 280, height: 300))
             }
         }
     }
