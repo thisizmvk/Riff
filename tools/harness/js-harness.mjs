@@ -897,7 +897,15 @@ let firstPageInfoGeneration = null;
   elements.set("ytmusic-app", { store });
   posted.length = 0; window.__riffQueueSig = undefined;
   check(typeof window.__riffDebug.subscribeQueueStore === "function", "__riffDebug.subscribeQueueStore exposed");
-  check(window.__riffDebug.subscribeQueueStore() === true && subs.length === 1, "subscribeQueueStore registers exactly one store.subscribe listener");
+  // DISABLED by default (field 2026-09-11): the subscription surfaced a
+  // radio's transient automix regenerations as a churning, reshuffled
+  // mirror. The bridge sets window.__riffQueueSubDisabled = true at load;
+  // assert the default is off, then clear it to exercise the mechanism
+  // for the eventual transient-safe re-enable.
+  check(window.__riffQueueSubDisabled === true, "store subscription disabled by default (poll is the sole mirror trigger)");
+  check(window.__riffDebug.subscribeQueueStore() === false && subs.length === 0, "subscribeQueueStore is a no-op while disabled");
+  window.__riffQueueSubDisabled = false;
+  check(window.__riffDebug.subscribeQueueStore() === true && subs.length === 1, "with the flag cleared, subscribeQueueStore registers exactly one store.subscribe listener");
   check(window.__riffQueueStoreSubscribed === true && store.__riffQueueSubscribed === true, "subscription flagged on window AND on the store object (survives a playerApi rebind)");
   check(posted.filter((p) => p.event === "diagnostic" && p.msg.includes("queue store subscribed via app.store")).length === 1, "one-shot subscribe diagnostic");
   check(window.__riffDebug.subscribeQueueStore() === true && subs.length === 1, "second subscribe call is a no-op (store already flagged)");
@@ -923,6 +931,7 @@ let firstPageInfoGeneration = null;
   try { subs[0](); } catch (_) { threw = true; }
   check(threw === false, "a throwing store read inside dispatch never throws into the page");
   store.getState = () => stateRef;
+  window.__riffQueueSubDisabled = true;   // restore the shipped default for later cases
 }
 
 // ---- Case 24: safety-poll rate policy (fresh bridge instance) --------------
@@ -986,6 +995,10 @@ let firstPageInfoGeneration = null;
 
   // (b) store WITH subscribe appears later: the tick subscribes (retry-from-poll,
   // since setup gates only on playerApi + player-bar) and drops to the watchdog.
+  // Clear the shipped-default disable so the upgrade path can be
+  // exercised; case (c)'s downgrade restores it to true (as the live
+  // downgrade does), so later cases keep the shipped behaviour.
+  window.__riffQueueSubDisabled = false;
   const subs = []; let unsubbed = false;
   const stateB = { queue: { items: [renderer("w1", "W1", "A", true)] } };
   elements.set("ytmusic-app", { store: { getState: () => stateB, subscribe: (fn) => { subs.push(fn); return () => { unsubbed = true; }; } } });

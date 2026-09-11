@@ -649,6 +649,17 @@
     const SAFETY_POLL_FAST_MS = 2000;
     const SAFETY_POLL_SLOW_MS = 10000;
     let lastPlayerStateCode = 1;            // last onStateChange ∈ {1, 2}
+    // Store subscription is DISABLED (field 2026-09-11): a radio's
+    // automix tail regenerates in transient, reordered states between
+    // advances, and the store subscription surfaced every one of them —
+    // the mirror repainted a churning, reshuffled Up Next on each song
+    // change. The 2s safety poll + emitQueueSnapshot's signature dedup
+    // smooths those transients (a reorder that settles within a tick is
+    // never emitted), which is the WYSIWYG behaviour the queue contract
+    // promises. The subscription remains code-complete behind this flag
+    // for a future transient-safe re-enable; the poll is the sole mirror
+    // trigger. See docs/QUEUE-DESIGN.md.
+    window.__riffQueueSubDisabled = true;
     let queueSubLastRefs = { queue: null, items: null, automix: null };
     let queueSubDebounceId = null;          // pending debounced emit, or null
     let queueSubUnsubscribe = null;         // redux unsubscribe fn, or null
