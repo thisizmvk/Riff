@@ -16,6 +16,13 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
 
     enum BridgeEvent {
         case ready
+        /// Handshake the page posts once per DOCUMENT, immediately
+        /// BEFORE `ready` (player-bridge.js `emitPageInfo`): the page's
+        /// live InnerTube protocol values (clientVersion above all) and
+        /// a capability/selector health map. PlayerBridge installs the
+        /// clientVersion override before `ready` flushes queued
+        /// commands, and logs the capability map once per document.
+        case pageInfo(PageInfo)
         case stateChanged(isPlaying: Bool)
         case progress(currentTime: Double, duration: Double)
         case trackChanged(videoId: String, playlistId: String?, title: String, artist: String, artwork: URL?)
@@ -40,6 +47,38 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         /// non-deterministic and can't be reproduced by an independent
         /// /next call. `selected == true` marks the currently-playing row.
         case queueSnapshot(items: [PageQueueItem], shuffleEnabled: Bool?)
+    }
+
+    /// The page's self-description from the `pageInfo` handshake.
+    /// All fields are best-effort ("" / empty when the page's config
+    /// blob lacked the key). `visitorData` is a device-tracking token:
+    /// only its LENGTH is decoded — the value never enters Swift, so
+    /// nothing here can leak it into logs or the diagnostics export.
+    struct PageInfo {
+        /// Payload schema version (1 today) — lets a newer JS bridge
+        /// evolve the shape without silently confusing older Swift.
+        let schema: Int
+        /// Random per-document id; a navigation re-rolls it. Used to
+        /// log the handshake once per document.
+        let generation: String
+        /// The page's live INNERTUBE_CLIENT_VERSION. Untrusted input —
+        /// InnerTubeClient validates before using it as an override.
+        let clientVersion: String
+        /// SESSION_INDEX ("" when signed out). Informational only —
+        /// the X-Goog-AuthUser header is NOT redirected to it (in-app
+        /// sign-in yields a single-account jar).
+        let sessionIndex: String
+        /// Length of VISITOR_DATA (presence signal; value redacted).
+        let visitorDataLength: Int
+        /// Page locale — informational only in this pass.
+        let hl: String
+        let gl: String
+        /// Capability name → present: playerApi, queueController,
+        /// commandResolver, storeDispatch, storeSubscribe.
+        let capabilities: [String: Bool]
+        /// Pre-rendered "name=value" selector-health pairs (next,
+        /// previous, shuffle, playerBar, queueRows) for logging.
+        let selectorSummary: String
     }
 
     /// One row of the page's real queue, as mirrored from the ytmusic-app
@@ -213,8 +252,12 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         // one is collecting debug logs, at 4Hz for progress and with an
         // 80-row payload for queueSnapshot. Log the name always; dump
         // bodies only in debug builds and never for the two hot events.
+        // `pageInfo` is also excluded from the body dump: its raw body
+        // carries VISITOR_DATA (a device-tracking token) — the decoded
+        // event keeps only its length, and the .notice line in
+        // PlayerBridge is the sanctioned record of the handshake.
         #if DEBUG
-        if name != "progress", name != "queueSnapshot" {
+        if name != "progress", name != "queueSnapshot", name != "pageInfo" {
             Log.bridge.debug("\(name, privacy: .public) \(String(describing: body), privacy: .public)")
         } else {
             Log.bridge.debug("\(name, privacy: .public)")
@@ -229,6 +272,32 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         switch eventName {
         case "ready":
             return .ready
+        case "pageInfo":
+            let cfg = (body["ytcfg"] as? [String: Any]) ?? [:]
+            let rawCaps = (body["capabilities"] as? [String: Any]) ?? [:]
+            var capabilities: [String: Bool] = [:]
+            for (key, value) in rawCaps {
+                capabilities[key] = (value as? Bool) ?? false
+            }
+            let selectors = (body["selectors"] as? [String: Any]) ?? [:]
+            let selectorSummary: String = selectors.keys.sorted().map { key -> String in
+                let value: Any? = selectors[key]
+                if let count = value as? Int { return "\(key)=\(count)" }
+                if let flag = value as? Bool { return "\(key)=\(flag ? 1 : 0)" }
+                return "\(key)=?"
+            }.joined(separator: " ")
+            let info = PageInfo(
+                schema: (body["schema"] as? Int) ?? 0,
+                generation: (body["generation"] as? String) ?? "",
+                clientVersion: (cfg["clientVersion"] as? String) ?? "",
+                sessionIndex: (cfg["sessionIndex"] as? String) ?? "",
+                visitorDataLength: ((cfg["visitorData"] as? String) ?? "").count,
+                hl: (cfg["hl"] as? String) ?? "",
+                gl: (cfg["gl"] as? String) ?? "",
+                capabilities: capabilities,
+                selectorSummary: selectorSummary
+            )
+            return .pageInfo(info)
         case "stateChanged":
             guard let isPlaying = body["isPlaying"] as? Bool else { return nil }
             return .stateChanged(isPlaying: isPlaying)
@@ -289,7 +358,13 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
             // selectors, etc.). Surface to the unified log so the
             // primary-vs-fallback path is observable from `log show`.
             if let msg = body["msg"] as? String {
-                Log.bridge.error("JS diagnostic: \(msg, privacy: .public)")
+                // Per-track loudness chatter ("norm …") is routine,
+                // not an error — keep the export/error stream clean.
+                if msg.hasPrefix("norm ") {
+                    Log.bridge.debug("JS diagnostic: \(msg, privacy: .public)")
+                } else {
+                    Log.bridge.error("JS diagnostic: \(msg, privacy: .public)")
+                }
             }
             return nil
         default:

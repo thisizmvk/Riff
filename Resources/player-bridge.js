@@ -191,32 +191,35 @@
 
         // Battery: called from Swift when the app is deactivated
         // (window loses focus / miniaturized). Suspends the
-        // safety-poll (2s interval, cheap but noticeable in Activity
-        // Monitor on long-idle sessions) and the normalization tick
-        // (10Hz during measurement, off outside it). Resumed on the
+        // safety-poll (cheap but noticeable in Activity Monitor on
+        // long-idle sessions) and the normalization tick (10Hz
+        // during measurement, off outside it). Resumed on the
         // reverse notification. The playerApi event bus keeps
         // firing, so real state changes still land — this just
         // stops us waking the WebView on every tick to re-check
         // stable state.
+        //
+        // While backgrounded, rate changes (emitState via a media-key
+        // pause/play, a store-subscription upgrade) only RECORD the
+        // desired cadence (see startSafetyPoll); resuming here restarts
+        // at whatever rate was last recorded, so an inactive-app state
+        // change can never restart the poll in the background.
         setBackgrounded(isBackgrounded) {
             if (isBackgrounded) {
-                if (window.__riffSafetyPollId) {
-                    clearInterval(window.__riffSafetyPollId);
-                    window.__riffSafetyPollId = null;
-                    window.__riffSafetyPollPaused = true;
-                }
+                stopSafetyPoll();
+                window.__riffSafetyPollPaused = true;
                 if (window.__riffNorm && window.__riffNorm.tickIntervalId !== null) {
                     clearInterval(window.__riffNorm.tickIntervalId);
                     window.__riffNorm.tickIntervalId = null;
                     window.__riffNorm.tickPaused = true;
                 }
             } else {
-                if (window.__riffSafetyPollPaused && !window.__riffSafetyPollId) {
-                    window.__riffSafetyPollId = setInterval(() => {
-                        emitTrackChanged("safety-poll");
-                        emitQueueSnapshot();
-                    }, 2000);
+                if (window.__riffSafetyPollPaused) {
                     window.__riffSafetyPollPaused = false;
+                    // Resume only a poll that was ever configured — in
+                    // mediaSession-fallback mode (setup never passed)
+                    // there is no safety poll to restart.
+                    if (window.__riffSafetyPollMs) startSafetyPoll(window.__riffSafetyPollMs);
                 }
                 if (window.__riffNorm && window.__riffNorm.tickPaused && window.__riffNorm.measuring) {
                     window.__riffNorm.startTickInterval();
@@ -377,14 +380,7 @@
         // player-bar control and the queue-panel control across builds;
         // a diagnostic fires once if none is found.
         toggleShuffle() {
-            const candidates = [
-                "ytmusic-player-bar .shuffle",
-                "ytmusic-player-bar tp-yt-paper-icon-button.shuffle",
-                "ytmusic-player-bar [aria-label*='huffle']",
-                "#queue .shuffle",
-                "ytmusic-player-queue [aria-label*='huffle']",
-            ];
-            for (const sel of candidates) {
+            for (const sel of SHUFFLE_SELECTORS) {
                 const el = document.querySelector(sel);
                 if (el) { el.click(); return true; }
             }
@@ -588,6 +584,18 @@
         } else if (state === 0 || state === 2) {
             postEvent({ event: "stateChanged", isPlaying: false });
         }
+        // Energy: adapt the safety-poll cadence to play state. Paused
+        // → 10s (nothing advances while paused; the queue mirror still
+        // gets a watchdog). Playing → the subscription-aware rate.
+        // Only 1/2 drive this: -1/3/5 are transient and 0 is followed
+        // by either a 1 (autoplay) or a 2. startSafetyPoll is a no-op
+        // at an unchanged rate and only records the rate while
+        // backgrounded (media-key pause/play fires onStateChange while
+        // the app is inactive; the poll must not restart back there).
+        if (state === 1 || state === 2) {
+            lastPlayerStateCode = state;
+            startSafetyPoll(desiredSafetyPollMs());
+        }
         if (state === 0) {
             postEvent({ event: "ended" });
             // Legacy: drain __riffPendingNextUrl if set. Commit 2 removes
@@ -600,6 +608,200 @@
                 location.href = pending;
             }
         }
+    }
+
+    // ---- Safety poll + queue-store subscription (energy) --------------------
+    //
+    // The safety poll is the BEHAVIOR: a periodic re-check that
+    // re-emits late metadata and walks the page's queue store for the
+    // mirror. It always exists; only its cadence adapts:
+    //
+    //   2s   — playing, no store subscription (the original rate; the
+    //          fallback whenever nothing better is possible)
+    //   10s  — paused (nothing advances while paused), OR playing with
+    //          a live store subscription (the subscription delivers
+    //          queue changes push-style; the poll is only a watchdog)
+    //
+    // The subscription is an OPTIMISATION layered on top: when the
+    // ytmusic-app store exposes redux-style `subscribe`, a listener
+    // schedules a debounced emitQueueSnapshot on real queue changes —
+    // so a change reaches Swift in ~100ms instead of waiting for a
+    // poll tick, and the idle-session store walk drops from every 2s
+    // to every 10s. It must never DELAY a snapshot: the watchdog tick
+    // still emits anything the subscription missed, and a detected
+    // miss (store mutated in place, no dispatch) downgrades back to
+    // the 2s poll permanently for the page.
+    const SAFETY_POLL_FAST_MS = 2000;
+    const SAFETY_POLL_SLOW_MS = 10000;
+    let lastPlayerStateCode = 1;            // last onStateChange ∈ {1, 2}
+    let queueSubLastRefs = { queue: null, items: null, automix: null };
+    let queueSubDebounceId = null;          // pending debounced emit, or null
+    let queueSubUnsubscribe = null;         // redux unsubscribe fn, or null
+    let queueSubStore = null;               // the store object we flagged
+    let lateMetaTimerId = null;             // one-shot late-metadata backstop
+
+    function desiredSafetyPollMs() {
+        if (window.__riffQueueStoreSubscribed === true) return SAFETY_POLL_SLOW_MS;
+        if (lastPlayerStateCode === 2) return SAFETY_POLL_SLOW_MS;
+        return SAFETY_POLL_FAST_MS;
+    }
+
+    // Idempotent: a call at the currently-running rate is a no-op (so
+    // every repeated onStateChange(1) doesn't churn the timer). While
+    // backgrounded (setBackgrounded(true)) only the DESIRED rate is
+    // recorded — setBackgrounded(false) resumes at it.
+    function startSafetyPoll(ms) {
+        window.__riffSafetyPollMs = ms;
+        if (window.__riffSafetyPollPaused) return;
+        if (window.__riffSafetyPollId && window.__riffSafetyPollRunningMs === ms) return;
+        if (window.__riffSafetyPollId) clearInterval(window.__riffSafetyPollId);
+        window.__riffSafetyPollRunningMs = ms;
+        window.__riffSafetyPollId = setInterval(safetyPollTick, ms);
+    }
+
+    function stopSafetyPoll() {
+        if (window.__riffSafetyPollId) clearInterval(window.__riffSafetyPollId);
+        window.__riffSafetyPollId = null;
+        window.__riffSafetyPollRunningMs = null;
+    }
+
+    function safetyPollTick() {
+        const wasSubscribed = window.__riffQueueStoreSubscribed === true;
+        // Backstop for the narrowed MutationObserver (see setup): YT
+        // can replace the <video> element or the playerApi instance
+        // across SPA transitions, including replacing the observed
+        // ancestor itself — re-check here so a swap is never missed
+        // for longer than one poll period.
+        try {
+            attachVideoListeners();
+            const fresh = playerApi();
+            if (fresh && !fresh.__riffSubscribed) subscribeToPlayerApi(fresh);
+        } catch (_) {}
+        emitTrackChanged("safety-poll");
+        // The ytmusic-app store may not exist when setup() passes (the
+        // gate is only playerApi + player-bar), so keep attempting the
+        // subscribe from the poll until it lands, then drop to the
+        // watchdog rate.
+        if (!wasSubscribed && subscribeQueueStore()) {
+            startSafetyPoll(desiredSafetyPollMs());
+        }
+        const sigBefore = window.__riffQueueSig;
+        emitQueueSnapshot();
+        // Watchdog miss-detection: a change the subscription should
+        // have delivered but didn't (a store that mutates its arrays
+        // in place fires no useful dispatch). Only when subscribed
+        // BEFORE this tick (the first post-subscribe emit is expected
+        // to change the sig) and no debounced emit is pending (the
+        // change may simply be <100ms old).
+        if (wasSubscribed
+            && window.__riffQueueStoreSubscribed === true
+            && queueSubDebounceId === null
+            && window.__riffQueueSig !== sigBefore) {
+            downgradeQueueSubscription("watchdog caught a queue change the store subscription missed");
+        }
+    }
+
+    // The ytmusic-app redux-style store, when reachable. (Mirrors the
+    // first branch of resolveQueueSlice; the player-element `.queue`
+    // fallbacks there have no subscribe surface, so only this path can
+    // upgrade.)
+    function resolveAppStore() {
+        const app = document.querySelector("ytmusic-app");
+        const store = app && (app.store || (app.inst && app.inst.store));
+        return (store && typeof store.getState === "function") ? store : null;
+    }
+
+    // Register a debounced queue-mirror listener on the page store.
+    // Returns true when subscribed (now or previously). The flag lives
+    // on the STORE object, not the playerApi — the MutationObserver
+    // can rebind a fresh playerApi against the same store.
+    function subscribeQueueStore() {
+        try {
+            // A proven-lossy subscription stays downgraded for the
+            // rest of this document — without this, the next poll tick
+            // would re-subscribe and the two would flip-flop forever.
+            if (window.__riffQueueSubDisabled === true) return false;
+            const store = resolveAppStore();
+            if (!store || typeof store.subscribe !== "function") return false;
+            if (store.__riffQueueSubscribed) {
+                window.__riffQueueStoreSubscribed = true;
+                return true;
+            }
+            // Seed the identity refs with the state as of subscription
+            // so the first dispatch compares against reality, not null.
+            try {
+                const st0 = store.getState();
+                const q0 = (st0 && st0.queue) || null;
+                queueSubLastRefs = { queue: q0, items: (q0 && q0.items) || null, automix: (q0 && q0.automixItems) || null };
+            } catch (_) {}
+            const listener = () => {
+                // Runs inside EVERY store dispatch — YT dispatches in
+                // bursts, so this must be O(1) and must never throw
+                // into the page's own dispatch. Only a changed
+                // identity on the queue slice (or its arrays)
+                // schedules the debounced O(rows) walk.
+                try {
+                    const st = store.getState();
+                    const q = (st && st.queue) || null;
+                    const items = (q && q.items) || null;
+                    const automix = (q && q.automixItems) || null;
+                    if (q === queueSubLastRefs.queue
+                        && items === queueSubLastRefs.items
+                        && automix === queueSubLastRefs.automix) return;
+                    queueSubLastRefs = { queue: q, items: items, automix: automix };
+                    if (queueSubDebounceId !== null) {
+                        clearTimeout(queueSubDebounceId);
+                        queueSubDebounceId = null;
+                    }
+                    // 100ms trailing debounce; sig dedup inside
+                    // emitQueueSnapshot makes a no-change walk emit
+                    // nothing. (The offline harness runs short timers
+                    // inline — the `ranInline` dance keeps
+                    // queueSubDebounceId null in that case instead of
+                    // parking a stale id.)
+                    let ranInline = false;
+                    const tid = setTimeout(() => {
+                        ranInline = true;
+                        queueSubDebounceId = null;
+                        emitQueueSnapshot();
+                    }, 100);
+                    if (!ranInline) queueSubDebounceId = tid;
+                } catch (_) {}
+            };
+            const unsub = store.subscribe(listener);
+            store.__riffQueueSubscribed = true;
+            queueSubStore = store;
+            queueSubUnsubscribe = (typeof unsub === "function") ? unsub : null;
+            window.__riffQueueStoreSubscribed = true;
+            // One-shot diagnostic (stands in for the Phase 1 handshake
+            // capability report).
+            if (!window.__riffQueueSubReported) {
+                window.__riffQueueSubReported = true;
+                postEvent({ event: "diagnostic", msg: "queue store subscribed via app.store" });
+            }
+            return true;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    // Revert to poll-only mirroring (the subscription proved lossy, or
+    // the store was swapped out from under it). Sticky per document —
+    // see the disable gate in subscribeQueueStore. Safe to call twice.
+    function downgradeQueueSubscription(reason) {
+        window.__riffQueueSubDisabled = true;
+        try { if (queueSubUnsubscribe) queueSubUnsubscribe(); } catch (_) {}
+        queueSubUnsubscribe = null;
+        if (queueSubStore) {
+            try { queueSubStore.__riffQueueSubscribed = false; } catch (_) {}
+            queueSubStore = null;
+        }
+        window.__riffQueueStoreSubscribed = false;
+        if (!window.__riffQueueSubDowngradeReported) {
+            window.__riffQueueSubDowngradeReported = true;
+            postEvent({ event: "diagnostic", msg: "queue store subscription downgraded: " + reason });
+        }
+        startSafetyPoll(desiredSafetyPollMs());
     }
 
     /**
@@ -617,6 +819,20 @@
         try {
             api.addEventListener("videodatachange", (_name, _videoData) => {
                 emitTrackChanged("videodatachange");
+                // Late-metadata backstop, cadence-independent:
+                // getVideoData often lacks title/author when
+                // 'dataloaded' fires, and with the poll slowed to 10s
+                // under a store subscription the next tick is too far
+                // away to fill the blank row. One shot ~1s later
+                // re-emits iff something new landed (the dedup gate in
+                // emitTrackChanged makes it free otherwise).
+                try {
+                    if (lateMetaTimerId !== null) clearTimeout(lateMetaTimerId);
+                    lateMetaTimerId = setTimeout(() => {
+                        lateMetaTimerId = null;
+                        emitTrackChanged("safety-poll");
+                    }, 1000);
+                } catch (_) {}
             });
         } catch (e) { postEvent({ event: "diagnostic", msg: "videodatachange subscribe failed: " + e }); }
         try {
@@ -629,16 +845,12 @@
         // playerApi event.
         emitTrackChanged("force");
         // Safety-net poll: videodatachange's 'dataupdated' event isn't
-        // always reliable — th-ch documents the same. A 2s poll
+        // always reliable — th-ch documents the same. The poll
         // re-evaluates and re-emits if metadata finally landed (the
         // dedup gate in emitTrackChanged guards against redundant
-        // emits when nothing changed). Cheap enough to leave running.
-        if (!window.__riffSafetyPollId) {
-            window.__riffSafetyPollId = setInterval(() => {
-                emitTrackChanged("safety-poll");
-                emitQueueSnapshot();
-            }, 2000);
-        }
+        // emits when nothing changed), and is the queue mirror's
+        // fallback transport. Rate policy above (2s baseline).
+        startSafetyPoll(desiredSafetyPollMs());
     }
 
     // ---- Page-queue mirror (Phase 2 radio truth) ---------------------------
@@ -983,6 +1195,16 @@
     // Selectors are the fragile external API — kept in one place.
     const QUEUE_ROW_MENU_BUTTON = "ytmusic-menu-renderer #button, ytmusic-menu-renderer yt-icon-button, ytmusic-menu-renderer tp-yt-paper-icon-button, #menu button";
     const QUEUE_MENU_ITEMS = "ytmusic-menu-popup-renderer ytmusic-menu-navigation-item-renderer, ytmusic-menu-popup-renderer ytmusic-menu-service-item-renderer, tp-yt-paper-listbox ytmusic-menu-service-item-renderer";
+    // Shuffle control candidates across YT builds (player-bar control
+    // and queue-panel control) — shared by toggleShuffle and the
+    // pageInfo selector-health report so the two can never disagree.
+    const SHUFFLE_SELECTORS = [
+        "ytmusic-player-bar .shuffle",
+        "ytmusic-player-bar tp-yt-paper-icon-button.shuffle",
+        "ytmusic-player-bar [aria-label*='huffle']",
+        "#queue .shuffle",
+        "ytmusic-player-queue [aria-label*='huffle']",
+    ];
 
     function rowVideoId(row) {
         try {
@@ -1020,7 +1242,7 @@
             } catch (_) { /* fall through */ }
         }
         try {
-            const cfg = (window.yt && window.yt.config_) || (window.ytcfg && window.ytcfg.data_) || null;
+            const cfg = ytcfg();
             const key = cfg && cfg.INNERTUBE_API_KEY;
             const ctx = cfg && cfg.INNERTUBE_CONTEXT;
             if (key && ctx) {
@@ -1112,6 +1334,67 @@
         }
     }
 
+    // ---- Page handshake (pageInfo) -----------------------------------------
+    //
+    // One `pageInfo` event per document, posted BEFORE `ready` so the
+    // Swift side has the page's live protocol values (clientVersion
+    // above all) and the capability/selector health map in place before
+    // `ready` triggers its queued-command flush. Best-effort
+    // introspection throughout: a missing key reports "" / false, and a
+    // throw degrades to a diagnostic — never blocks `ready`.
+
+    // Per-document generation id. The user script re-runs on every
+    // navigation, so this re-rolls per page; Swift uses it to log the
+    // handshake once per document.
+    const PAGE_GENERATION = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+
+    // The page's own config blob — two known homes for the same data.
+    // Shared with fetchQueueRenderers' same-origin InnerTube fallback.
+    function ytcfg() {
+        return (window.yt && window.yt.config_) || (window.ytcfg && window.ytcfg.data_) || null;
+    }
+
+    function emitPageInfo() {
+        try {
+            const cfg = ytcfg() || {};
+            const str = (v) => (typeof v === "string" ? v : (typeof v === "number" ? String(v) : ""));
+            const app = document.querySelector("ytmusic-app");
+            const store = app && (app.store || (app.inst && app.inst.store));
+            let shuffleFound = false;
+            for (const sel of SHUFFLE_SELECTORS) {
+                if (document.querySelector(sel)) { shuffleFound = true; break; }
+            }
+            postEvent({
+                event: "pageInfo",
+                schema: 1,
+                generation: PAGE_GENERATION,
+                ytcfg: {
+                    clientVersion: str(cfg.INNERTUBE_CLIENT_VERSION),
+                    sessionIndex: str(cfg.SESSION_INDEX),
+                    visitorData: str(cfg.VISITOR_DATA),
+                    hl: str(cfg.HL),
+                    gl: str(cfg.GL),
+                },
+                capabilities: {
+                    playerApi: !!playerApi(),
+                    queueController: !!resolveQueueController(),
+                    commandResolver: !!resolveCommandHost(),
+                    storeDispatch: !!resolveQueueDispatch(),
+                    storeSubscribe: !!(store && typeof store.subscribe === "function"),
+                },
+                selectors: {
+                    next: !!document.querySelector(".next-button"),
+                    previous: !!document.querySelector(".previous-button"),
+                    shuffle: shuffleFound,
+                    playerBar: !!playerBar(),
+                    queueRows: document.querySelectorAll("ytmusic-player-queue-item").length,
+                },
+            });
+        } catch (e) {
+            postEvent({ event: "diagnostic", msg: "pageInfo emit failed: " + (e && e.message ? e.message : String(e)) });
+        }
+    }
+
     // ---- <video> listeners (progress only — state moved to onStateChange) --
 
     function attachVideoListeners() {
@@ -1152,6 +1435,9 @@
                 postEvent({ event: "diagnostic", msg: "playerApi never appeared after " + SETUP_MAX_ATTEMPTS + " attempts; falling back to mediaSession poll" });
                 startMediaSessionFallback();
                 setupDone = true;
+                // Handshake first, then ready — Swift installs the
+                // page's protocol overrides before ready's flush.
+                emitPageInfo();
                 postEvent({ event: "ready" });
                 return;
             }
@@ -1186,7 +1472,19 @@
                     subscribeToPlayerApi(fresh);
                 }
             }, 500);
-        }).observe(document.documentElement, { childList: true, subtree: true });
+            // Narrowed target (energy): the <video> and playerApi live
+            // under ytmusic-player, so observing that element's parent
+            // catches a swapped/recreated player without recording
+            // every mutation of this continuously-mutating SPA at the
+            // document root. documentElement remains the fallback for
+            // builds where only #movie_player exists (no
+            // ytmusic-player element). If YT ever replaces the
+            // observed ancestor itself, the safety poll's per-tick
+            // re-attach backstop still catches the swap.
+        }).observe(document.querySelector("ytmusic-player")?.parentElement || document.documentElement, { childList: true, subtree: true });
+        // Handshake first, then ready — Swift installs the page's
+        // protocol overrides before ready's queued-command flush.
+        emitPageInfo();
         postEvent({ event: "ready" });
     }
 
@@ -1520,7 +1818,14 @@
     // emitQueueSnapshot() by hand forces a fresh mirror emit; the sig
     // dedup still applies, so clear window.__riffQueueSig first to
     // force a re-emit of unchanged state.
-    window.__riffDebug = { emitQueueSnapshot: emitQueueSnapshot, resolveQueueSlice: resolveQueueSlice };
+    window.__riffDebug = {
+        emitQueueSnapshot: emitQueueSnapshot,
+        resolveQueueSlice: resolveQueueSlice,
+        emitPageInfo: emitPageInfo,
+        subscribeQueueStore: subscribeQueueStore,
+        startSafetyPoll: startSafetyPoll,
+        stopSafetyPoll: stopSafetyPoll,
+    };
 
     // ---- Kick off ---------------------------------------------------------
 

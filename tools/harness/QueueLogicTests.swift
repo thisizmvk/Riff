@@ -805,6 +805,70 @@ do {
     check(C.parse("SAPISID = abc")["SAPISID"] == "abc", "spaces around '=' are trimmed")
 }
 
+// ── 18. RetryPolicy — idempotent-read retry decision table ──────────
+do {
+    // Deterministic wrapper: unit pinned unless a row overrides it.
+    func d(_ e: Endpoint, attempt: Int = 1, status: Int? = nil,
+           urlError: URLError.Code? = nil, retryAfter: String? = nil,
+           unit: Double = 0.5) -> TimeInterval? {
+        RetryPolicy.delay(endpoint: e, attempt: attempt, status: status,
+                          urlError: urlError, retryAfter: retryAfter, unit: unit)
+    }
+    func approx(_ a: TimeInterval?, _ b: TimeInterval) -> Bool {
+        guard let a = a else { return false }
+        return abs(a - b) < 1e-9
+    }
+
+    // Mutations never retry, whatever the failure signal.
+    let mutations: [Endpoint] = [.like, .dislike, .removeLike, .editPlaylist,
+                                 .createPlaylist, .deletePlaylist, .subscribe, .unsubscribe]
+    for e in mutations {
+        check(d(e, status: 503) == nil, "mutation \(e.rawValue): no retry on 503")
+        check(d(e, status: 429, retryAfter: "1") == nil, "mutation \(e.rawValue): no retry on 429 even with Retry-After")
+        check(d(e, urlError: .networkConnectionLost) == nil, "mutation \(e.rawValue): no retry on connection lost")
+    }
+
+    // Reads retry fast-fail statuses with jitter in [0.3, 0.9].
+    let reads: [Endpoint] = [.search, .browse, .next, .player, .accountMenu, .searchSuggestions]
+    for e in reads {
+        let v = d(e, status: 503)
+        check(v != nil && v! >= 0.3 && v! <= 0.9, "read \(e.rawValue): 503 retries with jittered delay (got \(String(describing: v)))")
+    }
+    check(approx(d(.browse, status: 503, unit: 0.0), 0.3), "jitter floor: unit 0 gives 0.3 s")
+    check(approx(d(.browse, status: 503, unit: 0.999), 0.3 + 0.999 * 0.6), "jitter is 0.3 + unit * 0.6 (unit injectable)")
+    check(approx(d(.browse, status: 502), 0.6) && approx(d(.browse, status: 504), 0.6), "502 and 504 retry like 503")
+    check(d(.search, status: 500) == nil, "500 is treated as deterministic — no retry")
+    check(d(.next, status: 401) == nil && d(.next, status: 403) == nil, "401/403 never retry (needsReauth path)")
+    check(d(.browse, status: 404) == nil && d(.browse, status: 400) == nil, "other 4xx never retry")
+
+    // Max one retry.
+    check(d(.browse, attempt: 2, status: 503) == nil, "attempt 2 gives up (max one retry)")
+    check(d(.browse, attempt: 3, urlError: .networkConnectionLost) == nil, "attempt 3 gives up too")
+
+    // 429 honours delta-seconds Retry-After, capped at 3 s (beyond → surface the error).
+    check(approx(d(.search, status: 429, retryAfter: "2"), 2.0), "429 with Retry-After: 2 waits exactly 2 s")
+    check(approx(d(.search, status: 429, retryAfter: "3"), 3.0), "429 with Retry-After: 3 sits exactly at the cap")
+    check(d(.search, status: 429, retryAfter: "4") == nil, "429 with Retry-After: 4 is beyond the cap")
+    check(d(.search, status: 429, retryAfter: "60") == nil, "429 with Retry-After: 60 gives up (capped-out)")
+    check(approx(d(.search, status: 429), 0.6), "429 without a hint falls back to jitter")
+    check(approx(d(.search, status: 429, retryAfter: "Fri, 11 Sep 2026 12:00:00 GMT"), 0.6), "HTTP-date Retry-After is treated as no hint")
+    check(approx(d(.search, status: 429, retryAfter: "-5"), 0.6), "negative Retry-After is treated as no hint")
+    check(approx(d(.search, status: 429, retryAfter: " 1 "), 1.0), "whitespace around delta-seconds is tolerated")
+    check(approx(d(.search, status: 429, retryAfter: "0"), 0.0), "Retry-After: 0 retries immediately")
+
+    // Transport errors: retry only fast-fail signals.
+    check(d(.browse, urlError: .networkConnectionLost) != nil, "connection lost retries")
+    check(d(.browse, urlError: .cannotConnectToHost) != nil, "cannot-connect retries")
+    check(d(.browse, urlError: .dnsLookupFailed) != nil, "DNS failure retries")
+    check(d(.browse, urlError: .timedOut) == nil, "timedOut never retries (10 s budget already spent)")
+    check(d(.browse, urlError: .notConnectedToInternet) == nil, "offline never retries")
+    check(d(.browse, urlError: .cancelled) == nil, "cancellation never retries")
+    check(d(.browse, urlError: .badServerResponse) == nil, "other URL errors never retry")
+
+    // No failure signal at all → no retry.
+    check(d(.browse) == nil, "no status and no urlError yields nil")
+}
+
 print("KNOWN BUGS (strict xfail, not counted as failures): \(knownBugs)")
 
 print("")

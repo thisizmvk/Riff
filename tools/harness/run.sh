@@ -8,6 +8,7 @@
 #   - QueueManager two-region invariants (+ 5000-op fuzz)
 #   - SmartShuffle.merge contract
 #   - CookieImporter parsing
+#   - RetryPolicy decision table (idempotent-read retries only)
 #   - player-bridge.js queue-mirror resolver against simulated page
 #     store shapes (classic store, proxy-wrapped inst.store,
 #     player-bar .queue variants, flat items, dedup, caps)
@@ -23,6 +24,8 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/riff-harness.XXXXXX")"
 
 cp "$REPO/Sources/Data/InnerTube/Models/MediaItem.swift" "$WORK/"
+cp "$REPO/Sources/Data/InnerTube/Endpoints.swift" "$WORK/"
+cp "$REPO/Sources/Data/InnerTube/RetryPolicy.swift" "$WORK/"
 cp "$REPO/Sources/Audio/PlayedHistoryStore.swift" "$WORK/"
 cp "$REPO/Sources/Audio/SmartShuffle.swift" "$WORK/"
 cp "$REPO/Sources/Audio/QueuePolicy.swift" "$WORK/"
@@ -41,7 +44,8 @@ echo "── Static behavior guards ──"
 
 echo "── Swift queue-logic harness ──"
 if ! xcrun -sdk macosx swiftc -module-cache-path "$WORK/mc" \
-    "$WORK/MediaItem.swift" "$WORK/PlayedHistoryStore.swift" "$WORK/QueueManager.swift" \
+    "$WORK/MediaItem.swift" "$WORK/Endpoints.swift" "$WORK/RetryPolicy.swift" \
+    "$WORK/PlayedHistoryStore.swift" "$WORK/QueueManager.swift" \
     "$WORK/SmartShuffle.swift" "$WORK/QueuePolicy.swift" "$WORK/PersonalizedShelves.swift" "$WORK/CookieImporter.swift" "$WORK/MoveShim.swift" "$WORK/main.swift" \
     -o "$WORK/harness" 2> "$WORK/build.err"; then
     grep -v "cache file" "$WORK/build.err" >&2 || true

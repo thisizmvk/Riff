@@ -8,8 +8,15 @@
 #   log stream --predicate 'subsystem == "dev.riff.app" AND category == "bridge"' \
 #       --level debug --style compact | tee ~/Downloads/riff-bridge.log
 #
+# OR grade the audit journal from a diagnostics export (Settings →
+# Export diagnostics) — no live capture needed; the app journals every
+# audit line in memory and the export writes it out:
+#   ./tools/harness/fieldcheck.sh ~/Downloads/riff-diagnostics-*/bridge-journal.log
+#
 # By default only the LAST app process in the file is graded (a relaunch
-# starts a new PID); --all grades everything.
+# starts a new PID); --all grades everything. A non-empty file with no
+# 'Riff[PID:' token (a journal/export, which is single-process by
+# construction) is graded whole.
 set -euo pipefail
 LOG="${1:-$HOME/Downloads/riff-bridge.log}"
 ALL="${2:-}"
@@ -19,9 +26,16 @@ if [ "$ALL" = "--all" ]; then
     BODY="$(cat "$LOG")"
 else
     PID="$(grep -o 'Riff\[[0-9]*:' "$LOG" | tail -1 | tr -dc '0-9' || true)"
-    [ -n "$PID" ] || { echo "no 'Riff[PID:' lines in $LOG — capture with --style compact (see header) or rerun with --all" >&2; exit 2; }
-    BODY="$(grep "Riff\[$PID:" "$LOG" || true)"
-    echo "process: PID $PID ($(printf '%s\n' "$BODY" | wc -l | tr -d ' ') lines)"
+    if [ -z "$PID" ]; then
+        # Journal/export files carry no PID token; grade them as-is.
+        # An EMPTY file is still an error — likely a wrong-style capture.
+        [ -s "$LOG" ] || { echo "no 'Riff[PID:' lines in $LOG — capture with --style compact (see header) or rerun with --all" >&2; exit 2; }
+        BODY="$(cat "$LOG")"
+        echo "no 'Riff[PID:' token — grading whole file as a journal/export ($(wc -l < "$LOG" | tr -d ' ') lines)"
+    else
+        BODY="$(grep "Riff\[$PID:" "$LOG" || true)"
+        echo "process: PID $PID ($(printf '%s\n' "$BODY" | wc -l | tr -d ' ') lines)"
+    fi
 fi
 c() { printf '%s\n' "$BODY" | grep -c -- "$1" || true; }
 
@@ -30,11 +44,18 @@ match=$(c "advance arrived=.* match")
 jumps=$(c "jump (row tap)")
 ctxStart=$(c "context start (no shown head)")
 mismatch=$(c "MISMATCH")
-# Build-independent: Release logs a bare "… ready"; Debug echoes the
-# payload too ("… ready [\"event\": \"ready\"]"). Match both, or a
-# Debug-build capture always grades "0 reloads" no matter how many
-# full-page navigations occurred.
-reloads=$(c '] ready\( \[\|$\)')
+# Reloads: prefer the audit token PlayerBridge journals once per
+# document ready ("page ready → bridge armed" — present in journal
+# exports AND live captures from current builds). Fall back to the raw
+# per-event ready line for legacy captures: Release logs a bare
+# "… ready"; Debug echoes the payload too ("… ready [\"event\":
+# \"ready\"]") — match both, or a Debug-build capture always grades
+# "0 reloads". Never SUM the two counts: a live capture from a current
+# build carries both lines for every reload.
+reloads=$(c "page ready → bridge armed")
+if [ "$reloads" -eq 0 ]; then
+    reloads=$(c '] ready\( \[\|$\)')
+fi
 ctxSwitch=$(c "context switch → list=")
 override=$(c "overriding to head")
 addVerified=$(c "queueAddResult VERIFIED")

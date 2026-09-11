@@ -29,9 +29,45 @@ final class InnerTubeClient: @unchecked Sendable {
     static let origin = "https://music.youtube.com"
 
     /// Bumped together when Google changes the protocol on us.
+    /// `clientVersion` is the FALLBACK: once the hidden page's
+    /// `pageInfo` handshake reports a plausible live
+    /// INNERTUBE_CLIENT_VERSION, requests send that instead — see
+    /// `effectiveClientVersion`. The constant covers requests made
+    /// before the page loads (and any page whose report fails
+    /// validation), and remains the single rotation point when the
+    /// page can't tell us.
     static let clientName = "WEB_REMIX"
     static let clientVersion = "1.20260501.00.00"
     static let clientNameID = "67"  // X-YouTube-Client-Name for WEB_REMIX
+
+    /// Live client version reported by the hidden page's `pageInfo`
+    /// handshake; nil before the first handshake or when the reported
+    /// value failed validation. Lock-protected: written from the
+    /// MainActor bridge-event path, read from arbitrary request Tasks.
+    private static let pageClientVersion = OSAllocatedUnfairLock<String?>(initialState: nil)
+
+    /// Install (or clear) the page-supplied client version. Page
+    /// values are untrusted input that lands in an HTTP header: only a
+    /// value matching the known WEB_REMIX shape is accepted; anything
+    /// else clears the override so requests fall back to the constant
+    /// (a stale previous page's value must not outlive its page).
+    static func updatePageClientVersion(_ value: String?) {
+        let trimmed = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidate: String? = (!trimmed.isEmpty && isPlausibleClientVersion(trimmed)) ? trimmed : nil
+        pageClientVersion.withLock { current in current = candidate }
+    }
+
+    /// The WEB_REMIX version shape (`1.20260501.00.00`-like):
+    /// `major.YYYYMMDD.minor.patch` with fixed digit counts.
+    static func isPlausibleClientVersion(_ value: String) -> Bool {
+        return value.range(of: "^[0-9]+\\.[0-9]{8}\\.[0-9]{2}\\.[0-9]{2}$", options: .regularExpression) != nil
+    }
+
+    /// What requests actually send: the page's validated live version
+    /// when the handshake has provided one, else the constant.
+    static var effectiveClientVersion: String {
+        return pageClientVersion.withLock { $0 } ?? clientVersion
+    }
 
     /// When we attach a Bearer token from Device Flow, the audience of that
     /// token is the YouTube TV client (`861556708454-...`) — InnerTube
@@ -704,7 +740,7 @@ final class InnerTubeClient: @unchecked Sendable {
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if !(200..<300).contains(status) {
             let preview = String(data: data, encoding: .utf8)?.prefix(400) ?? ""
-            Log.innertube.error("← data/v3/\(path, privacy: .public) status=\(status) body=\(preview, privacy: .public)")
+            Log.innertube.error("← data/v3/\(path, privacy: .public) status=\(status) body=\(preview, privacy: .private(mask: .hash))")
             if status == 401 || status == 403 { throw InnerTubeError.needsReauth }
             throw InnerTubeError.http(status)
         }
@@ -967,25 +1003,11 @@ final class InnerTubeClient: @unchecked Sendable {
         return Self.scanForMediaItems(body)
     }
 
-    /// Fetch the Related-tab browse response and split it into the
-    /// titled shelves YT actually shipped — "Other versions" /
-    /// "Other performances" (live, acoustic, cover variants of the
-    /// current track), "Recommended tracks", "More from <Artist>",
-    /// "You might also like", etc. Each shelf is a `musicCarouselShelfRenderer`
-    /// at `…sectionListRenderer.contents[]`; reuses `parseHomeShelf`
-    /// so the visual treatment matches Home rails. Returns an empty
-    /// array when YT didn't include sectioned shelves (some watch
-    /// contexts return a flat song list only).
-    func relatedSections(browseId: String) async throws -> [HomeSection] {
-        let body = try await postRaw(.browse, body: ["browseId": browseId])
-        return Self.parseRelatedSections(body)
-    }
-
     /// Related tab in ONE `/browse` round trip: the flat song list
     /// (`related(browseId:)`'s projection) and the titled shelves
-    /// (`relatedSections(browseId:)`'s projection) parsed from the
-    /// same body. Callers needing both should use this — calling the
-    /// two methods concurrently POSTs the same browseId twice. Both
+    /// (`parseRelatedSections`' projection) parsed from the same
+    /// body. Callers needing both should use this — issuing two
+    /// separate fetches POSTs the same browseId twice. Both
     /// projections fail together, which is fine: same endpoint, same
     /// body.
     func relatedPage(browseId: String) async throws -> (items: [MediaItem], sections: [HomeSection]) {
@@ -994,10 +1016,18 @@ final class InnerTubeClient: @unchecked Sendable {
     }
 
     /// Pull `musicCarouselShelfRenderer` (and friends) shelves out of
-    /// a Related-tab browse response. Walks both the single-column
-    /// and two-column layouts so we don't silently drop shelves on
-    /// the newer desktop response shape — same defense the album
-    /// detail parser uses (see `detail(forBrowseId:)`).
+    /// a Related-tab browse response — the titled shelves YT actually
+    /// shipped: "Other versions" / "Other performances" (live,
+    /// acoustic, cover variants of the current track), "Recommended
+    /// tracks", "More from <Artist>", "You might also like", etc.
+    /// Each shelf is a `musicCarouselShelfRenderer` at
+    /// `…sectionListRenderer.contents[]`; reuses `parseHomeShelf` so
+    /// the visual treatment matches Home rails. Returns an empty
+    /// array when YT didn't include sectioned shelves (some watch
+    /// contexts return a flat song list only). Walks both the
+    /// single-column and two-column layouts so we don't silently drop
+    /// shelves on the newer desktop response shape — same defense the
+    /// album detail parser uses (see `detail(forBrowseId:)`).
     static func parseRelatedSections(_ body: [String: Any]) -> [HomeSection] {
         let singleCol = Parsing.array(body, "contents",
             "singleColumnBrowseResultsRenderer", "tabs", "0", "tabRenderer",
@@ -1924,7 +1954,7 @@ final class InnerTubeClient: @unchecked Sendable {
         req.setValue("\(Self.origin)/", forHTTPHeaderField: "Referer")
         req.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
         req.setValue(Self.clientNameID, forHTTPHeaderField: "X-YouTube-Client-Name")
-        req.setValue(Self.clientVersion, forHTTPHeaderField: "X-YouTube-Client-Version")
+        req.setValue(Self.effectiveClientVersion, forHTTPHeaderField: "X-YouTube-Client-Version")
         req.setValue("0", forHTTPHeaderField: "X-Goog-AuthUser")
 
         let authMode: String
@@ -1940,26 +1970,58 @@ final class InnerTubeClient: @unchecked Sendable {
         payload["context"] = [
             "client": [
                 "clientName": Self.clientName,
-                "clientVersion": Self.clientVersion,
+                "clientVersion": Self.effectiveClientVersion,
                 "hl": Locale.current.language.languageCode?.identifier ?? "en",
                 "gl": Locale.current.region?.identifier ?? "US",
             ],
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
-        let (data, response) = try await session.data(for: req)
-        if let http = response as? HTTPURLResponse {
-            if !(200..<300).contains(http.statusCode) {
+        // One retry for idempotent reads on fast-fail signals — the
+        // whole decision lives in `RetryPolicy` (pure, harness-tested).
+        // `Task.sleep` throws on cancellation, and we check
+        // `Task.isCancelled` before sleeping, so cancel-and-replace
+        // callers (search-as-you-type, /next refresh) stop immediately
+        // instead of sleeping and refiring a superseded request.
+        var attempt = 1
+        while true {
+            let data: Data
+            let response: URLResponse
+            do {
+                (data, response) = try await session.data(for: req)
+            } catch let error as URLError {
+                if !Task.isCancelled,
+                   let backoff = RetryPolicy.delay(endpoint: endpoint, attempt: attempt,
+                                                   status: nil, urlError: error.code,
+                                                   retryAfter: nil) {
+                    Log.innertube.notice("← \(endpoint.rawValue, privacy: .public) urlError=\(error.code.rawValue) retry in \(String(format: "%.2f", backoff), privacy: .public)s")
+                    attempt += 1
+                    try await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
+                    continue
+                }
+                throw error
+            }
+            if let http = response as? HTTPURLResponse,
+               !(200..<300).contains(http.statusCode) {
+                if !Task.isCancelled,
+                   let backoff = RetryPolicy.delay(endpoint: endpoint, attempt: attempt,
+                                                   status: http.statusCode, urlError: nil,
+                                                   retryAfter: http.value(forHTTPHeaderField: "Retry-After")) {
+                    Log.innertube.notice("← \(endpoint.rawValue, privacy: .public) status=\(http.statusCode) retry in \(String(format: "%.2f", backoff), privacy: .public)s")
+                    attempt += 1
+                    try await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000))
+                    continue
+                }
                 let preview = String(data: data, encoding: .utf8)?.prefix(400) ?? ""
-                Log.innertube.error("← \(endpoint.rawValue, privacy: .public) status=\(http.statusCode) auth=\(authMode, privacy: .public) body=\(preview, privacy: .public)")
+                Log.innertube.error("← \(endpoint.rawValue, privacy: .public) status=\(http.statusCode) auth=\(authMode, privacy: .public) body=\(preview, privacy: .private(mask: .hash))")
                 if http.statusCode == 401 || http.statusCode == 403 { throw InnerTubeError.needsReauth }
                 throw InnerTubeError.http(http.statusCode)
             }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw InnerTubeError.decoding
+            }
+            return json
         }
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw InnerTubeError.decoding
-        }
-        return json
     }
 
     /// `Bearer <access_token>` if we have a valid OAuth token (or can

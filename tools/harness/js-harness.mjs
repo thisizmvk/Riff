@@ -31,8 +31,14 @@ global.window.webkit = global.webkit;
 // (the 0ms/300ms snapshot + verification shots) immediately, so async
 // pipelines complete without letting setup() recurse forever.
 const realSetTimeout = setTimeout;
-global.setInterval = () => 0;
-global.clearInterval = () => {};
+// Intervals are RECORDED (fn + ms), never auto-run: cadence tests
+// invoke a tick by hand via intervals.get(id).fn(). Ids start at 1 —
+// the bridge treats a falsy id as "no poll", and real browsers never
+// return 0 either.
+const intervals = new Map();
+let intervalSeq = 0;
+global.setInterval = (fn, ms) => { intervalSeq += 1; intervals.set(intervalSeq, { fn, ms }); return intervalSeq; };
+global.clearInterval = (id) => { intervals.delete(id); };
 global.setTimeout = (fn, delay) => {
   if (typeof fn === "function" && (delay ?? 0) < 500) { fn(); }
   return 0;
@@ -760,6 +766,64 @@ const storeOf = (state, dispatched = []) => ({ store: { getState: () => state, d
   location.href = before;
 }
 
+// ---- Case 22: pageInfo handshake payload ----------------------------------
+// Driven via __riffDebug.emitPageInfo: setup() cannot complete in the
+// harness (its 500ms retry timer is stubbed out), so the debug hook is
+// the sanctioned way to fire the handshake against the element map.
+let firstPageInfoGeneration = null;
+{
+  check(typeof window.__riffDebug.emitPageInfo === "function", "__riffDebug.emitPageInfo exposed");
+  // (a) bare page: no ytcfg, no elements → still posts, with empty
+  // strings / false capabilities / zero rows; never throws.
+  elements.clear(); lists.clear();
+  delete window.yt; delete window.ytcfg;
+  posted.length = 0;
+  window.__riffDebug.emitPageInfo();
+  let pi = posted.filter((p) => p.event === "pageInfo");
+  check(pi.length === 1, "bare page still posts pageInfo (never blocks ready)");
+  check(pi[0]?.schema === 1 && typeof pi[0]?.generation === "string" && pi[0].generation.length > 0, "schema=1 with a non-empty generation id");
+  const y0 = pi[0]?.ytcfg ?? {};
+  check(y0.clientVersion === "" && y0.sessionIndex === "" && y0.visitorData === "" && y0.hl === "" && y0.gl === "", "missing ytcfg → empty strings, never undefined");
+  check(Object.values(pi[0]?.capabilities ?? {}).length === 5 && Object.values(pi[0]?.capabilities ?? {}).every((v) => v === false), "no elements → all five capabilities false");
+  const s0 = pi[0]?.selectors ?? {};
+  check(s0.next === false && s0.previous === false && s0.shuffle === false && s0.playerBar === false && s0.queueRows === 0, "no elements → selector health all absent, zero rows");
+  firstPageInfoGeneration = pi[0]?.generation ?? null;
+
+  // (b) populated page: ytcfg + player elements + selector targets.
+  window.yt = { config_: { INNERTUBE_CLIENT_VERSION: "1.20260901.01.00", SESSION_INDEX: 2, VISITOR_DATA: "CgtWaXNpdG9yRGF0YQ", HL: "de", GL: "DE" } };
+  elements.set("ytmusic-player", { playerApi: { getVideoData: () => ({}), addEventListener: () => {} } });
+  elements.set("ytmusic-player-bar", { queue: { getItems: () => [] }, resolveCommand: () => {} });
+  elements.set("ytmusic-app", { store: { getState: () => ({}), dispatch: () => {}, subscribe: () => {} } });
+  elements.set(".next-button", { click: () => {} });
+  elements.set("ytmusic-player-bar [aria-label*='huffle']", { click: () => {} });
+  lists.set("ytmusic-player-queue-item", [{}, {}, {}]);
+  posted.length = 0;
+  window.__riffDebug.emitPageInfo();
+  pi = posted.filter((p) => p.event === "pageInfo");
+  check(pi.length === 1, "populated page posts pageInfo");
+  const y = pi[0]?.ytcfg ?? {};
+  check(y.clientVersion === "1.20260901.01.00" && y.hl === "de" && y.gl === "DE", "ytcfg clientVersion/hl/gl read from window.yt.config_");
+  check(y.sessionIndex === "2", "numeric SESSION_INDEX is stringified");
+  check(y.visitorData === "CgtWaXNpdG9yRGF0YQ", "visitorData carried verbatim (Swift decodes only its length)");
+  const c = pi[0]?.capabilities ?? {};
+  check(c.playerApi === true && c.queueController === true && c.commandResolver === true && c.storeDispatch === true && c.storeSubscribe === true, "capabilities detected via the same resolvers the queue actions use");
+  const s = pi[0]?.selectors ?? {};
+  check(s.next === true && s.previous === false && s.shuffle === true && s.playerBar === true && s.queueRows === 3, "selector health: per-selector flags + row count");
+  check(pi[0]?.generation === firstPageInfoGeneration, "same document → same generation id");
+
+  // (c) the window.ytcfg.data_ home is honored too; signed-out
+  // SESSION_INDEX="" is carried as-is (Swift falls back to the header default).
+  delete window.yt;
+  window.ytcfg = { data_: { INNERTUBE_CLIENT_VERSION: "1.20260902.00.00", SESSION_INDEX: "" } };
+  posted.length = 0;
+  window.__riffDebug.emitPageInfo();
+  pi = posted.filter((p) => p.event === "pageInfo");
+  check(pi[0]?.ytcfg?.clientVersion === "1.20260902.00.00", "window.ytcfg.data_ home is read");
+  check(pi[0]?.ytcfg?.sessionIndex === "", "signed-out SESSION_INDEX='' carried as-is");
+  delete window.ytcfg;
+  elements.clear(); lists.clear();
+}
+
 // ---- Case 21: onStateChange(0) drains the pending URL (fresh bridge instance) --
 // Re-evaluate the bridge with a playerApi present so setup() subscribes
 // synchronously; capture the listeners and drive them.
@@ -773,6 +837,13 @@ const storeOf = (state, dispatched = []) => ({ store: { getState: () => state, d
   try { (0, eval)(src); } catch (e) { ok = false; console.log("re-eval threw: " + e.message); }
   check(ok && typeof listeners.onStateChange === "function" && typeof listeners.videodatachange === "function", "bridge subscribes to onStateChange + videodatachange when playerApi is present at load");
   check(posted.some((p) => p.event === "ready"), "ready posted after subscription");
+  // Handshake ordering: setup() posts pageInfo BEFORE ready, so the
+  // Swift side installs the page's protocol overrides before ready's
+  // queued-command flush; a fresh document re-rolls the generation id.
+  const piIdx = posted.findIndex((p) => p.event === "pageInfo");
+  const rdIdx = posted.findIndex((p) => p.event === "ready");
+  check(piIdx >= 0 && rdIdx >= 0 && piIdx < rdIdx, "pageInfo posted BEFORE ready");
+  check(typeof posted[piIdx]?.generation === "string" && posted[piIdx].generation.length > 0 && posted[piIdx].generation !== firstPageInfoGeneration, "a new document re-rolls the pageInfo generation id");
   check(posted.some((p) => p.event === "trackChanged" && p.videoId === "cur" && p.title === "Cur"), "initial forced trackChanged carries the loaded video");
   if (typeof listeners.onStateChange === "function") {
     // No pending URL → ended only.
@@ -809,6 +880,140 @@ const storeOf = (state, dispatched = []) => ({ store: { getState: () => state, d
     posted.length = 0; listeners.videodatachange("dataupdated", {});
     check(!posted.some((p) => p.event === "trackChanged"), "…and only once");
   }
+}
+
+// ---- Case 23: queue-store subscription (energy upgrade path) ---------------
+// The store subscription is an optimisation over the safety poll: a
+// debounced emitQueueSnapshot on real queue changes, gated by an O(1)
+// identity check so YT's dispatch bursts don't turn into walks.
+{
+  elements.clear(); lists.clear();
+  const subs = [];
+  let state = { queue: { items: [renderer("s1", "S1", "A", true), renderer("s2", "S2", "A")] } };
+  const store = {
+    getState: () => state,
+    subscribe: (fn) => { subs.push(fn); return () => { const i = subs.indexOf(fn); if (i >= 0) subs.splice(i, 1); }; },
+  };
+  elements.set("ytmusic-app", { store });
+  posted.length = 0; window.__riffQueueSig = undefined;
+  check(typeof window.__riffDebug.subscribeQueueStore === "function", "__riffDebug.subscribeQueueStore exposed");
+  check(window.__riffDebug.subscribeQueueStore() === true && subs.length === 1, "subscribeQueueStore registers exactly one store.subscribe listener");
+  check(window.__riffQueueStoreSubscribed === true && store.__riffQueueSubscribed === true, "subscription flagged on window AND on the store object (survives a playerApi rebind)");
+  check(posted.filter((p) => p.event === "diagnostic" && p.msg.includes("queue store subscribed via app.store")).length === 1, "one-shot subscribe diagnostic");
+  check(window.__riffDebug.subscribeQueueStore() === true && subs.length === 1, "second subscribe call is a no-op (store already flagged)");
+  // Dispatch with unchanged queue refs → identity check bails, no walk, no emit.
+  posted.length = 0;
+  subs[0]();
+  check(posted.filter((p) => p.event === "queueSnapshot").length === 0, "dispatch with identical queue refs → no snapshot (O(1) identity check)");
+  // Real change (new arrays, as redux reducers produce) → one debounced snapshot with the new rows.
+  state = { queue: { items: [renderer("s1", "S1", "A"), renderer("s2", "S2", "A", true), renderer("s3", "S3", "A")] } };
+  posted.length = 0;
+  subs[0]();
+  const snaps23 = posted.filter((p) => p.event === "queueSnapshot");
+  check(snaps23.length === 1 && snaps23[0].items.map((i) => i.videoId).join() === "s1,s2,s3", "store change → exactly one debounced snapshot with the new rows (got " + JSON.stringify(snaps23.map((s) => s.items.map((i) => i.videoId))) + ")");
+  // Identical re-invoke → nothing (refs unchanged; sig would dedup anyway).
+  posted.length = 0;
+  subs[0]();
+  check(posted.filter((p) => p.event === "queueSnapshot").length === 0, "identical re-invoke → no snapshot");
+  // A getState that throws inside dispatch must never propagate into the page.
+  const badState = { get queue() { throw new Error("dispatch-time"); } };
+  const stateRef = state;
+  store.getState = () => badState;
+  let threw = false;
+  try { subs[0](); } catch (_) { threw = true; }
+  check(threw === false, "a throwing store read inside dispatch never throws into the page");
+  store.getState = () => stateRef;
+}
+
+// ---- Case 24: safety-poll rate policy (fresh bridge instance) --------------
+// The 2 s poll is the behaviour; the rate adapts: paused → 10 s,
+// playing → 2 s (10 s only under a live subscription, case 25). Rate
+// changes are no-ops when unchanged, and while backgrounded they only
+// record the desired rate — media-key pause/play fires onStateChange
+// with the app inactive and must not restart the poll back there.
+{
+  const listeners = {};
+  elements.clear(); lists.clear();
+  window.__riffQueueStoreSubscribed = false;
+  window.__riffSafetyPollPaused = false;
+  window.__riffDebug.stopSafetyPoll();
+  elements.set("ytmusic-player", { playerApi: { addEventListener: (n, fn) => { listeners[n] = fn; }, getVideoData: () => ({ video_id: "r1", title: "R1", author: "A" }) } });
+  elements.set("ytmusic-player-bar", {});
+  posted.length = 0;
+  (0, eval)(src);   // fresh bridge: setup() subscribes + starts the poll
+  let entry = intervals.get(window.__riffSafetyPollId);
+  check(!!window.__riffSafetyPollId && entry?.ms === 2000, "setup starts the safety poll at the 2 s baseline");
+  const idAt2s = window.__riffSafetyPollId;
+  listeners.onStateChange(1);
+  check(window.__riffSafetyPollId === idAt2s, "state 1 at an unchanged rate is a no-op (same interval, no churn)");
+  listeners.onStateChange(2);
+  check(intervals.get(window.__riffSafetyPollId)?.ms === 10000, "paused → poll slows to 10 s");
+  listeners.onStateChange(2);
+  const idAt10s = window.__riffSafetyPollId;
+  check(window.__riffSafetyPollId === idAt10s, "repeated paused state → still no churn");
+  listeners.onStateChange(1);
+  check(intervals.get(window.__riffSafetyPollId)?.ms === 2000, "playing again → poll back to 2 s");
+  // Backgrounded: the poll stops; state changes record the rate only.
+  window.musicBridge.setBackgrounded(true);
+  check(window.__riffSafetyPollId === null && window.__riffSafetyPollPaused === true, "backgrounding stops the poll");
+  listeners.onStateChange(2);   // media-key pause while the app is inactive
+  check(window.__riffSafetyPollId === null && window.__riffSafetyPollMs === 10000, "state change while backgrounded records the desired rate but starts nothing");
+  window.musicBridge.setBackgrounded(false);
+  check(intervals.get(window.__riffSafetyPollId)?.ms === 10000, "foregrounding resumes at the recorded rate");
+  listeners.onStateChange(3);   // buffering: not a rate input
+  check(intervals.get(window.__riffSafetyPollId)?.ms === 10000, "state 3 (buffering) leaves the poll rate alone");
+  listeners.onStateChange(1);   // leave the bridge in the playing state for case 25
+  check(intervals.get(window.__riffSafetyPollId)?.ms === 2000, "back to playing → 2 s");
+}
+
+// ---- Case 25: poll tick — subscribe-less fallback, upgrade, downgrade ------
+{
+  elements.clear(); lists.clear();
+  window.__riffDebug.stopSafetyPoll();
+  window.__riffQueueStoreSubscribed = false;
+  window.__riffSafetyPollPaused = false;
+
+  // (a) subscribe-less store: the poll path still emits the mirror.
+  const stateA = { queue: { items: [renderer("f1", "F1", "A", true)] } };
+  elements.set("ytmusic-app", { store: { getState: () => stateA } });
+  posted.length = 0; window.__riffQueueSig = undefined;
+  window.__riffDebug.startSafetyPoll(2000);
+  check(intervals.get(window.__riffSafetyPollId)?.ms === 2000, "25a: poll started at 2 s");
+  intervals.get(window.__riffSafetyPollId).fn();
+  const snapsA = posted.filter((p) => p.event === "queueSnapshot");
+  check(snapsA.length === 1 && snapsA[0].items[0].videoId === "f1", "25a: subscribe-less store → the poll path still emits the mirror");
+  check(window.__riffQueueStoreSubscribed !== true && intervals.get(window.__riffSafetyPollId)?.ms === 2000, "25a: no subscribe surface → stays on the 2 s poll");
+
+  // (b) store WITH subscribe appears later: the tick subscribes (retry-from-poll,
+  // since setup gates only on playerApi + player-bar) and drops to the watchdog.
+  const subs = []; let unsubbed = false;
+  const stateB = { queue: { items: [renderer("w1", "W1", "A", true)] } };
+  elements.set("ytmusic-app", { store: { getState: () => stateB, subscribe: (fn) => { subs.push(fn); return () => { unsubbed = true; }; } } });
+  posted.length = 0; window.__riffQueueSig = undefined;
+  intervals.get(window.__riffSafetyPollId).fn();
+  check(subs.length === 1 && window.__riffQueueStoreSubscribed === true, "25b: a later poll tick subscribes once the store appears");
+  check(intervals.get(window.__riffSafetyPollId)?.ms === 10000, "25b: subscribed → poll drops to the 10 s watchdog");
+  check(posted.filter((p) => p.event === "queueSnapshot").length === 1, "25b: the subscribing tick still emits its snapshot (subscription never delays the mirror)");
+  // A dispatch-driven change reaches the mirror with NO poll tick at all.
+  stateB.queue = { items: [renderer("w1", "W1", "A"), renderer("w2", "W2", "A", true)] };
+  posted.length = 0;
+  subs[0]();
+  const snapsB = posted.filter((p) => p.event === "queueSnapshot");
+  check(snapsB.length === 1 && snapsB[0].items.map((i) => i.videoId).join() === "w1,w2", "25b: store dispatch → snapshot without waiting for a poll tick");
+
+  // (c) in-place mutation the subscription cannot see: the watchdog tick still
+  // emits it, then downgrades back to the 2 s poll — sticky, one diagnostic.
+  stateB.queue.items.push(renderer("w3", "W3", "A"));
+  posted.length = 0;
+  intervals.get(window.__riffSafetyPollId).fn();
+  const snapsC = posted.filter((p) => p.event === "queueSnapshot");
+  check(snapsC.length === 1 && snapsC[0].items.length === 3, "25c: watchdog still emits the change the subscription missed");
+  check(window.__riffQueueStoreSubscribed === false && unsubbed === true, "25c: missed change → subscription downgraded and unsubscribed");
+  check(intervals.get(window.__riffSafetyPollId)?.ms === 2000, "25c: downgrade reverts to the 2 s poll");
+  check(posted.filter((p) => p.event === "diagnostic" && p.msg.includes("downgraded")).length === 1, "25c: exactly one downgrade diagnostic");
+  posted.length = 0;
+  intervals.get(window.__riffSafetyPollId).fn();
+  check(window.__riffQueueStoreSubscribed === false && subs.length === 1, "25c: a downgraded page never re-subscribes (no flip-flop)");
 }
 
 console.log(`\nJS RESULT: ${passes} passed, ${failures} failed`);

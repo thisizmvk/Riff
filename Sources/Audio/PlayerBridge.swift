@@ -175,6 +175,14 @@ final class PlayerBridge {
     @ObservationIgnored
     private var pendingCommands: [String] = []
 
+    /// Generation id of the last `pageInfo` handshake we logged. The
+    /// page posts one handshake per document with a fresh random id;
+    /// deduping on it keeps the .notice line at once-per-page even if
+    /// the JS ever re-emits (the override refresh itself is idempotent
+    /// and runs on every arrival).
+    @ObservationIgnored
+    private var lastPageInfoGeneration: String? = nil
+
     init(innerTube: InnerTubeClient) {
         self.innerTube = innerTube
         // Restore playback prefs from prior launch.
@@ -614,7 +622,7 @@ final class PlayerBridge {
         // Attribution line: every play() is a page NAVIGATION (reload).
         // In a log capture, a reload-per-advance pattern traces back to
         // whoever called this — pair with the "ready" events.
-        Log.bridge.debug("play(item:) id=\(item.id, privacy: .public) clearQueue=\(clearQueue, privacy: .public)")
+        Audit.note("play(item:) id=\(item.id) clearQueue=\(clearQueue)")
         // A fresh-context play is a deliberate user click (every UI
         // entry point uses the default clearQueue: true): the song they
         // just chose must not be force-paused by a sleep-timer /
@@ -865,7 +873,7 @@ final class PlayerBridge {
         queue.archive(item)
         let newCount = queue.playedEntries.count
         guard queue.playedEntries.last != prevTail else {
-            Log.bridge.debug("archiveCurrent: skip dup last=\(item.title, privacy: .public) (\(item.id, privacy: .public))")
+            Log.bridge.debug("archiveCurrent: skip dup last=\(item.title, privacy: .private) (\(item.id, privacy: .public))")
             return
         }
         // `contextStartHistoryIndex` is an absolute index into
@@ -877,7 +885,7 @@ final class PlayerBridge {
         if trimmed > 0 {
             contextStartHistoryIndex = max(0, contextStartHistoryIndex - trimmed)
         }
-        Log.bridge.debug("archiveCurrent: appended \(item.title, privacy: .public) (\(item.id, privacy: .public)); historySize=\(newCount)")
+        Log.bridge.debug("archiveCurrent: appended \(item.title, privacy: .private) (\(item.id, privacy: .public)); historySize=\(newCount)")
     }
 
     /// Pull /next for the given videoId — populates `upNext` and stashes
@@ -1297,16 +1305,16 @@ final class PlayerBridge {
         guard related.isEmpty, relatedSections.isEmpty, let id = relatedBrowseId else { return }
         relatedTask?.cancel()
         relatedTask = Task { [innerTube, weak self] in
-            // One network call, two parses — fetch the raw body via
-            // `related(browseId:)` and reuse the same response for
-            // sections by hitting the public static parser. We can't
-            // share the body across two async calls without duplicating
-            // the request, so the section fetch issues its own call.
-            // Browse responses are cached server-side; both land fast.
-            async let itemsTask = (try? await innerTube.related(browseId: id)) ?? []
-            async let sectionsTask = (try? await innerTube.relatedSections(browseId: id)) ?? []
-            let items = await itemsTask
-            let sections = await sectionsTask
+            // One network call, two parses — `relatedPage(browseId:)`
+            // POSTs the browseId once and projects the same body into
+            // the flat song list and the titled shelves. Failure is
+            // all-or-nothing: a transient error leaves both `related`
+            // and `relatedSections` empty, so the isEmpty guard above
+            // lets the next trigger (tab open, toggle, /next) retry.
+            let page: (items: [MediaItem], sections: [HomeSection])? =
+                try? await innerTube.relatedPage(browseId: id)
+            let items: [MediaItem] = page?.items ?? []
+            let sections: [HomeSection] = page?.sections ?? []
             if Task.isCancelled { return }
             await MainActor.run {
                 guard let self else { return }
@@ -1489,7 +1497,7 @@ final class PlayerBridge {
         contextPlaylistId = playlistId
         contextIsPageOrdered = true
         contextStartHistoryIndex = queue.playedEntries.count
-        Log.bridge.debug("context switch → list=\(playlistId ?? "nil", privacy: .public) (display cleared, click grace armed)")
+        Audit.note("context switch → list=\(playlistId ?? "nil") (display cleared, click grace armed)")
     }
 
     private func navigate(_ url: String) async {
@@ -1582,7 +1590,7 @@ final class PlayerBridge {
         //    mirrored autoplay rows after an album. No reload → no
         //    re-rolled tail; no off-list row pushed into an album list.
         if QueuePolicy.nextUsesPageNative(advanceInputs(for: head)) {
-            Log.bridge.debug("next() → page-native advance (head=\(head.id, privacy: .public))")
+            Audit.note("next() → page-native advance (head=\(head.id))")
             userClickedAt = Date()   // user intent; don't let enforcement misread the jump
             await eval("window.musicBridge.next()")
             return
@@ -1676,10 +1684,15 @@ final class PlayerBridge {
 
     /// Called from the progress handler: record position for spoken
     /// tracks every ~5s; clear it once the episode is essentially done.
-    private func trackEpisodePosition(videoId: String, elapsed: Double, duration: Double) {
+    /// `force: true` (used on pause) bypasses the 5 s rate limit so the
+    /// saved resume position is exact at the moment the user stops —
+    /// the kind/duration guards still apply.
+    private func trackEpisodePosition(videoId: String, elapsed: Double, duration: Double, force: Bool = false) {
         guard currentKind == .spoken, duration > 0 else { return }
         let now = Date()
-        guard now.timeIntervalSince(lastEpisodePositionSaveAt) >= 5 else { return }
+        if !force {
+            guard now.timeIntervalSince(lastEpisodePositionSaveAt) >= 5 else { return }
+        }
         lastEpisodePositionSaveAt = now
         if elapsed >= duration - Self.episodeFinishedMarginSeconds {
             if episodePositions.removeValue(forKey: videoId) != nil { persistEpisodePositions() }
@@ -1998,7 +2011,7 @@ final class PlayerBridge {
             rowIsInQueue: upNext.contains(where: { $0.id == item.id })) {
             userClickedAt = Date()   // user intent; arrival ≠ old head is expected
             pendingJumpTarget = item.id
-            Log.bridge.debug("skipTo: page-queue jump → \(item.id, privacy: .public)")
+            Audit.note("skipTo: page-queue jump → \(item.id)")
             await eval("window.musicBridge.queuePlayItem(\(item.id.jsonQuoted))")
             // Verify by arrival: if the page didn't jump (row not
             // rendered / selector drift), fall back to navigation so the
@@ -2381,6 +2394,31 @@ final class PlayerBridge {
 
     private func handle(_ event: HiddenPlayerWebView.BridgeEvent) {
         switch event {
+        case .pageInfo(let info):
+            // Handshake — posted once per DOCUMENT, immediately before
+            // `ready`, and re-posted by every navigate() (each is a
+            // full page load). Deliberately its own case OUTSIDE the
+            // `.ready` first-time gate: the protocol override must
+            // refresh per document, not once per app run.
+            //
+            // The page's live clientVersion overrides the
+            // hand-maintained constant; the value is untrusted page
+            // input headed for an HTTP header, so InnerTubeClient
+            // validates it and falls back to the constant otherwise.
+            // sessionIndex / hl / gl / visitorData ride along
+            // informationally only (the review refuted redirecting
+            // X-Goog-AuthUser: in-app sign-in yields a single-account
+            // jar), and visitorData arrives pre-redacted as a length —
+            // the diagnostics export promises "no secrets".
+            InnerTubeClient.updatePageClientVersion(info.clientVersion)
+            if info.generation != lastPageInfoGeneration {
+                lastPageInfoGeneration = info.generation
+                let caps: String = info.capabilities
+                    .sorted(by: { $0.key < $1.key })
+                    .map { "\($0.key)=\($0.value ? 1 : 0)" }
+                    .joined(separator: " ")
+                Log.bridge.notice("pageInfo schema=\(info.schema) clientVersion=\(info.clientVersion, privacy: .public) sessionIndex=\(info.sessionIndex, privacy: .public) hl=\(info.hl, privacy: .public) gl=\(info.gl, privacy: .public) visitorDataLen=\(info.visitorDataLength) caps: \(caps, privacy: .public) selectors: \(info.selectorSummary, privacy: .public)")
+            }
         case .ready:
             // `ready` fires once per DOCUMENT, and every navigate() is a
             // full `location.href` load: the user script re-runs with a
@@ -2391,6 +2429,12 @@ final class PlayerBridge {
             // re-applied on EVERY ready — gating them with the flush made
             // the second page silently drop Repeat One / crossfade /
             // normalization / rate / volume while the UI showed them on.
+            // Audit token distinct from the raw per-event "… ready" line
+            // (HiddenPlayerWebView logs that one at debug): fieldcheck
+            // counts THIS token as a page reload when grading a journal
+            // export, and must never double-count a live capture that
+            // carries both lines.
+            Audit.note("page ready → bridge armed")
             let isFirstReady = !bridgeReady
             bridgeReady = true
             Task { [weak self] in
@@ -2435,6 +2479,20 @@ final class PlayerBridge {
             if playing, Date() < pauseEnforceUntil {
                 Log.bridge.debug("stateChanged(playing) inside pause-enforce window → forcing pause")
                 Task { [weak self] in await self?.forcePause() }
+            }
+            if !playing {
+                // Exact position on pause: the periodic snapshot can
+                // lag by up to `snapshotEverySeconds`, and
+                // `willTerminate` never fires on a crash, force-quit,
+                // or power loss. Pausing is the natural "done for now"
+                // signal, so persist the precise elapsed time — and,
+                // for spoken content, the episode resume position —
+                // right here. Both writes are cheap UserDefaults sets;
+                // no navigation, no page interaction.
+                snapshotSession()
+                if let vid = currentTrack?.videoId {
+                    trackEpisodePosition(videoId: vid, elapsed: elapsed, duration: duration, force: true)
+                }
             }
         case .ended:
             // Track reached end-of-stream. If an `endOfTrack` sleep
@@ -2523,7 +2581,7 @@ final class PlayerBridge {
                     if let head, case .navigate = advancePlan(to: head) {
                         Task { [weak self] in
                             await self?.play(item: head, clearQueue: false)
-                            Log.bridge.debug(".ended → Swift fallback played head=\(head.id, privacy: .public)")
+                            Audit.note(".ended → Swift fallback played head=\(head.id)")
                         }
                     }
                 } else {
@@ -2537,7 +2595,7 @@ final class PlayerBridge {
                     // playing surfaces as a trackChanged, and that's
                     // where we reconcile against the shown queue.
                     pendingNextURLArmed = false
-                    Log.bridge.debug(".ended → JS armed via pending URL; WYSIWYG reconciled in trackChanged")
+                    Audit.note(".ended → JS armed via pending URL; WYSIWYG reconciled in trackChanged")
                 }
             }
         case .queueAddResult(let videoId, let position, let ok, let via):
@@ -2556,12 +2614,12 @@ final class PlayerBridge {
                 queue.remove(videoId: videoId)
                 pageOwnedQueuedIds.insert(videoId)
                 Task { [weak self] in await self?.syncPendingNextURL() }
-                Log.bridge.debug("queueAddResult VERIFIED (\(position, privacy: .public) via \(via, privacy: .public)) → page owns \(videoId, privacy: .public); Swift fallback dropped")
+                Audit.note("queueAddResult VERIFIED (\(position) via \(via)) → page owns \(videoId); Swift fallback dropped")
             } else {
-                Log.bridge.debug("queueAddResult ok=\(ok, privacy: .public) pos=\(position, privacy: .public) via=\(via, privacy: .public) id=\(videoId, privacy: .public) (fallback retained)")
+                Audit.note("queueAddResult ok=\(ok) pos=\(position) via=\(via) id=\(videoId) (fallback retained)")
             }
         case .queueRemoveResult(let videoId, let ok, let via):
-            Log.bridge.debug("queueRemoveResult ok=\(ok, privacy: .public) via=\(via, privacy: .public) id=\(videoId, privacy: .public)")
+            Audit.note("queueRemoveResult ok=\(ok) via=\(via) id=\(videoId)")
             // On ok the JS re-emits the mirror (display already updated
             // locally). On failure the page still holds the row and WILL
             // play it: put it back on screen NOW (a change-gated snapshot
@@ -2612,7 +2670,7 @@ final class PlayerBridge {
             // a snapshot that doesn't know our current track is not from
             // our page: drop it (the new page emits within ~2s).
             if let curId, !items.contains(where: { $0.videoId == curId }) {
-                Log.bridge.debug("queueSnapshot: dropped stale snapshot (no \(curId, privacy: .public) among \(items.count) rows)")
+                Audit.note("queueSnapshot: dropped stale snapshot (no \(curId) among \(items.count) rows)")
                 break
             }
             // Upcoming = rows after the page's selected row; fall back
@@ -2652,7 +2710,7 @@ final class PlayerBridge {
             if !smartShuffleInjectedIds.isEmpty { smartShuffleInjectedIds = [] }
             // head3: the first shown rows, by id — lets a log capture
             // verify WYSIWYG (next trackChanged id should equal head3[0]).
-            Log.bridge.debug("queueSnapshot → mirrored \(mapped.count) rows (of \(items.count)); head3=\(mapped.prefix(3).map(\.id).joined(separator: ","), privacy: .public)")
+            Audit.note("queueSnapshot → mirrored \(mapped.count) rows (of \(items.count)); head3=\(mapped.prefix(3).map(\.id).joined(separator: ","))")
         case .progress(let t, let d):
             // Filter stale events that arrive in the window right after a
             // track change. YT Music's SPA can keep firing `timeupdate`
@@ -2771,7 +2829,7 @@ final class PlayerBridge {
                !sameVideoId, !withinClickGrace,
                let head = upNext.first(where: { $0.id != currentTrack?.videoId }),
                head.id != id {
-                Log.bridge.debug("trackChanged: arrived \(id, privacy: .public) ≠ shown head \(head.id, privacy: .public); autoplay diverged → overriding to head")
+                Audit.note("trackChanged: arrived \(id) ≠ shown head \(head.id); autoplay diverged → overriding to head")
                 Task { [weak self] in await self?.play(item: head, clearQueue: false) }
                 return
             }
@@ -2803,7 +2861,7 @@ final class PlayerBridge {
                 else if isJump { label = "jump (row tap)" }
                 else if shownHead == "nil" { label = "context start (no shown head)" }
                 else { label = "MISMATCH" }
-                Log.bridge.debug("advance arrived=\(id, privacy: .public) shownHead=\(shownHead, privacy: .public) \(label, privacy: .public)")
+                Audit.note("advance arrived=\(id) shownHead=\(shownHead) \(label)")
             }
             if !sameVideoId, upNext.contains(where: { $0.id == id }) {
                 _ = queue.consumeUpTo(videoId: id)

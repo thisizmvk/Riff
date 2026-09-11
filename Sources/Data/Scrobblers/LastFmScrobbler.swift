@@ -19,10 +19,12 @@ import CryptoKit
 ///
 /// Because we don't ship our own API key (last.fm key registration is
 /// per-developer), we BYO-key: user pastes their own API key + secret
-/// from https://www.last.fm/api/account/create. They also paste their
-/// last.fm username + the session key they got from a one-off OAuth
-/// dance (we provide a helper inside this file for that). All four
-/// values live in Keychain.
+/// from https://www.last.fm/api/account/create into Settings, then
+/// clicks "Connect" — Riff runs the three-step dance itself via
+/// `fetchToken` / `authorizationURL` / `fetchSession` (the browser hop
+/// happens between steps 1 and 3) and stores the resulting username +
+/// session key. An advanced fallback in Settings still accepts a
+/// hand-obtained session key. All four values live in Keychain.
 ///
 /// Signature
 /// ---------
@@ -248,6 +250,32 @@ final class LastFmScrobbler: ScrobblerService, Sendable {
         let code: Int
         let message: String
         var errorDescription: String? { "last.fm error \(code): \(message)" }
+    }
+
+    /// User-facing status line for a failed Connect step. Pure —
+    /// no network, no state — so tests can pin the mapping.
+    ///
+    /// Codes (https://www.last.fm/api/errorcodes) seen in this flow:
+    ///   14 = token not yet authorized — the user hasn't clicked
+    ///        "Allow" in the browser yet;
+    ///   15 = token expired — tokens live ~60 minutes;
+    ///   10 = invalid API key; 13 = invalid signature, i.e. the
+    ///        shared secret is wrong (auth.getToken is signed, so a
+    ///        typo'd secret fails right at step 1).
+    static func connectFailureMessage(for error: Error) -> String {
+        if let apiError = error as? APIError {
+            switch apiError.code {
+            case 14, 15:
+                return "Approve Riff in the browser first, then click Done (tokens expire after 60 minutes)."
+            case 10:
+                return "last.fm rejected the API key — check it and try again."
+            case 13:
+                return "last.fm rejected the signature — check the shared secret and try again."
+            default:
+                return "last.fm error \(apiError.code): \(apiError.message)"
+            }
+        }
+        return error.localizedDescription
     }
 
     /// If `data` is a last.fm error envelope, return it as a typed error.

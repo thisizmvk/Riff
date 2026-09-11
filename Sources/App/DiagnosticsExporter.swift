@@ -41,11 +41,15 @@ enum DiagnosticsExporter {
     /// detached utility-priority task so Settings and the player UI
     /// don't freeze; only the Finder reveal hops back to the main actor.
     static func exportDiagnostics() async -> ExportResult {
+        // Snapshot the queue-audit journal on the main actor BEFORE
+        // detaching — `Audit.ring` is MainActor state; the copy is a
+        // plain [String] the detached writer can carry.
+        let journal: [String] = Audit.ring
         let result = await Task.detached(priority: .utility) {
-            DiagnosticsExporter.writeDump()
+            DiagnosticsExporter.writeDump(journal: journal)
         }.value
 
-        // 5. Reveal the folder in Finder so the user can attach it
+        // 6. Reveal the folder in Finder so the user can attach it
         //    to a bug report in one gesture. AppKit — main actor.
         if case .success(let dumpDir) = result {
             NSWorkspace.shared.activateFileViewerSelecting([dumpDir])
@@ -57,7 +61,7 @@ enum DiagnosticsExporter {
     /// below) so it can run on the detached task: it touches only
     /// FileManager, UserDefaults, Bundle/ProcessInfo and a local
     /// OSLogStore — no main-actor state.
-    nonisolated private static func writeDump() -> ExportResult {
+    nonisolated private static func writeDump(journal: [String]) -> ExportResult {
         let df = DateFormatter()
         df.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         let stamp = df.string(from: Date())
@@ -79,7 +83,16 @@ enum DiagnosticsExporter {
         writeManifest(to: dumpDir.appendingPathComponent("manifest.txt"),
                       crashReportCount: crashReportCount)
 
-        // 3. os_log dump for this app session. OSLogStore does the
+        // 3. Queue audit journal — the in-memory ring `Audit.note()`
+        //    feeds, snapshotted by exportDiagnostics. Written BEFORE the
+        //    OSLogStore step so it lands even if the store query throws,
+        //    and independent of whether the store persisted anything:
+        //    this is the artifact `tools/harness/fieldcheck.sh` grades
+        //    (lines are already `[<ISO8601>] [bridge] <msg>`). Ids and
+        //    verdict labels only — no titles (see `Audit` in Log.swift).
+        writeBridgeJournal(journal, to: dumpDir.appendingPathComponent("bridge-journal.log"))
+
+        // 4. os_log dump for this app session. OSLogStore does the
         //    heavy lifting; we filter by subsystem to skip the
         //    thousands of unrelated system log lines that would
         //    make the dump unreadable.
@@ -92,7 +105,7 @@ enum DiagnosticsExporter {
             try? msg.write(to: dumpDir.appendingPathComponent("riff.log"), atomically: true, encoding: .utf8)
         }
 
-        // 4. Played history — plain JSON so a maintainer can eyeball
+        // 5. Played history — plain JSON so a maintainer can eyeball
         //    the recent play sequence without loading the app.
         writePlayedHistorySnapshot(to: dumpDir.appendingPathComponent("played-history.json"))
 
@@ -195,6 +208,9 @@ enum DiagnosticsExporter {
         lines.append("  riff.log             — Riff log entries (notice level and above) from THIS app")
         lines.append("                         session only; logs from earlier launches aren't readable")
         lines.append("                         from inside the sandbox")
+        lines.append("  bridge-journal.log   — queue audit trail from this session (up to 2000 lines):")
+        lines.append("                         video/playlist ids and verdict labels only, no track")
+        lines.append("                         titles. Gradeable offline with tools/harness/fieldcheck.sh")
         lines.append("  played-history.json  — timestamped playback journal (up to 500 items)")
         if crashReportCount > 0 {
             lines.append("  crash-reports/       — \(crashReportCount) MetricKit crash/hang payload(s) from the last")
@@ -206,6 +222,8 @@ enum DiagnosticsExporter {
         }
         lines.append("")
         lines.append("This dump contains no API keys, no OAuth tokens, and no cookies.")
+        lines.append("bridge-journal.log identifies content by video and playlist ids only")
+        lines.append("(a playlist id you played appears there); it never contains titles.")
         lines.append("played-history.json includes your listening history (track titles,")
         lines.append("artists, artwork URLs, and timestamps) — review before sharing.")
         try? lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
@@ -219,6 +237,16 @@ enum DiagnosticsExporter {
         #else
         return "unknown"
         #endif
+    }
+
+    /// Write the queue-audit journal snapshot. A stub line (which
+    /// matches none of fieldcheck's tokens) when nothing was audited
+    /// yet, so the reader knows the file wasn't truncated by accident.
+    nonisolated private static func writeBridgeJournal(_ journal: [String], to url: URL) {
+        let text: String = journal.isEmpty
+            ? "No queue audit entries in this app session yet."
+            : journal.joined(separator: "\n")
+        try? (text + "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
     nonisolated private static func writeOSLog(to url: URL) throws {
@@ -264,9 +292,10 @@ enum DiagnosticsExporter {
 
     nonisolated private static func writePlayedHistorySnapshot(to url: URL) {
         // Read directly from the persisted journal rather than the
-        // in-memory copy, so the dump reflects what would survive
-        // a relaunch. Same key + shape PlayedHistoryStore writes.
-        guard let data = UserDefaults.standard.data(forKey: "player.history.v3") else {
+        // in-memory copy, so the dump reflects what would survive a
+        // relaunch. The key stays private to PlayedHistoryStore — a
+        // future schema/version bump can't silently empty this file.
+        guard let data = PlayedHistoryStore.rawJournalData() else {
             let stub = "[]"
             try? stub.write(to: url, atomically: true, encoding: .utf8)
             return

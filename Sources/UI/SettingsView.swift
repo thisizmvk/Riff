@@ -54,6 +54,16 @@ struct SettingsView: View {
     @State private var lastFmSessionKeyBuffer: String = ""
     @State private var lastFmEnabled: Bool = false
     @State private var lastFmStatus: String? = nil
+    /// In-app connect flow (fetchToken → browser approve →
+    /// fetchSession). The pending token survives the browser round
+    /// trip; "Done — I approved it" shows only while it is non-nil.
+    @State private var lastFmPendingToken: String? = nil
+    @State private var lastFmConnectInFlight: Bool = false
+    /// Discloses the manual username + session-key paste fallback.
+    @State private var lastFmShowAdvanced: Bool = false
+    /// Display-only username shown next to the section title once
+    /// credentials exist (mirrors the ListenBrainz "• name" pattern).
+    @State private var lastFmConnectedUsername: String? = nil
 
     @State private var listenBrainzTokenBuffer: String = ""
     @State private var listenBrainzEnabled: Bool = false
@@ -63,6 +73,10 @@ struct SettingsView: View {
 
     @State private var diagnosticsExporting: Bool = false
     @State private var diagnosticsStatus: String? = nil
+
+    /// Confirmation shown after "Clear caches" runs. Cleared each time
+    /// Settings reopens (it's `@State`), so it never goes stale.
+    @State private var clearCachesStatus: String? = nil
 
     /// Confirms "Clear all overrides" — action is destructive and
     /// affects every locally-edited track title/artist/album.
@@ -123,6 +137,8 @@ struct SettingsView: View {
                         trackOverridesSection
                     }
                     Divider().background(Theme.divider)
+                    storageSection
+                    Divider().background(Theme.divider)
                     diagnosticsSection
                     Divider().background(Theme.divider)
                     aboutSection
@@ -154,6 +170,7 @@ struct SettingsView: View {
             lastFmEnabled = UserDefaults.standard.bool(forKey: ScrobblerDefaults.lastFmEnabled)
             if let stored = LastFmScrobbler.storedCredentials() {
                 lastFmUsernameBuffer = stored.username
+                lastFmConnectedUsername = stored.username
             }
             listenBrainzEnabled = UserDefaults.standard.bool(forKey: ScrobblerDefaults.listenBrainzEnabled)
             listenBrainzUsername = UserDefaults.standard.string(forKey: ScrobblerDefaults.listenBrainzUsername)
@@ -484,6 +501,11 @@ struct SettingsView: View {
                     Text("last.fm")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white)
+                    if let name = lastFmConnectedUsername, !name.isEmpty {
+                        Text("• \(name)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.Text.secondary)
+                    }
                     Spacer()
                     Toggle("", isOn: Binding(
                         get: { lastFmEnabled },
@@ -497,7 +519,7 @@ struct SettingsView: View {
                     .disabled(LastFmScrobbler.storedCredentials() == nil)
                 }
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Register an API account (link below), then run the one-off Approve flow to grant Riff scrobble permission.")
+                    Text("Register an API account (link below), paste the key + shared secret, then click Connect — Riff opens last.fm in your browser so you can approve access.")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -509,41 +531,7 @@ struct SettingsView: View {
                     }
                 }
 
-                Group {
-                    labeledField("Username", text: $lastFmUsernameBuffer, placeholder: "your-lastfm-name")
-                    labeledSecureField("API key", text: $lastFmAPIKeyBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste API key" : "•••• saved — paste to replace")
-                    labeledSecureField("Shared secret", text: $lastFmAPISecretBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste shared secret" : "•••• saved — paste to replace")
-                    labeledSecureField("Session key", text: $lastFmSessionKeyBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste session key" : "•••• saved — paste to replace")
-                }
-
-                Text("Get a session key by running last.fm's desktop-app auth flow once: visit last.fm/api/auth/?api_key=YOUR_KEY in a browser, click Approve, then exchange the resulting token for a session key via auth.getSession. The session key never expires.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(Theme.Text.tertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack {
-                    Button("Save credentials") { saveLastFmCredentials() }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.red)
-                        .disabled(!canSaveLastFm)
-                    if LastFmScrobbler.storedCredentials() != nil {
-                        Button("Clear") {
-                            LastFmScrobbler.clearCredentials()
-                            lastFmUsernameBuffer = ""
-                            lastFmAPIKeyBuffer = ""
-                            lastFmAPISecretBuffer = ""
-                            lastFmSessionKeyBuffer = ""
-                            lastFmEnabled = false
-                            UserDefaults.standard.set(false, forKey: ScrobblerDefaults.lastFmEnabled)
-                            lastFmStatus = "Removed."
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    Spacer()
-                    if let status = lastFmStatus {
-                        Text(status).font(.system(size: 12)).foregroundStyle(.green)
-                    }
-                }
+                lastFmConnectFlow
             }
             .padding(12)
             .background(Theme.Fill.faint)
@@ -632,6 +620,193 @@ struct SettingsView: View {
         }
     }
 
+    /// last.fm credential block: key + secret fields, the in-app
+    /// Connect dance (fetchToken → browser approve → fetchSession),
+    /// and an advanced disclosure for pasting a hand-obtained
+    /// session key. Kept out of `scrobblingSection`'s body so the
+    /// long section stays readable.
+    private var lastFmConnectFlow: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            labeledSecureField("API key", text: $lastFmAPIKeyBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste API key" : "•••• saved — paste to replace")
+            labeledSecureField("Shared secret", text: $lastFmAPISecretBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste shared secret" : "•••• saved — paste to replace")
+
+            HStack {
+                Button {
+                    connectLastFm()
+                } label: {
+                    if lastFmConnectInFlight {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(lastFmPendingToken == nil ? "Connect" : "Restart connect")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.red)
+                .disabled(lastFmConnectInFlight || !canConnectLastFm)
+                if lastFmPendingToken != nil {
+                    Button("Done — I approved it") { finishLastFmConnect() }
+                        .buttonStyle(.bordered)
+                        .disabled(lastFmConnectInFlight)
+                }
+                if LastFmScrobbler.storedCredentials() != nil {
+                    Button("Clear") { clearLastFmCredentials() }
+                        .buttonStyle(.bordered)
+                }
+                Spacer()
+                if let status = lastFmStatus {
+                    Text(status).font(.system(size: 12)).foregroundStyle(.green)
+                }
+            }
+
+            Text("Connect fetches a request token, opens last.fm in your browser for the one-off Approve, then exchanges the token for a session key when you click Done. The session key never expires.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.Text.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            DisclosureGroup(isExpanded: $lastFmShowAdvanced) {
+                VStack(alignment: .leading, spacing: 8) {
+                    labeledField("Username", text: $lastFmUsernameBuffer, placeholder: "your-lastfm-name")
+                    labeledSecureField("Session key", text: $lastFmSessionKeyBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste session key" : "•••• saved — paste to replace")
+                    Text("Already ran auth.getSession yourself? Paste your username and the resulting session key here — the API key and shared secret fields above are still required.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Text.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Save credentials") { saveLastFmCredentials() }
+                        .buttonStyle(.bordered)
+                        .disabled(!canSaveLastFm)
+                }
+                .padding(.top, 6)
+            } label: {
+                Text("Advanced: paste a session key")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.Text.secondary)
+            }
+        }
+    }
+
+    /// Connect needs a key + secret: fresh ones from the on-screen
+    /// buffers, or — for a re-auth after e.g. a revoked session
+    /// (error 9) — the stored pair. `storedCredentials()` is nil
+    /// until all four items exist, so a first-time connect must
+    /// come from the buffers.
+    private var canConnectLastFm: Bool {
+        let k = lastFmAPIKeyBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let s = lastFmAPISecretBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !k.isEmpty && !s.isEmpty { return true }
+        return LastFmScrobbler.storedCredentials() != nil
+    }
+
+    /// The (apiKey, apiSecret) pair the connect flow should sign
+    /// with. Buffer values win field-by-field; stored values fill
+    /// the gaps (partial rotation, or a plain re-auth).
+    private func connectLastFmKeyPair() -> (apiKey: String, apiSecret: String)? {
+        let k = lastFmAPIKeyBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let s = lastFmAPISecretBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !k.isEmpty && !s.isEmpty { return (apiKey: k, apiSecret: s) }
+        guard let stored = LastFmScrobbler.storedCredentials() else { return nil }
+        let key: String = k.isEmpty ? stored.apiKey : k
+        let secret: String = s.isEmpty ? stored.apiSecret : s
+        return (apiKey: key, apiSecret: secret)
+    }
+
+    /// Step 1 + 2: fetch a request token (which also validates the
+    /// key/secret, since auth.getToken is signed) and open the
+    /// approve page in the default browser. The token is kept in
+    /// `lastFmPendingToken` across the browser round trip.
+    private func connectLastFm() {
+        guard let pair = connectLastFmKeyPair() else { return }
+        lastFmConnectInFlight = true
+        lastFmPendingToken = nil
+        lastFmStatus = nil
+        Task {
+            do {
+                let token = try await LastFmScrobbler.fetchToken(apiKey: pair.apiKey, apiSecret: pair.apiSecret)
+                let approveURL = LastFmScrobbler.authorizationURL(apiKey: pair.apiKey, token: token)
+                await MainActor.run {
+                    lastFmConnectInFlight = false
+                    lastFmPendingToken = token
+                    lastFmStatus = "Approve Riff in the browser, then click Done."
+                    NSWorkspace.shared.open(approveURL)
+                }
+            } catch {
+                let message = LastFmScrobbler.connectFailureMessage(for: error)
+                await MainActor.run {
+                    lastFmConnectInFlight = false
+                    lastFmStatus = message
+                }
+            }
+        }
+    }
+
+    /// Step 3: exchange the approved token for (username, session
+    /// key) and persist all four credentials. On "not yet
+    /// authorized" (error 14) the pending token is kept so the user
+    /// can approve and click Done again; an expired token (15)
+    /// needs a fresh Connect.
+    private func finishLastFmConnect() {
+        guard let token = lastFmPendingToken else { return }
+        guard let pair = connectLastFmKeyPair() else {
+            // Buffers were emptied mid-flow and nothing is stored —
+            // the exchange can't be signed any more.
+            lastFmStatus = "API key and shared secret are required — paste them and Connect again."
+            lastFmPendingToken = nil
+            return
+        }
+        lastFmConnectInFlight = true
+        lastFmStatus = nil
+        Task {
+            do {
+                let result = try await LastFmScrobbler.fetchSession(token: token, apiKey: pair.apiKey, apiSecret: pair.apiSecret)
+                await MainActor.run {
+                    lastFmConnectInFlight = false
+                    do {
+                        try LastFmScrobbler.saveCredentials(
+                            username: result.username,
+                            apiKey: pair.apiKey,
+                            apiSecret: pair.apiSecret,
+                            sessionKey: result.sessionKey
+                        )
+                        lastFmPendingToken = nil
+                        // Clear the secret buffers so they don't
+                        // linger in memory (same as manual save).
+                        lastFmAPIKeyBuffer = ""
+                        lastFmAPISecretBuffer = ""
+                        lastFmSessionKeyBuffer = ""
+                        lastFmUsernameBuffer = result.username
+                        lastFmConnectedUsername = result.username
+                        lastFmStatus = "Connected — \(result.username)."
+                    } catch {
+                        lastFmStatus = "Couldn't save to Keychain."
+                    }
+                }
+            } catch {
+                let message = LastFmScrobbler.connectFailureMessage(for: error)
+                await MainActor.run {
+                    lastFmConnectInFlight = false
+                    if let apiError = error as? LastFmScrobbler.APIError, apiError.code != 14 {
+                        // Anything but "approve first" invalidates
+                        // the pending token.
+                        lastFmPendingToken = nil
+                    }
+                    lastFmStatus = message
+                }
+            }
+        }
+    }
+
+    private func clearLastFmCredentials() {
+        LastFmScrobbler.clearCredentials()
+        lastFmUsernameBuffer = ""
+        lastFmAPIKeyBuffer = ""
+        lastFmAPISecretBuffer = ""
+        lastFmSessionKeyBuffer = ""
+        lastFmPendingToken = nil
+        lastFmConnectedUsername = nil
+        lastFmEnabled = false
+        UserDefaults.standard.set(false, forKey: ScrobblerDefaults.lastFmEnabled)
+        lastFmStatus = "Removed."
+    }
+
     private var canSaveLastFm: Bool {
         let u = lastFmUsernameBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
         let k = lastFmAPIKeyBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -671,6 +846,7 @@ struct SettingsView: View {
             lastFmAPIKeyBuffer = ""
             lastFmAPISecretBuffer = ""
             lastFmSessionKeyBuffer = ""
+            lastFmConnectedUsername = finalUsername
             lastFmStatus = "Saved."
         } catch {
             lastFmStatus = "Couldn't save to Keychain."
@@ -1231,6 +1407,44 @@ struct SettingsView: View {
         }
     }
 
+    /// Storage: user-facing "Clear caches" for the two disk caches that
+    /// otherwise have no in-app reclaim path — the Home feed snapshot
+    /// (`~/Library/Caches/dev.riff.app/homeFeed.json`) and the shared
+    /// URL cache (artwork/images; configured up to 512 MB on disk).
+    /// Deliberately scoped to exactly those two: library, played
+    /// history, settings, and AI caches are untouched, matching the
+    /// `HomeFeedCache.clear()` doc comment.
+    private var storageSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Storage")
+            Text("Clear the cached Home feed and downloaded artwork images. Your library, played history, and settings are not affected — caches rebuild as you browse.")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.Text.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button {
+                    clearCaches()
+                } label: {
+                    Label("Clear caches", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+                if let msg = clearCachesStatus {
+                    Text(msg)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.green)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+
+    private func clearCaches() {
+        HomeFeedCache.clear()
+        URLCache.shared.removeAllCachedResponses()
+        clearCachesStatus = "Caches cleared."
+    }
+
     /// "Export diagnostics" — writes a folder to ~/Downloads with
     /// this process's recent os_log entries + the played-history
     /// journal + a small manifest (app + macOS version). No API
@@ -1240,7 +1454,7 @@ struct SettingsView: View {
     private var diagnosticsSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("Diagnostics")
-            Text("Export a folder to ~/Downloads with recent Riff logs, your played-history journal, and version info. Useful when filing a bug report. Contains no API keys, cookies, or account identifiers.")
+            Text("Export a folder to ~/Downloads with recent Riff logs, the playback audit journal (track ids only, no titles), your played-history journal, and version info. Useful when filing a bug report. Contains no API keys, cookies, or account identifiers.")
                 .font(.system(size: 12))
                 .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
