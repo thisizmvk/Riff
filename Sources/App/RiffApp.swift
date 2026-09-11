@@ -124,7 +124,7 @@ struct RiffApp: App {
             FloatingMiniPlayerView()
                 .environment(environment)
         }
-        .defaultSize(width: 280, height: 300)
+        .defaultSize(width: 300, height: 340)
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
 

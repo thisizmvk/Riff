@@ -118,12 +118,12 @@ struct FloatingMiniPlayerView: View {
                 Spacer(minLength: 0)
             }
         }
-        // Bounds are generous (a square or portrait tile is fine — the
-        // user settled on roughly 280×300) but finite, so the window can
-        // never open at artwork or screen size. The user's own size is
-        // persisted by the scene and honoured within these bounds.
-        .frame(minWidth: 220, idealWidth: 280, maxWidth: 600,
-               minHeight: 200, idealHeight: 300, maxHeight: 600)
+        // FIXED tile size. A min/ideal/max range let the window resize
+        // itself run-to-run ("size is dynamic"); the user wants one stable
+        // tile. 300×340 matches the ~280×300 they liked, with room for the
+        // title block. WindowFloater locks the NSWindow min==max so the
+        // resize handles are inert too.
+        .frame(width: 300, height: 340)
         // Artwork as a BACKGROUND, never a layout sibling. As a ZStack
         // child, the `.fill` image proposed its natural pixel size and
         // the resizable window opened at artwork size — "a full screen
@@ -221,13 +221,43 @@ private struct WindowFloater: NSViewRepresentable {
     }
 
     final class FloaterView: NSView {
+        private var observers: [NSObjectProtocol] = []
+
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             configureWindow()
+            // The level did not stick before: SwiftUI (and AppKit on app
+            // (de)activation) reset a Window scene's level back to normal,
+            // so the tile dropped behind other apps. Re-assert .floating
+            // whenever activation changes or this window becomes key/main.
+            guard observers.isEmpty, window != nil else { return }
+            let nc = NotificationCenter.default
+            let names: [Notification.Name] = [
+                NSApplication.didBecomeActiveNotification,
+                NSApplication.didResignActiveNotification,
+                NSWindow.didBecomeKeyNotification,
+                NSWindow.didBecomeMainNotification,
+            ]
+            for name in names {
+                observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.reassertLevel() }
+                })
+            }
         }
-        func configureWindow() {
+
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+        /// Cheap, idempotent — only the properties AppKit/SwiftUI can
+        /// reset out from under us.
+        private func reassertLevel() {
             guard let window else { return }
             if window.level != .floating { window.level = .floating }
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        }
+
+        func configureWindow() {
+            guard let window else { return }
+            window.level = .floating
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             window.hidesOnDeactivate = false
             window.titleVisibility = .hidden
@@ -235,15 +265,13 @@ private struct WindowFloater: NSViewRepresentable {
             window.styleMask.insert(.fullSizeContentView)
             window.isMovableByWindowBackground = true
             window.backgroundColor = .black
-            // A tile, not a document: bounded size and no zoom-to-screen.
-            // The user's chosen size IS restored (they resize it once and
-            // expect it back); only an oversize frame is reset.
-            window.minSize = NSSize(width: 220, height: 200)
-            window.maxSize = NSSize(width: 600, height: 600)
+            // Lock the size: min == max == the fixed content size, so the
+            // window can't be dragged to a new size or reopen at another.
+            let size = NSSize(width: 300, height: 340)
+            window.minSize = size
+            window.maxSize = size
+            window.setContentSize(size)
             window.standardWindowButton(.zoomButton)?.isEnabled = false
-            if window.frame.width > 600 || window.frame.height > 600 {
-                window.setContentSize(NSSize(width: 280, height: 300))
-            }
         }
     }
 }

@@ -138,7 +138,12 @@ struct DetailView: View {
                     .padding(.horizontal, 32)
                 }
             }
-            .padding(.vertical, 24)
+            .padding(.top, 24)
+            // Clear the mini-player bar (~72pt) when one is showing so the
+            // last related rail's tile TITLES are not clipped by it — they
+            // were rendering below the fold ("relevant albums don't show
+            // names"). Plain 24 when nothing is playing.
+            .padding(.bottom, env.player.hasTrack ? 96 : 24)
         }
         .background(Theme.Bg.base.ignoresSafeArea())
         .task(id: item.id) {

@@ -86,6 +86,27 @@ struct SearchResultRow: View {
                         if item.kind != .episode {
                             Button("Start radio") { Task { await play() } }
                         }
+                        // Albums / playlists / podcasts queue their whole
+                        // tracklist, resolved from the container id via
+                        // playNextResolved / addToQueueEndResolved — the
+                        // same path the tile hover menu uses. Search rows
+                        // only offered Play / Radio, so an album found via
+                        // search had no way to be queued.
+                        if item.kind == .album || item.kind == .playlist || item.kind == .podcast {
+                            Divider()
+                            Button("Play next") {
+                                Task {
+                                    let n = await env.player.playNextResolved(item)
+                                    env.showToast(n > 0 ? "Added \(n) to play next" : "Nothing to queue")
+                                }
+                            }
+                            Button("Add to queue") {
+                                Task {
+                                    let n = await env.player.addToQueueEndResolved(item)
+                                    env.showToast(n > 0 ? "Added \(n) to queue" : "Nothing to queue")
+                                }
+                            }
+                        }
                     }
             }
         }
