@@ -1996,6 +1996,16 @@ final class PlayerBridge {
     /// inclusive: taps deep in the queue would silently drop
     /// every intervening row (C1).
     func skipTo(item: MediaItem) async {
+        // Re-entrancy guard (field 2026-09-11: "the entire queue gets
+        // shuffled when I change a song"). A single row tap was
+        // dispatching skipTo twice: the first took the page-jump branch
+        // (no reload) and the arrival consumed the row from upNext; the
+        // second no longer saw it in the queue, fell through to the
+        // navigating branch below, and reloaded — which re-rolls the
+        // radio and replaces the whole list. Ignore a tap on the track
+        // that is already playing, or on one whose page-jump is still in
+        // flight; neither is a real "skip to a different row".
+        if currentTrack?.videoId == item.id || pendingJumpTarget == item.id { return }
         // Row tap / Next is user intent: the tapped track must not be
         // force-paused by a sleep-timer / autoplay-off stop window.
         pauseEnforceUntil = .distantPast
