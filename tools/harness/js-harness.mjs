@@ -1016,5 +1016,77 @@ let firstPageInfoGeneration = null;
   check(window.__riffQueueStoreSubscribed === false && subs.length === 1, "25c: a downgraded page never re-subscribes (no flip-flop)");
 }
 
+// ---- Case 23: queueRemoveViaPage — row-endpoint leg + field selector -------
+{
+  const MENU_SEL23 = "ytmusic-menu-popup-renderer ytmusic-menu-navigation-item-renderer, ytmusic-menu-popup-renderer ytmusic-menu-service-item-renderer, tp-yt-paper-listbox ytmusic-menu-service-item-renderer";
+  // (a) The store item's own menu model carries a REMOVE_FROM_QUEUE
+  //     service endpoint → resolveCommand executes it; no store
+  //     dispatch, no DOM menu, mirror re-emitted.
+  elements.clear(); lists.clear();
+  const rr = renderer("e1", "E1", "A", true);
+  const victim = renderer("e2", "E2", "A");
+  victim.playlistPanelVideoRenderer.menu = { menuRenderer: { items: [
+    { menuServiceItemRenderer: { icon: { iconType: "ADD_TO_PLAYLIST" }, serviceEndpoint: { other: {} } } },
+    { menuServiceItemRenderer: { icon: { iconType: "REMOVE_FROM_QUEUE" }, serviceEndpoint: { removeFromQueueEndpoint: { videoId: "e2" } } } },
+  ] } };
+  const st23 = { queue: { items: [rr, victim] } };
+  const dispatched23 = [];
+  const resolved23 = [];
+  elements.set("ytmusic-app", { store: { getState: () => st23, dispatch: (a) => dispatched23.push(a) } });
+  elements.set("ytmusic-player-bar", {
+    resolveCommand: (cmd) => {
+      resolved23.push(cmd);
+      st23.queue.items = st23.queue.items.filter((x) => x.playlistPanelVideoRenderer.videoId !== "e2");
+    },
+  });
+  posted.length = 0; window.__riffQueueSig = undefined;
+  window.musicBridge.queueRemoveViaPage("e2");
+  await settle(); await settle();
+  const ra23 = posted.filter((x) => x.event === "queueRemoveResult");
+  check(ra23.length === 1 && ra23[0].ok === true && ra23[0].via === "endpoint:resolveCommand@ytmusic-player-bar", "row-endpoint removal verified → ok=true endpoint:resolveCommand (got " + JSON.stringify(ra23) + ")");
+  check(resolved23.length === 1 && !!resolved23[0].removeFromQueueEndpoint, "the row's OWN removeFromQueue serviceEndpoint was resolved (icon-matched, locale-independent)");
+  check(dispatched23.length === 0, "no store dispatch on the endpoint leg");
+  check(posted.some((x) => x.event === "queueSnapshot" && !x.items.some((r2) => r2.videoId === "e2")), "mirror re-emitted without the removed row");
+
+  // (b) Current field row shape: the ⋯ button matches ONLY
+  //     "ytmusic-menu-renderer yt-button-shape button" (row dump
+  //     2026-09-11). The menu leg must find it.
+  elements.clear(); lists.clear();
+  const st23b = { queue: { items: [renderer("f1", "F1", "A", true), renderer("f2", "F2", "A")] } };
+  elements.set("ytmusic-app", { store: { getState: () => st23b, dispatch: () => {} } });
+  const openedB = [];
+  const fieldRow = (id) => ({
+    data: renderer(id, id, "A"),
+    querySelector: (sel) => {
+      if (sel.startsWith("a[")) return { href: "https://music.youtube.com/watch?v=" + id };
+      // Only the modern selector list (leading yt-button-shape term)
+      // finds the button; legacy-only lists get nothing.
+      if (sel.indexOf("yt-button-shape button") >= 0) return { click: () => openedB.push(id) };
+      return null;
+    },
+  });
+  lists.set("ytmusic-player-queue-item", [fieldRow("f1"), fieldRow("f2")]);
+  lists.set(MENU_SEL23, [{ textContent: "Remove from queue", querySelector: () => null,
+    click: () => { st23b.queue.items = st23b.queue.items.filter((x) => x.playlistPanelVideoRenderer.videoId !== "f2"); } }]);
+  posted.length = 0; window.__riffQueueSig = undefined;
+  window.musicBridge.queueRemoveViaPage("f2");
+  await settle(); await settle();
+  const rb23 = posted.filter((x) => x.event === "queueRemoveResult");
+  check(rb23.length === 1 && rb23[0].ok === true && rb23[0].via === "menu:removed" && openedB.length === 1 && openedB[0] === "f2", "yt-button-shape row button found → menu leg removes (got " + JSON.stringify(rb23) + ")");
+
+  // (c) Total failure posts the leg-by-leg chain diagnostic.
+  elements.clear(); lists.clear();
+  const st23c = { queue: { items: [renderer("g1", "G1", "A", true), renderer("g2", "G2", "A")] } };
+  elements.set("ytmusic-app", { store: { getState: () => st23c, dispatch: () => {} } });
+  lists.set("ytmusic-player-queue-item", []);
+  posted.length = 0;
+  window.musicBridge.queueRemoveViaPage("g2");
+  await settle(); await settle();
+  const rc23 = posted.filter((x) => x.event === "queueRemoveResult");
+  const chain = posted.find((x) => x.event === "diagnostic" && x.msg.indexOf("queueRemove chain:") === 0);
+  check(rc23.length === 1 && rc23[0].ok === false && rc23[0].via === "menu:no-row", "all legs failed → honest ok=false with the menu leg's via");
+  check(!!chain && chain.msg.indexOf("ctrl=controller:absent") > 0 && chain.msg.indexOf("endpoint:no-menu-data") > 0 && chain.msg.indexOf("menu=menu:no-row") > 0, "failure chain diagnostic names every leg (got " + (chain ? chain.msg : "none") + ")");
+}
+
 console.log(`\nJS RESULT: ${passes} passed, ${failures} failed`);
 process.exit(failures === 0 ? 1 - 1 : 1);

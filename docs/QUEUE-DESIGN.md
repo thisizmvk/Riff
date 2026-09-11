@@ -163,9 +163,12 @@ this list, the policy, and its table row together — never one alone.
     queue CONTROLLER (`ytmusic-player-bar.queue`: `getItems`,
     `removeItem`, `selectQueueItem`, `shuffle`) and a command resolver
     (`ytmusic-player-bar.resolveCommand`). Remove = controller
-    `removeItem` (index looked up in the controller's own list, verified
-    against the store; item-object form second; the row's "⋯ → Remove
-    from queue" menu third). Play Next / Add to queue = the page's own
+    `removeItem` first; then the row's OWN menu-model service endpoint
+    (icon REMOVE_FROM_QUEUE — locale-independent) through
+    `resolveCommand`; then the rendered "⋯" menu (button selector from
+    the field row dump: `ytmusic-menu-renderer yt-button-shape button`).
+    Every leg is verified against the store; a total failure journals
+    the leg-by-leg chain. Play Next / Add to queue = the page's own
     `queueAddEndpoint` through `resolveCommand`, verified by store
     presence; on success Swift drops its copy and the row is page-owned
     (plays natively, no pending-URL navigation). On any failure the

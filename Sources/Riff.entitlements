@@ -4,48 +4,11 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<key>com.apple.security.files.downloads.read-write</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
 	<key>com.apple.security.network.client</key>
 	<true/>
-	<!--
-	  PASSKEY SIGN-IN (WebAuthn in the sign-in WKWebView).
-
-	  Passkeys are invoked by Google's own login page via the
-	  WebAuthn API — Riff builds no passkey UI. For the WKWebView
-	  to hand the request to the platform authenticator (Touch ID /
-	  iCloud Keychain) where the relying party is google.com, the
-	  app needs the "Web Browser Public Key Credential" capability.
-
-	  Enable on a PAID account (this entitlement, like App Groups,
-	  will not provision on a free personal team) by adding:
-
-	      <key>com.apple.developer.web-browser.public-key-credential</key>
-	      <true/>
-
-	  Caveats verified before shipping this on:
-	    - Requires macOS 14+ (already our deployment target).
-	    - Apple gates this capability; it is intended for browser
-	      apps and may be rejected for a music client — test the
-	      full Google passkey flow on a real signed build before
-	      relying on it.
-	    - Without it, Google's login page falls back to password +
-	      2FA inside the WebView, which works today.
-	-->
-
-	<!--
-	  App Groups (needed by the Notification Center widget to read the
-	  shared NowPlayingSnapshot) require a PAID Apple Developer Program
-	  seat. Free personal-team builds cannot provision App Groups, so
-	  Xcode fails to generate a profile when this entitlement is set.
-
-	  Re-enable for paid accounts by adding back:
-
-	      <key>com.apple.security.application-groups</key>
-	      <array>
-	          <string>group.dev.riff.app</string>
-	      </array>
-
-	  Without App Groups, the widget still builds but cannot read live
-	  state from the main app — it falls back to its empty placeholder.
-	-->
 </dict>
 </plist>

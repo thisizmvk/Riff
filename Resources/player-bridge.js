@@ -356,7 +356,22 @@
                 // coherent — one level below the row menu, same effect.
                 removeViaController(videoId, (ok, via) => {
                     if (ok) { finish(true, via); return; }
-                    removeViaRowMenu(videoId, finish);
+                    // The store item's own menu model carries the page's
+                    // "Remove from queue" service endpoint (identified by
+                    // the locale-independent icon enum); the command
+                    // resolver executes it exactly like a real menu click,
+                    // with no DOM menu involved.
+                    removeViaStoreEndpoint(videoId, (ok2, via2) => {
+                        if (ok2) { finish(true, via2); return; }
+                        removeViaRowMenu(videoId, (ok3, via3) => {
+                            if (!ok3) {
+                                // Which leg failed and why — the journal
+                                // line for the NEXT field capture.
+                                postEvent({ event: "diagnostic", msg: "queueRemove chain: ctrl=" + via + " endpoint=" + via2 + " menu=" + via3 });
+                            }
+                            finish(ok3, via3);
+                        });
+                    });
                 });
             } catch (e) {
                 finish(false, "threw:" + (e && e.message ? e.message : String(e)));
@@ -1047,6 +1062,50 @@
     // the item object; each attempt is verified against the store so a
     // no-op never reports success and a wrong row is impossible (the
     // index is looked up in the same list the controller holds).
+    // Remove through the row's OWN menu model: the store item's
+    // renderer carries menu.menuRenderer.items whose "Remove from
+    // queue" entry is identified by its icon enum (REMOVE_FROM_QUEUE —
+    // locale-independent, unlike the label text). Executing its
+    // serviceEndpoint through the page's command resolver is the same
+    // page action as a menu click, minus the fragile DOM menu.
+    function removeViaStoreEndpoint(videoId, done) {
+        const slice = resolveQueueSlice();
+        const all = (((slice.q && slice.q.items) || [])).concat((slice.q && slice.q.automixItems) || []);
+        let renderer = null;
+        for (const it of all) {
+            const r = unwrapQueueItem(it);
+            if (r && r.videoId === videoId) { renderer = r; break; }
+        }
+        const menuItems = renderer && renderer.menu && renderer.menu.menuRenderer && renderer.menu.menuRenderer.items;
+        if (!menuItems || !menuItems.length) { done(false, "endpoint:no-menu-data"); return; }
+        let endpoint = null;
+        for (const mi of menuItems) {
+            const svc = mi && mi.menuServiceItemRenderer;
+            const icon = svc && svc.icon && svc.icon.iconType;
+            if (icon && String(icon).indexOf("REMOVE") >= 0 && svc.serviceEndpoint) {
+                endpoint = svc.serviceEndpoint;
+                break;
+            }
+        }
+        if (!endpoint) { done(false, "endpoint:no-remove-item"); return; }
+        const host = resolveCommandHost();
+        if (!host) { done(false, "endpoint:no-resolver"); return; }
+        try {
+            host.el.resolveCommand(endpoint, host.el);
+        } catch (e) {
+            done(false, "endpoint:threw");
+            return;
+        }
+        let tries = 0;
+        const poll = () => {
+            tries += 1;
+            if (!queueHoldsVideo(videoId)) { done(true, "endpoint:resolveCommand@" + host.via); return; }
+            if (tries >= 8) { done(false, "endpoint:unverified"); return; }
+            setTimeout(poll, 250);
+        };
+        setTimeout(poll, 250);
+    }
+
     function removeViaController(videoId, done) {
         const c = resolveQueueController();
         if (!c || typeof c.q.removeItem !== "function") { done(false, "controller:absent"); return; }
@@ -1054,7 +1113,19 @@
         try { items = c.q.getItems() || []; } catch (e) { done(false, "controller:getItems-threw"); return; }
         let idx = -1;
         for (let i = 0; i < items.length; i++) { if (controllerItemVideoId(items[i]) === videoId) { idx = i; break; } }
-        if (idx < 0) { done(false, "controller:not-in-items"); return; }
+        if (idx < 0) {
+            // The controller's items are not renderer-shaped here —
+            // dump the first item's keys once so the next capture
+            // names the real shape.
+            if (!window.__riffCtrlShapeReported && items.length) {
+                window.__riffCtrlShapeReported = true;
+                try {
+                    postEvent({ event: "diagnostic", msg: "queueRemove ctrlItem keys=" + Object.keys(items[0]).slice(0, 15).join(",") });
+                } catch (e) { /* shape dump is best-effort */ }
+            }
+            done(false, "controller:not-in-items");
+            return;
+        }
         const attempt = (arg, label, next) => {
             try { c.q.removeItem(arg); } catch (e) { next(); return; }
             setTimeout(() => {
@@ -1193,7 +1264,10 @@
         }, 250);
     }
     // Selectors are the fragile external API — kept in one place.
-    const QUEUE_ROW_MENU_BUTTON = "ytmusic-menu-renderer #button, ytmusic-menu-renderer yt-icon-button, ytmusic-menu-renderer tp-yt-paper-icon-button, #menu button";
+    // Field row dump 2026-09-11 ("queueApi: row parts="): the ⋯ button
+    // is ytmusic-menu-renderer > div#top-level-buttons > yt-button-shape
+    // > button on the current page. Older shapes kept as fallbacks.
+    const QUEUE_ROW_MENU_BUTTON = "ytmusic-menu-renderer yt-button-shape button, ytmusic-menu-renderer button, ytmusic-menu-renderer #button, ytmusic-menu-renderer yt-icon-button, ytmusic-menu-renderer tp-yt-paper-icon-button, #menu button";
     const QUEUE_MENU_ITEMS = "ytmusic-menu-popup-renderer ytmusic-menu-navigation-item-renderer, ytmusic-menu-popup-renderer ytmusic-menu-service-item-renderer, tp-yt-paper-listbox ytmusic-menu-service-item-renderer";
     // Shuffle control candidates across YT builds (player-bar control
     // and queue-panel control) — shared by toggleShuffle and the
