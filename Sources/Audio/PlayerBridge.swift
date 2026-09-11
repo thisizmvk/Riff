@@ -51,6 +51,14 @@ final class PlayerBridge {
     private(set) var lyricsLines: [InnerTubeClient.LyricLine] = []
     private(set) var lyricsTimed: Bool = false
     private(set) var lyricsLoading: Bool = false
+    /// Terminal "YT has no lyrics for this track": the fetch completed
+    /// and the server returned none. Distinct from a transient failure
+    /// (offline blip, cancelled request), which leaves everything nil
+    /// so reopening the tab retries. The UI renders its own empty
+    /// state; the copy is never stored in `lyrics` — a sentinel string
+    /// there leaked into the toolbar gates, the translation / X-Ray
+    /// prompts and the lyric-card seed as if it were real lyric text.
+    private(set) var lyricsUnavailable: Bool = false
     private(set) var liked: Bool = false
     /// Whether the full-screen Now Playing view is presented.
     var isFullPlayerOpen: Bool = false
@@ -99,6 +107,17 @@ final class PlayerBridge {
     /// concurrent `/next` requests race and the last-to-complete wins,
     /// which may not be the most-recent click.
     @ObservationIgnored private var nextQueueTask: Task<Void, Never>?
+    /// In-flight per-track METADATA fetch (like state + lyrics/related
+    /// browse ids) — deliberately separate from `nextQueueTask` so it
+    /// can never cancel an in-flight QUEUE refresh (a play(item:) seed
+    /// or the autoplay auto-extension). See `refreshTrackMetadata`.
+    @ObservationIgnored private var trackMetadataTask: Task<Void, Never>?
+    /// In-flight lyrics / related fetches. Held so a track change can
+    /// cancel them — their completions also identity-check against the
+    /// browse id, so a slow response for track A can never land on
+    /// track B's tabs (or feed B's Smart Shuffle pool).
+    @ObservationIgnored private var lyricsTask: Task<Void, Never>?
+    @ObservationIgnored private var relatedTask: Task<Void, Never>?
 
     /// Fires after any state change (track, play/pause, progress). Used by
     /// AppEnvironment to drive NowPlayingCenter without coupling the two
@@ -234,11 +253,25 @@ final class PlayerBridge {
         let savedAt: Date
     }
 
-    /// (videoId, elapsed) pending playback. Set during init when a
-    /// LastSession was restored; consumed by the next user-initiated
-    /// play action (`togglePlay` checks for it first). nil otherwise.
+    /// (videoId, elapsed, duration) pending playback. Set during init
+    /// when a LastSession was restored; consumed by the next
+    /// user-initiated play action (`togglePlay` checks for it first).
+    /// nil otherwise. `duration` is the snapshot's saved duration —
+    /// used by the resume SEEK to verify the loaded media is the
+    /// saved track and not a pre-roll ad (durations must match).
     @ObservationIgnored
-    private var pendingResume: (videoId: String, elapsed: Double)? = nil
+    private var pendingResume: (videoId: String, elapsed: Double, duration: Double)? = nil
+
+    /// Armed by togglePlay's resume path AFTER the navigation is
+    /// issued; consumed by the first `.progress` event whose duration
+    /// matches the saved snapshot. Event-driven replacement for the
+    /// old fixed 1.5 s sleep-then-seek, which skipped the seek on a
+    /// cold WebView / slow network (the 40-minute podcast restarted
+    /// from 0) and could race YT's own initial seek on a fast one.
+    /// Cleared by `navigate()` (any supervening navigation) and
+    /// `play(item:)` (explicit click supersedes the resume).
+    @ObservationIgnored
+    private var pendingResumeSeek: (videoId: String, elapsed: Double, duration: Double)? = nil
 
     /// Persist a snapshot of the currently-playing track. Called on
     /// every progress event (rate-limited via `lastSnapshotAt`) and on
@@ -296,7 +329,7 @@ final class PlayerBridge {
         duration = snap.duration
         // Stash the resume target — consumed by the first user play.
         if snap.elapsed > 1 {
-            pendingResume = (videoId: snap.videoId, elapsed: snap.elapsed)
+            pendingResume = (videoId: snap.videoId, elapsed: snap.elapsed, duration: snap.duration)
         }
     }
 
@@ -314,6 +347,8 @@ final class PlayerBridge {
     /// Repeat All uses the entries from here forward as the cycle:
     /// when the queue drains at end-of-track, everything played in
     /// this context (plus the finishing track) is re-queued in order.
+    /// `archiveCurrent` shifts it down whenever the history cap trims
+    /// entries off the front, so it keeps naming the same entry.
     @ObservationIgnored private var contextStartHistoryIndex: Int = 0
     /// The track ids belonging to the current deterministic context
     /// (album / playTracks list), plus its playlist id. Used by the
@@ -344,11 +379,24 @@ final class PlayerBridge {
     /// The row the user just tapped (page-queue jump). Its arrival is a
     /// deliberate jump, not divergence — the audit line labels it so.
     @ObservationIgnored private var pendingJumpTarget: String? = nil
+    /// In-flight row-tap verification: the 2.5 s "did the page jump?"
+    /// timer armed by `skipTo`. Stored (mirroring `nextQueueTask`) so
+    /// the matching arrival or a supervening navigation can cancel it
+    /// — an untracked timer raised a false "couldn't play" toast when
+    /// the user tapped a row and then clicked elsewhere within 2.5 s.
+    @ObservationIgnored private var jumpVerifyTask: Task<Void, Never>? = nil
     /// Wall-clock deadline for pause enforcement. After a sleep-timer
     /// end-of-track or an autoplay-off end-of-queue pause, the page can
     /// still natively start the next track; any `stateChanged(playing)`
-    /// before this deadline is force-paused. Cleared on user-initiated
-    /// togglePlay so the user can always override.
+    /// before this deadline is force-paused. Cleared by every DELIBERATE
+    /// user transport so the user can always override: togglePlay,
+    /// play(item:) with clearQueue (click-to-play / start radio),
+    /// next(), previous(), skipTo(item:) (row tap), playTracks, and
+    /// beginNavigatedContext (playlist / album / artist-radio play).
+    /// Never by the automatic paths: the trackChanged enforcement snap
+    /// and the `.ended` fallback call play(item:, clearQueue: false),
+    /// and clearing there would let the page's native advance play
+    /// straight through a sleep-timer stop.
     @ObservationIgnored private var pauseEnforceUntil: Date = .distantPast
     private(set) var shuffleEnabled: Bool = false
     /// B5 Smart Shuffle. When ON *together with* `shuffleEnabled`, the
@@ -380,7 +428,11 @@ final class PlayerBridge {
         }
         repeatMode = next
         UserDefaults.standard.set(next.rawValue, forKey: Self.repeatKey)
-        await eval("window.musicBridge.setRepeatLoop(\(next == .one ? "true" : "false"))")
+        // An armed end-of-track sleep timer lifted the loop so the track
+        // can end; don't re-arm it under the timer (clearSleepTimerState
+        // restores it once the timer is done or cancelled).
+        let loop = next == .one && !endOfTrackArmed
+        await eval("window.musicBridge.setRepeatLoop(\(loop ? "true" : "false"))")
     }
 
     /// Toggle shuffle. Affects only what `next()` does — see the
@@ -532,6 +584,16 @@ final class PlayerBridge {
         await navigate(watchURL(videoId: videoId, playlistId: list))
     }
 
+    /// For callers that reach `play(videoId:)` directly on a deliberate
+    /// user action (opening a YT Music link). play(videoId:) itself can't
+    /// do this — it is also the tail of the automatic play(item:,
+    /// clearQueue: false) snaps. Arms the click grace and lifts the
+    /// pause-enforcement window, like every other user transport.
+    func noteUserTransportIntent() {
+        userClickedAt = Date()
+        pauseEnforceUntil = .distantPast
+    }
+
     /// Click-to-play with an item we already have full metadata for (search
     /// rows, home carousels, library lists). Pre-populates `currentTrack`
     /// so the mini-bar shows the right title/artist/artwork *immediately*,
@@ -553,6 +615,16 @@ final class PlayerBridge {
         // In a log capture, a reload-per-advance pattern traces back to
         // whoever called this — pair with the "ready" events.
         Log.bridge.debug("play(item:) id=\(item.id, privacy: .public) clearQueue=\(clearQueue, privacy: .public)")
+        // A fresh-context play is a deliberate user click (every UI
+        // entry point uses the default clearQueue: true): the song they
+        // just chose must not be force-paused by a sleep-timer /
+        // autoplay-off stop window. clearQueue: false is ALSO the
+        // automatic enforcement snap and the .ended fallback, which must
+        // keep the window — user callers of that form (next, skipTo,
+        // playTracks) lift it themselves.
+        if clearQueue {
+            pauseEnforceUntil = .distantPast
+        }
         // Archive the outgoing track before we overwrite `currentTrack`.
         // Without this, an explicit click (search row, home carousel,
         // Up Next row) never reaches the archive branch in
@@ -585,8 +657,11 @@ final class PlayerBridge {
         // A pending resume from restoreLastSession only applies to the
         // very first play. An explicit click of a different song
         // supersedes it — clear so the next togglePlay doesn't yank
-        // the WebView back to the old track.
+        // the WebView back to the old track. Same for an armed resume
+        // SEEK (also cleared in navigate(); repeated here so the
+        // supersede rule is visible at the click entry point).
         pendingResume = nil
+        pendingResumeSeek = nil
         currentTrack = Track(
             videoId: item.id,
             title: item.title,
@@ -637,8 +712,17 @@ final class PlayerBridge {
             selectedChipId = nil
             activeChip = nil
         }
-        related = []
-        lyrics = nil
+        // Per-track state is UNKNOWN until fresh metadata lands. The
+        // heart must not carry the previous track's like state — a
+        // click in that stale window inverts the user's intent (it
+        // sends removeLike for a track that isn't liked). And the
+        // lyrics/related BROWSE IDS must reset along with the content:
+        // with the old id left in place, a tab open across the change
+        // would fetch (or keep showing) the PREVIOUS track's lyrics
+        // under the new track. refreshTrackMetadata / the /next
+        // refresh below repopulate all of it, identity-checked.
+        liked = false
+        resetPerTrackTabState()
         // Chip clear used to also live here, unconditionally — which
         // dropped the active chip on every `next()` / autoplay
         // (clearQueue=false), so chips were effectively single-track.
@@ -675,6 +759,14 @@ final class PlayerBridge {
         if clearQueue {
             currentPlaylistId = radio
             refreshNextQueueAndIds(forVideoId: item.id, playlistId: radio)
+        } else {
+            // No /next fires on this path, and the follow-up
+            // trackChanged is same-videoId (currentTrack was just set
+            // optimistically above) so the new-track branch won't
+            // fetch either. Without this, the like state and lyrics /
+            // related keys reset above would stay empty for the whole
+            // track. Metadata only — the queue regions stay untouched.
+            refreshTrackMetadata(forVideoId: item.id, playlistId: currentPlaylistId)
         }
         onUpdate?()
         // Thread the effective playlist context to the JS bridge so
@@ -765,15 +857,27 @@ final class PlayerBridge {
             albumId: old.albumId, artistId: old.artistId
         )
         // QueueManager handles dedup-against-tail + cap + persist
-        // synchronously, so we don't have to.
-        let prevSize = queue.playedHistory.count
+        // synchronously, so we don't have to. "Appended" is judged by the
+        // TAIL entry, not the size: at the history cap an append trims
+        // the front and the size stays put.
+        let prevCount = queue.playedEntries.count
+        let prevTail = queue.playedEntries.last
         queue.archive(item)
-        let newSize = queue.playedHistory.count
-        if newSize == prevSize {
+        let newCount = queue.playedEntries.count
+        guard queue.playedEntries.last != prevTail else {
             Log.bridge.debug("archiveCurrent: skip dup last=\(item.title, privacy: .public) (\(item.id, privacy: .public))")
-        } else {
-            Log.bridge.debug("archiveCurrent: appended \(item.title, privacy: .public) (\(item.id, privacy: .public)); historySize=\(newSize)")
+            return
         }
+        // `contextStartHistoryIndex` is an absolute index into
+        // playedEntries; entries trimmed off the front by the cap shift
+        // every index down. Shift the Repeat All anchor with them —
+        // otherwise, at the cap, the anchor points past the end for the
+        // whole context and the cycle collapses to the current track.
+        let trimmed = max(0, prevCount + 1 - newCount)
+        if trimmed > 0 {
+            contextStartHistoryIndex = max(0, contextStartHistoryIndex - trimmed)
+        }
+        Log.bridge.debug("archiveCurrent: appended \(item.title, privacy: .public) (\(item.id, privacy: .public)); historySize=\(newCount)")
     }
 
     /// Pull /next for the given videoId — populates `upNext` and stashes
@@ -930,17 +1034,32 @@ final class PlayerBridge {
                 }
                 self.lyricsBrowseId = response.lyricsBrowseId
                 self.relatedBrowseId = response.relatedBrowseId
-                self.liked = response.likeStatus == .like
+                // Scope the like flag to the track it was fetched FOR:
+                // this completion can land after playback advanced past
+                // `id`, and the heart binds to the shared flag — a
+                // stale write would make the next click send the
+                // inverse of the user's intent.
+                if self.currentTrack?.videoId == id {
+                    self.liked = response.likeStatus == .like
+                }
                 self.availableChips = response.chips
                 // Highlight the chip we sent in the request (if any) so
                 // the popover stays visually consistent across autoplay
                 // transitions; fall back to whatever YT marked active
                 // in the response.
                 self.selectedChipId = chip?.id ?? response.chips.first(where: \.isSelected)?.id
-                // Invalidate previously cached tab content for the old track.
+                // Invalidate previously cached tab content for the old
+                // track — and cancel any fetch still in flight for it,
+                // so a slow response can't land under the new browse
+                // ids (the completions identity-check besides; this is
+                // belt-and-braces plus bandwidth hygiene).
+                self.lyricsTask?.cancel()
+                self.relatedTask?.cancel()
                 self.lyrics = nil
                 self.lyricsLines = []
                 self.lyricsTimed = false
+                self.lyricsLoading = false
+                self.lyricsUnavailable = false
                 self.related = []
                 self.relatedSections = []
                 // The injected-ids set is per-watch-context: a fresh
@@ -957,6 +1076,63 @@ final class PlayerBridge {
                 if self.smartShuffleEnabled, self.shuffleEnabled {
                     self.loadRelatedIfNeeded()
                 }
+            }
+        }
+    }
+
+    /// Wipe the per-track tab state (lyrics + related) AND the browse
+    /// ids that key their lazy fetches, cancelling any fetch still in
+    /// flight. Called wherever the current track's identity changes
+    /// before fresh /next metadata exists — play(item:) and the
+    /// trackChanged new-track branch. With a stale browse id left in
+    /// place, a tab open across the advance would load (or a slow
+    /// in-flight response would deliver) the PREVIOUS track's content
+    /// under the new track.
+    private func resetPerTrackTabState() {
+        lyricsTask?.cancel()
+        relatedTask?.cancel()
+        lyrics = nil
+        lyricsLines = []
+        lyricsTimed = false
+        lyricsLoading = false
+        lyricsUnavailable = false
+        related = []
+        relatedSections = []
+        lyricsBrowseId = nil
+        relatedBrowseId = nil
+    }
+
+    /// Fetch ONLY per-track metadata — the like state and the lyrics /
+    /// related browse ids — for advances where no full /next refresh
+    /// fires (deterministic contexts with plenty of server rows left,
+    /// autoplay off, play(item:, clearQueue: false) jumps). Without
+    /// it, the reset-to-unknown on track change would leave every
+    /// liked album track showing a hollow heart (and dead lyrics
+    /// tabs) for its whole duration.
+    ///
+    /// Deliberately NOT `refreshNextQueueAndIds(updateQueue: false)`:
+    /// its cancel-and-replace on `nextQueueTask` could kill an
+    /// in-flight queue refresh, and its completion also rewrites
+    /// chips, smart-shuffle ids and queue-adjacent state. This task
+    /// never touches the queue regions, and its result is dropped
+    /// unless the track is still current when it lands.
+    private func refreshTrackMetadata(forVideoId id: String, playlistId: String?) {
+        trackMetadataTask?.cancel()
+        trackMetadataTask = Task { [innerTube, weak self] in
+            guard let response = try? await innerTube.nextQueue(videoId: id, playlistId: playlistId, chip: nil) else {
+                Log.bridge.debug("refreshTrackMetadata: nextQueue threw or returned nil for v=\(id, privacy: .public)")
+                return
+            }
+            if Task.isCancelled { return }
+            await MainActor.run {
+                guard let self, !Task.isCancelled else { return }
+                // Identity: playback may have advanced again while the
+                // round-trip was in flight — stale metadata must not
+                // land on the new track.
+                guard self.currentTrack?.videoId == id else { return }
+                self.liked = response.likeStatus == .like
+                self.lyricsBrowseId = response.lyricsBrowseId
+                self.relatedBrowseId = response.relatedBrowseId
             }
         }
     }
@@ -1020,6 +1196,10 @@ final class PlayerBridge {
     /// `liked` so the UI feels immediate; rolls back on InnerTube error.
     func toggleLike() async {
         guard let track = currentTrack else { return }
+        // An in-flight per-track metadata fetch carries the PRE-toggle
+        // like state — landing after the optimistic flip below would
+        // clobber it.
+        trackMetadataTask?.cancel()
         let wasLiked = liked
         liked.toggle()
         do {
@@ -1029,8 +1209,14 @@ final class PlayerBridge {
                 try await innerTube.like(videoId: track.videoId)
             }
         } catch {
-            // Roll back on failure (e.g. needsReauth when not signed in).
-            liked = wasLiked
+            // Roll back on failure (e.g. needsReauth when not signed
+            // in) — but only while the SAME track is still showing.
+            // After an advance the shared flag belongs to the NEW
+            // track (same identity guard `dislike` uses); an unguarded
+            // rollback here overwrote the new track's real state.
+            if currentTrack?.videoId == track.videoId {
+                liked = wasLiked
+            }
         }
     }
 
@@ -1052,20 +1238,53 @@ final class PlayerBridge {
     /// Populates either `lyricsLines` (with `lyricsTimed=true`) for synced
     /// lyrics or just the plain `lyrics` text fallback.
     func loadLyricsIfNeeded() {
-        guard lyrics == nil, lyricsLines.isEmpty, !lyricsLoading, let id = lyricsBrowseId else { return }
+        // `lyricsUnavailable` is terminal for this track (a completed
+        // round-trip said there are none) — without it in the guard, a
+        // lyric-less track would refetch on every tab open. A
+        // transient failure leaves it false, so reopening retries.
+        guard lyrics == nil, lyricsLines.isEmpty, !lyricsLoading, !lyricsUnavailable,
+              let id = lyricsBrowseId else { return }
         lyricsLoading = true
-        Task { [innerTube, weak self] in
-            let result = (try? await innerTube.lyrics(browseId: id)) ?? nil
-            await MainActor.run {
-                guard let self else { return }
-                if let result {
-                    self.lyricsLines = result.lines
-                    self.lyricsTimed = result.timed
-                    self.lyrics = result.lines.map(\.text).joined(separator: "\n")
-                } else {
-                    self.lyrics = "Lyrics not available."
+        lyricsTask?.cancel()
+        lyricsTask = Task { [innerTube, weak self] in
+            do {
+                let result = try await innerTube.lyrics(browseId: id)
+                if Task.isCancelled { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    // Identity check on the BROWSE id, not the videoId:
+                    // currentTrack flips to the new track before its
+                    // /next lands, but the browse id only changes when
+                    // the new metadata does — so this is the id the
+                    // fetch belongs to. A stale completion returns
+                    // WITHOUT touching `lyricsLoading`: if the new
+                    // track's own fetch is already in flight, clearing
+                    // the flag here would allow a duplicate request.
+                    guard self.lyricsBrowseId == id else { return }
+                    if let result {
+                        self.lyricsLines = result.lines
+                        self.lyricsTimed = result.timed
+                        self.lyrics = result.lines.map(\.text).joined(separator: "\n")
+                    } else {
+                        // Completed round-trip, YT has no lyrics:
+                        // terminal for this track. The UI shows its own
+                        // empty state — never store the copy in
+                        // `lyrics`, where it read as real lyric text to
+                        // the toolbar, translation, X-Ray and the card.
+                        self.lyricsUnavailable = true
+                    }
+                    self.lyricsLoading = false
                 }
-                self.lyricsLoading = false
+            } catch {
+                if Task.isCancelled { return }
+                await MainActor.run {
+                    guard let self else { return }
+                    guard self.lyricsBrowseId == id else { return }
+                    // Transient failure (offline blip): leave `lyrics`
+                    // nil and `lyricsUnavailable` false so reopening
+                    // the tab retries.
+                    self.lyricsLoading = false
+                }
             }
         }
     }
@@ -1076,7 +1295,8 @@ final class PlayerBridge {
     /// performances" — the live, acoustic, cover variants A5 surfaces).
     func loadRelatedIfNeeded() {
         guard related.isEmpty, relatedSections.isEmpty, let id = relatedBrowseId else { return }
-        Task { [innerTube, weak self] in
+        relatedTask?.cancel()
+        relatedTask = Task { [innerTube, weak self] in
             // One network call, two parses — fetch the raw body via
             // `related(browseId:)` and reuse the same response for
             // sections by hitting the public static parser. We can't
@@ -1087,8 +1307,14 @@ final class PlayerBridge {
             async let sectionsTask = (try? await innerTube.relatedSections(browseId: id)) ?? []
             let items = await itemsTask
             let sections = await sectionsTask
+            if Task.isCancelled { return }
             await MainActor.run {
                 guard let self else { return }
+                // Identity check (same rationale as loadLyricsIfNeeded):
+                // a slow response for the previous track must not become
+                // the new track's Related tab — or, worse, its Smart
+                // Shuffle pool via the re-merge below.
+                guard self.relatedBrowseId == id else { return }
                 self.related = items.filter { !self.shouldBlock($0) }
                 self.relatedSections = sections.compactMap { section in
                     let filtered = section.items.filter { !self.shouldBlock($0) }
@@ -1126,6 +1352,11 @@ final class PlayerBridge {
         guard let first = tracks.first else { return }
         let rest = Array(tracks.dropFirst())
         Log.bridge.debug("playTracks ENTRY firstId=\(first.id, privacy: .public) restCount=\(rest.count) plid=\(playlistId ?? "nil", privacy: .public)")
+        // User intent (album / playlist / queue-builder play): lift any
+        // pause-enforcement window so the first track isn't force-paused.
+        // The one automatic caller — the Repeat All cycle in `.ended` —
+        // is mutually exclusive with the branches that arm the window.
+        pauseEnforceUntil = .distantPast
         // Fresh watch context — full queue reset + Repeat All boundary.
         queue.replaceQueue([])
         contextStartHistoryIndex = queue.playedEntries.count
@@ -1252,6 +1483,7 @@ final class PlayerBridge {
     private func beginNavigatedContext(playlistId: String?) {
         queue.replaceQueue([])
         userClickedAt = Date()
+        pauseEnforceUntil = .distantPast   // user intent beats a stop window
         currentPlaylistId = playlistId
         contextTracksIds = []
         contextPlaylistId = playlistId
@@ -1266,6 +1498,18 @@ final class PlayerBridge {
         // otherwise a later togglePlay would yank the WebView back
         // to the restored track over the top of what's playing now.
         pendingResume = nil
+        // Same for an armed resume SEEK: the new page is a different
+        // context, so the saved position must not seek into it.
+        // (togglePlay arms its target AFTER play(videoId:) — and thus
+        // this clear — returns, so its own resume survives.)
+        pendingResumeSeek = nil
+        // A navigation supersedes any row-tap jump still being
+        // verified: cancel the 2.5 s timer and drop the target so it
+        // can't raise a false "couldn't play" toast for a tap the
+        // user has already clicked past.
+        jumpVerifyTask?.cancel()
+        jumpVerifyTask = nil
+        pendingJumpTarget = nil
         // New page → its queue store is fresh; until its first snapshot
         // arrives, /next fetches may seed the visible rows. Page-owned
         // queued items die with the old page's queue.
@@ -1293,18 +1537,18 @@ final class PlayerBridge {
         // begins.
         if let resume = pendingResume {
             pendingResume = nil
-            let savedElapsed = resume.elapsed
             await play(videoId: resume.videoId)
-            // Seek after a brief delay to let the new media source
-            // load — the JS bridge's seek() targets the current
-            // <video>'s currentTime, which is 0 until the media is
-            // ready. 1.5s is empirically enough for warm WebView; if
-            // the load is slow the seek lands at 0 which is the same
-            // as "play from start" (acceptable fallback).
-            try? await Task.sleep(nanoseconds: 1_500_000_000)
-            if duration > 0, savedElapsed < duration {
-                await seek(to: savedElapsed / duration)
-            }
+            // Arm the seek target AFTER play(videoId:) returns:
+            // navigate() clears pendingResumeSeek (any hard navigation
+            // invalidates a saved position), so arming before the call
+            // would wipe the target we just set. The eval completes
+            // before the new page's first `.progress` can arrive, so
+            // nothing is missed. The seek itself fires event-driven in
+            // the `.progress` handler on the first tick whose duration
+            // matches the snapshot — no fixed sleep, so a cold WebView
+            // / slow network can't skip it and a fast load can't race
+            // YT's own initial seek.
+            pendingResumeSeek = resume
             return
         }
         await eval("window.musicBridge.togglePlay()")
@@ -1323,6 +1567,10 @@ final class PlayerBridge {
     ///   3. Server head (shuffle off).
     ///   4. YT's own autoplay as a last resort.
     func next() async {
+        // User transport: whatever this advances to (every branch below)
+        // must not be force-paused by a sleep-timer / autoplay-off stop
+        // window. See `pauseEnforceUntil`.
+        pauseEnforceUntil = .distantPast
         let currentId = currentTrack?.videoId
         guard let head = upNext.first(where: { $0.id != currentId }) else {
             // Nothing surfaced — let YT's autoplay continue.
@@ -1364,6 +1612,7 @@ final class PlayerBridge {
         // making Previous jump the wrong way. Arm the grace like every
         // other user-intent transport.
         userClickedAt = Date()
+        pauseEnforceUntil = .distantPast   // user intent beats a stop window
         await eval("window.musicBridge.previous()")
     }
     func seek(to fraction: Double) async {
@@ -1734,6 +1983,9 @@ final class PlayerBridge {
     /// inclusive: taps deep in the queue would silently drop
     /// every intervening row (C1).
     func skipTo(item: MediaItem) async {
+        // Row tap / Next is user intent: the tapped track must not be
+        // force-paused by a sleep-timer / autoplay-off stop window.
+        pauseEnforceUntil = .distantPast
         // Single-authority: a tapped row of a PAGE-OWNED queue plays in
         // place via the page's own queue (no navigation). The old path
         // navigated — a page reload that re-rolled the radio and replaced
@@ -1752,9 +2004,23 @@ final class PlayerBridge {
             // rendered / selector drift), fall back to navigation so the
             // tap always does SOMETHING — at the cost of a re-roll.
             let target = item
-            Task { [weak self] in
+            jumpVerifyTask?.cancel()
+            jumpVerifyTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 2_500_000_000)
-                guard let self, self.currentTrack?.videoId != target.id else { return }
+                // `try?` swallows CancellationError, so check explicitly:
+                // a cancelled verifier (matching arrival, or a navigation
+                // superseding the tap) must never toast.
+                guard !Task.isCancelled else { return }
+                // Only verify the jump the user is still waiting on — a
+                // consumed or superseded target means the tap resolved
+                // (or the user deliberately played something else).
+                guard let self,
+                      self.pendingJumpTarget == target.id,
+                      self.currentTrack?.videoId != target.id else { return }
+                // Genuine miss: drop the target so a LATER natural
+                // arrival of the same id is audited as match/MISMATCH,
+                // not mislabelled "jump (row tap)".
+                self.pendingJumpTarget = nil
                 // NON-destructive fallback. Navigating here reloads the
                 // page and RE-ROLLS the radio — replacing the entire list
                 // the user was looking at, which is worse than a tap that
@@ -1871,11 +2137,13 @@ final class PlayerBridge {
                 if remaining <= 0 { break }
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
             }
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                guard let self else { return }
-                Task { await self.fireSleepTimer(mode: mode) }
-            }
+            // Run the mode INSIDE this tracked task (PlayerBridge is
+            // @MainActor, so the task already runs on the main actor).
+            // It used to hop into an untracked inner Task, so cancelling
+            // mid-fade cancelled nothing: the ramp kept going and then
+            // paused playback after the user had cancelled the timer.
+            guard let self, !Task.isCancelled else { return }
+            await self.fireSleepTimer(mode: mode)
         }
     }
 
@@ -1891,6 +2159,11 @@ final class PlayerBridge {
             clearSleepTimerState()
         case .fadeOut:
             await runVolumeFade(duration: Self.fadeOutDuration)
+            // Cancelled mid-fade (cancelSleepTimer, or a new timer
+            // replacing this one): the canceller already restored the
+            // volume and cleared the state — possibly for a NEW timer —
+            // so don't pause, re-push volume or clear anything.
+            guard !Task.isCancelled else { return }
             if isPlaying {
                 await togglePlay()
             }
@@ -1916,6 +2189,17 @@ final class PlayerBridge {
             // the next queue mutation / track change.
             pendingNextURLArmed = false
             await eval("window.musicBridge.setPendingNextURL(\"\")")
+            // Repeat One is `<video>.loop`, and a looping element never
+            // reaches end-of-stream — `.ended` would never arrive and the
+            // timer would play all night. Lift the loop for the rest of
+            // this track WITHOUT touching the user's repeatMode;
+            // clearSleepTimerState re-arms it (cancel or completion), and
+            // the page-load re-apply / toggleRepeat skip it while armed.
+            // `endOfTrackArmed` is re-checked after the await above: a
+            // cancel in between already cleared it and queued the restore.
+            if repeatMode == .one && endOfTrackArmed {
+                await eval("window.musicBridge.setRepeatLoop(false)")
+            }
         }
     }
 
@@ -1947,8 +2231,16 @@ final class PlayerBridge {
         endOfTrackArmed = false
         // endOfTrack arming disarmed the JS pending-next URL; restore it
         // so a cancelled timer doesn't leave queued songs un-enforced.
+        // It also lifted the Repeat One loop — give it back (read at run
+        // time, so a repeat toggle in between is honored).
         if wasEndOfTrack {
-            Task { [weak self] in await self?.syncPendingNextURL() }
+            Task { [weak self] in
+                guard let self else { return }
+                if self.repeatMode == .one && !self.endOfTrackArmed {
+                    await self.eval("window.musicBridge.setRepeatLoop(true)")
+                }
+                await self.syncPendingNextURL()
+            }
         }
     }
 
@@ -2044,30 +2336,43 @@ final class PlayerBridge {
         }
     }
 
-    /// Race the JS eval against a sleep — whichever wins, the other is
-    /// cancelled. We don't surface the timeout as an error (callers `try?`'d
-    /// the original) but we log it so a hung bridge is debuggable.
+    /// Race the JS eval against a timeout via a single-resume
+    /// continuation. The old task-group version could NOT time out: a
+    /// Task suspended on WebKit's completion-handler continuation
+    /// isn't released by cancel(), and withTaskGroup implicitly awaits
+    /// every remaining child — so on a wedged page the group (and
+    /// every `await eval` caller behind it) stayed suspended forever
+    /// while the log claimed the timeout fired. Here whichever side
+    /// finishes first resumes the caller; a late eval completion is
+    /// simply ignored (WebKit still runs it — the orphaned callback
+    /// costs nothing). We don't surface the timeout as an error
+    /// (callers `try?`'d the original) but we log it so a hung bridge
+    /// is debuggable.
     private func evalWithTimeout(js: String) async {
         let webView = webBridge.webView
         let timeoutNs = Self.jsEvalTimeoutSeconds * 1_000_000_000
-        let evalTask = Task { @MainActor in
-            _ = try? await webView.evaluateJavaScript(js)
-        }
-        let timeoutTask = Task {
-            try? await Task.sleep(nanoseconds: timeoutNs)
-        }
-        // Whichever completes first wins; cancel the loser.
-        await withTaskGroup(of: Bool.self) { group in
-            group.addTask { await evalTask.value; return true }
-            group.addTask { await timeoutTask.value; return false }
-            if let first = await group.next() {
-                if first == false {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            // The body runs synchronously in this method's MainActor
+            // context; Swift 5.10's withCheckedContinuation doesn't
+            // carry that isolation formally, so assert it to talk to
+            // WebKit.
+            MainActor.assumeIsolated {
+                let gate = EvalResumeGate()
+                let timeoutTask = Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: timeoutNs)
+                    guard gate.claim() else { return }
                     Log.bridge.debug("eval timed out after \(Self.jsEvalTimeoutSeconds)s; js prefix=\(js.prefix(80), privacy: .public)")
-                    evalTask.cancel()
-                } else {
-                    timeoutTask.cancel()
+                    continuation.resume()
                 }
-                group.cancelAll()
+                webView.evaluateJavaScript(js) { _, _ in
+                    // Completion lands on the main thread; hop through
+                    // a MainActor task so the gate stays actor-bound.
+                    Task { @MainActor in
+                        guard gate.claim() else { return }
+                        timeoutTask.cancel()
+                        continuation.resume()
+                    }
+                }
             }
         }
     }
@@ -2077,36 +2382,45 @@ final class PlayerBridge {
     private func handle(_ event: HiddenPlayerWebView.BridgeEvent) {
         switch event {
         case .ready:
-            if !bridgeReady {
-                bridgeReady = true
-                Task { [weak self] in
-                    guard let self else { return }
+            // `ready` fires once per DOCUMENT, and every navigate() is a
+            // full `location.href` load: the user script re-runs with a
+            // fresh <video> (loop off, rate 1.0, the page's own stored
+            // volume), a fresh `__riffXfade` (0 s) and `__riffNorm` (off).
+            // Queued commands flush only on the FIRST ready (after it,
+            // eval() goes straight through), but the persisted prefs are
+            // re-applied on EVERY ready — gating them with the flush made
+            // the second page silently drop Repeat One / crossfade /
+            // normalization / rate / volume while the UI showed them on.
+            let isFirstReady = !bridgeReady
+            bridgeReady = true
+            Task { [weak self] in
+                guard let self else { return }
+                if isFirstReady {
                     await self.flushPending()
-                    // Re-apply persisted prefs to the freshly-loaded page.
-                    if self.volume != 1.0 {
-                        await self.evalWithTimeout(js: "window.musicBridge.setVolume(\(self.volume))")
-                    }
-                    // Always re-apply the current kind's rate (not just
-                    // != 1.0), so spoken-word defaults (1.25×) re-arm
-                    // on page reload too.
-                    if self.playbackRate != 1.0 {
-                        await self.evalWithTimeout(js: "window.musicBridge.setPlaybackRate(\(self.playbackRate))")
-                    }
-                    // Re-arm the <video> loop attribute on every page
-                    // load — YT Music's SPA reuses the same element
-                    // across navigations but doesn't preserve our
-                    // overrides. Cheap and idempotent.
-                    if self.repeatMode == .one {
-                        await self.evalWithTimeout(js: "window.musicBridge.setRepeatLoop(true)")
-                    }
-                    if self.normalizationEnabled {
-                        await self.evalWithTimeout(js: "window.musicBridge.setNormalizationEnabled(true)")
-                    }
-                    // Re-arm crossfade on every page (re)load. Cheap
-                    // no-op when seconds == 0; idempotent otherwise.
-                    if self.crossfadeSeconds > 0 {
-                        await self.evalWithTimeout(js: "window.musicBridge.setCrossfadeSeconds(\(self.crossfadeSeconds))")
-                    }
+                }
+                // Re-apply persisted prefs to the freshly-loaded page.
+                // Volume and rate unconditionally (cheap, idempotent): at
+                // 100% the new document would otherwise keep YT Music's
+                // own stored player volume, and the current kind's rate
+                // (spoken-word 1.25×, or a reset back to 1.0×) must
+                // re-arm too. setVolume runs first so it seeds the fresh
+                // `__riffXfade.userVolume` before crossfade can ramp.
+                await self.evalWithTimeout(js: "window.musicBridge.setVolume(\(self.volume))")
+                await self.evalWithTimeout(js: "window.musicBridge.setPlaybackRate(\(self.playbackRate))")
+                // Repeat One = the new element's `loop` attribute (off
+                // by default). Skipped while an end-of-track sleep timer
+                // is armed: arming lifted the loop so the track can end
+                // (clearSleepTimerState restores it).
+                if self.repeatMode == .one && !self.endOfTrackArmed {
+                    await self.evalWithTimeout(js: "window.musicBridge.setRepeatLoop(true)")
+                }
+                if self.normalizationEnabled {
+                    await self.evalWithTimeout(js: "window.musicBridge.setNormalizationEnabled(true)")
+                }
+                // Re-arm crossfade on every page (re)load. Cheap
+                // no-op when seconds == 0; idempotent otherwise.
+                if self.crossfadeSeconds > 0 {
+                    await self.evalWithTimeout(js: "window.musicBridge.setCrossfadeSeconds(\(self.crossfadeSeconds))")
                 }
             }
         case .stateChanged(let playing):
@@ -2115,8 +2429,9 @@ final class PlayerBridge {
             // autoplay-off end-of-queue pause, the page can natively
             // start the next track anyway. Any playback that starts
             // before the deadline is force-paused (forcePause, not
-            // togglePlay — user-initiated togglePlay CLEARS the window,
-            // so the user can always override by pressing play).
+            // togglePlay — every user transport, togglePlay included,
+            // CLEARS the window, so the user can always override; see
+            // `pauseEnforceUntil`).
             if playing, Date() < pauseEnforceUntil {
                 Log.bridge.debug("stateChanged(playing) inside pause-enforce window → forcing pause")
                 Task { [weak self] in await self?.forcePause() }
@@ -2252,7 +2567,13 @@ final class PlayerBridge {
             // play it: put it back on screen NOW (a change-gated snapshot
             // would only arrive at the next page change — the field log
             // showed the "removed" row playing next) and say so.
-            if !ok, activeChip == nil {
+            // `not-in-items` is NOT a failure: it is the expected answer
+            // for a Swift-owned row the page never held (unverified Play
+            // Next, a Repeat-All cycle, an AI-built list). The page can't
+            // play a row it doesn't have, so the local removal is the
+            // whole truth — no toast, no forced re-snapshot.
+            let absentFromPage = via == "not-in-items"
+            if !ok, !absentFromPage, activeChip == nil {
                 Task { [weak self] in await self?.eval("window.musicBridge.requestQueueSnapshot()") }
                 onRemoveFailed?(videoId)
             }
@@ -2312,6 +2633,19 @@ final class PlayerBridge {
                 .filter { !shouldBlock($0) }
             queue.replaceServerRegion(mapped)
             mirrorFresh = true
+            // Re-evaluate the armed pending-next URL now that its
+            // policy inputs changed (mirrorFresh just flipped, and
+            // replaceServerRegion may have changed the head): a /next
+            // refresh that raced the page's FIRST snapshot armed
+            // `.navigateDeterministic` while !mirrorFresh, and the JS
+            // onStateChange===0 handler would consume that URL at
+            // track end — a full location.href reload per advance in a
+            // URL-started playlist (contract items 2/7). The verdict
+            // is `.native` now, so the re-sync pushes "" and clears
+            // it; when Riff still owns the advance it re-points the
+            // URL at the mirror's real head. Mirrors the
+            // replace-then-sync pattern in refreshNextQueueAndIds.
+            Task { [weak self] in await self?.syncPendingNextURL() }
             // Mirrored rows are the page's, not Smart Shuffle's — clear
             // stale injection ids so no mirrored row whose id happens to
             // match an old injection wears a false "+" badge.
@@ -2338,6 +2672,26 @@ final class PlayerBridge {
             elapsed = t.isFinite ? t : 0
             duration = (d.isFinite && d > 0) ? d : 0
             if let vid = currentTrack?.videoId {
+                // Session-resume seek (armed by togglePlay). Checked
+                // INDEPENDENTLY of `durationWasUnknown`: on the resume
+                // path `duration` starts at the restored snapshot value
+                // (> 0), so the was-unknown transition may never happen.
+                // The duration-match guard excludes pre-roll ads — an
+                // ad <video>'s timeupdate can precede the ad's own
+                // trackChanged, so `vid` alone is not proof we're
+                // looking at the saved track. Runs BEFORE the episode
+                // resume and marks it applied, so a spoken track with
+                // both a session snapshot and an episodePositions entry
+                // gets one seek, not two.
+                if let r = pendingResumeSeek, r.videoId == vid, duration > 0,
+                   r.duration <= 0 || abs(duration - r.duration) < 2,
+                   r.elapsed < duration - 5 {
+                    pendingResumeSeek = nil
+                    resumeAppliedFor = vid
+                    let fraction = r.elapsed / duration
+                    Log.bridge.debug("session resume: seeking \(vid, privacy: .public) to \(Int(r.elapsed))s on first matching progress")
+                    Task { [weak self] in await self?.seek(to: fraction) }
+                }
                 if durationWasUnknown, duration > 0 {
                     applyEpisodeResumeIfNeeded(videoId: vid, duration: duration)
                 }
@@ -2437,7 +2791,13 @@ final class PlayerBridge {
                 // log capture pinpoints display-vs-playback divergence.
                 let shownHead = upNext.first(where: { $0.id != currentTrack?.videoId })?.id ?? "nil"
                 let isJump = pendingJumpTarget == id
-                if isJump { pendingJumpTarget = nil }
+                if isJump {
+                    pendingJumpTarget = nil
+                    // Jump verified by arrival — stand down the 2.5 s
+                    // failure timer so it can't toast a success.
+                    jumpVerifyTask?.cancel()
+                    jumpVerifyTask = nil
+                }
                 let label: String
                 if shownHead == id { label = "match" }
                 else if isJump { label = "jump (row tap)" }
@@ -2503,6 +2863,17 @@ final class PlayerBridge {
                 elapsed = 0
                 duration = 0
                 lastTrackChangeAt = Date()
+                // Per-track state is UNKNOWN until fresh metadata
+                // lands: the heart must not carry the previous track's
+                // like state (a click in that window inverts the
+                // user's intent — see toggleLike), and the lyrics /
+                // related browse ids must not keep serving the
+                // previous track's content on advances where no /next
+                // fires. Repopulated below by whichever metadata path
+                // runs (full refresh, metadata-only refresh, or
+                // refreshTrackMetadata), each identity-checked.
+                liked = false
+                resetPerTrackTabState()
                 // JS bridge doesn't surface album/artist IDs (they're not
                 // on `<video>` or mediaSession.metadata). Backfill from
                 // the queue if it has them — typical when autoplaying
@@ -2564,6 +2935,15 @@ final class PlayerBridge {
                     refreshNextQueueAndIds(forVideoId: id, playlistId: effectivePlid, updateQueue: false)
                 } else if autoplayEnabled, serverCount <= Self.serverRegionRefetchThreshold {
                     refreshNextQueueAndIds(forVideoId: id, playlistId: effectivePlid)
+                } else {
+                    // Neither refresh fires here (deterministic
+                    // context with plenty of server rows left, or
+                    // autoplay off): fetch ONLY the per-track metadata
+                    // so the heart / lyrics / related keys still
+                    // follow the track — otherwise the reset above
+                    // would leave a liked album track hollow-hearted
+                    // for its whole duration.
+                    refreshTrackMetadata(forVideoId: id, playlistId: effectivePlid)
                 }
                 // New track → snapshot now (rather than waiting for
                 // the rate-limited progress snapshot) so a quick
@@ -2582,6 +2962,21 @@ final class PlayerBridge {
             }
         }
         onUpdate?()
+    }
+}
+
+/// One-shot gate for `evalWithTimeout`'s eval-vs-timeout race.
+/// MainActor-bound (which also makes it Sendable), so a plain Bool is
+/// a sufficient guard — both racers hop to the main actor to claim.
+@MainActor
+private final class EvalResumeGate {
+    private var resumed = false
+    /// True exactly once. The caller that gets `true` resumes the
+    /// continuation; the loser does nothing.
+    func claim() -> Bool {
+        if resumed { return false }
+        resumed = true
+        return true
     }
 }
 

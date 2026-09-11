@@ -82,13 +82,19 @@ final class NowPlayingCenter {
                 return .success
             }
         }
+        // Scrub against the LIVE duration — the same value update()
+        // publishes to the OS. `Track.duration` is 0 for most tracks
+        // (only backfilled by a late same-id re-emit), which made every
+        // Control Center scrub fail even with a visible 3:42 scrubber.
         cc.changePlaybackPositionCommand.addTarget { [weak self] event in
             MainActor.assumeIsolated {
                 guard let event = event as? MPChangePlaybackPositionCommandEvent,
                       let self = self,
-                      let track = self.player.currentTrack,
-                      track.duration > 0 else { return .commandFailed }
-                Task { await self.player.seek(to: event.positionTime / track.duration) }
+                      self.player.currentTrack != nil else { return .commandFailed }
+                let d: Double = self.player.duration
+                guard d.isFinite, d > 0 else { return .commandFailed }
+                let fraction: Double = min(max(event.positionTime / d, 0), 1)
+                Task { await self.player.seek(to: fraction) }
                 return .success
             }
         }

@@ -19,6 +19,10 @@ struct QueueBuilderSheet: View {
     @State private var phase: Phase = .idle
     @State private var resolved: [MediaItem] = []
     @State private var errorMessage: String?
+    /// The in-flight build, so closing the sheet cancels the LLM call
+    /// and the up-to-20 sequential /search resolves instead of letting
+    /// them run to completion against a dismissed view.
+    @State private var buildTask: Task<Void, Never>?
 
     enum Phase: Equatable {
         case idle
@@ -54,6 +58,7 @@ struct QueueBuilderSheet: View {
             }
         }
         .frame(width: 560, height: 600)
+        .onDisappear { buildTask?.cancel() }
     }
 
     // MARK: - Subviews
@@ -215,30 +220,40 @@ struct QueueBuilderSheet: View {
             .user(trimmed),
         ]
 
-        Task {
+        // A rebuild supersedes any still-running flow; the cancellation
+        // guards below keep the stale task from overwriting this run's
+        // state (or painting a "cancelled" error).
+        buildTask?.cancel()
+        buildTask = Task {
             do {
                 let raw = try await provider.chat(messages, model: model)
+                guard !Task.isCancelled else { return }
                 let suggestions = try QueueBuilder.parseSuggestions(from: raw)
                 await MainActor.run { phase = .resolving }
                 let items = await QueueBuilder.resolve(
                     suggestions: suggestions,
                     using: env.innerTube
                 )
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     resolved = items
                     phase = .done
                 }
             } catch let err as LLMError {
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     errorMessage = err.errorDescription ?? "Couldn't build a queue."
                     phase = .idle
                 }
             } catch QueueBuilder.ParseError.noJSONArray {
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     errorMessage = "The model didn't return a recognizable list. Try rephrasing."
                     phase = .idle
                 }
             } catch {
+                if Task.isCancelled || error is CancellationError
+                    || (error as? URLError)?.code == .cancelled { return }
                 await MainActor.run {
                     errorMessage = "Couldn't build a queue: \(error.localizedDescription)"
                     phase = .idle
@@ -364,6 +379,10 @@ enum QueueBuilder {
     static func resolve(suggestions: [Suggestion], using client: InnerTubeClient) async -> [MediaItem] {
         var out: [MediaItem] = []
         for s in suggestions {
+            // Cooperative cancellation: the sheet cancels its build
+            // task on dismiss, and without this check the loop would
+            // fan out every remaining /search with no consumer.
+            if Task.isCancelled { break }
             let query = "\(s.title) \(s.artist)"
             do {
                 let hits = try await client.search(query: query, filter: .songs)
@@ -375,6 +394,10 @@ enum QueueBuilder {
                     }
                 }
             } catch {
+                // A cancelled search must stop the batch, not slide
+                // into the per-suggestion "silent skip" below.
+                if Task.isCancelled || error is CancellationError
+                    || (error as? URLError)?.code == .cancelled { break }
                 // Silent skip — one bad search shouldn't poison the batch.
                 continue
             }

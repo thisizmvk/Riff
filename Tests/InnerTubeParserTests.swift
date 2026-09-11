@@ -767,7 +767,10 @@ final class InnerTubeParserTests: XCTestCase {
         let songTile = MediaItem(id: "songInSingleRail", kind: .song,
                                  title: "Track-only tile", subtitle: "Artist",
                                  thumbnailURL: nil)
-        let video = MediaItem(id: "vid1", kind: .album, title: "Music Video",
+        // Videos rails carry WATCH tiles — kind .song in the parser —
+        // which is exactly why the structural (kind == .album) filter
+        // excludes them in every locale.
+        let video = MediaItem(id: "vid1", kind: .song, title: "Music Video",
                               subtitle: "Artist", thumbnailURL: nil)
         let related = MediaItem(id: "rel1", kind: .artist, title: "Other Artist",
                                 subtitle: "", thumbnailURL: nil)
@@ -790,32 +793,32 @@ final class InnerTubeParserTests: XCTestCase {
         XCTAssertFalse(ids.contains("songInSingleRail"),
                        "song-shaped tiles inside Singles rail must be filtered out")
         XCTAssertFalse(ids.contains("vid1"),
-                       "Videos shelf must not be treated as a release rail")
+                       "watch tiles (.song) are never releases, whatever their shelf")
         XCTAssertFalse(ids.contains("rel1"),
                        "'Fans might also like' must not bleed into the followed feed")
     }
 
-    /// Title matching is keyword-substring + case-insensitive, so
-    /// "Songs and singles" or "Studio Albums" still count.
-    func testReleasesFromArtistDetailKeywordMatchIsLenient() {
-        let a = MediaItem(id: "a", kind: .album, title: "Studio LP",
+    /// Selection is structural (kind == .album), so localized shelf
+    /// titles keep their release tiles — the old English keyword
+    /// filter silently dropped whole rails outside `en`.
+    func testReleasesFromArtistDetailIsLocaleIndependent() {
+        let a = MediaItem(id: "a", kind: .album, title: "Disco Uno",
                           subtitle: "", thumbnailURL: nil)
-        let b = MediaItem(id: "b", kind: .album, title: "Live Cuts",
+        let b = MediaItem(id: "b", kind: .album, title: "Album Eins",
                           subtitle: "", thumbnailURL: nil)
+        let watch = MediaItem(id: "w", kind: .song, title: "Video en vivo",
+                              subtitle: "", thumbnailURL: nil)
         let page = makeArtistDetailPage(sections: [
-            HomeSection(id: "1", title: "Studio Albums", items: [a]),
-            HomeSection(id: "2", title: "Songs and singles", items: [b]),
-            HomeSection(id: "3", title: "Discography", items: [
-                MediaItem(id: "c", kind: .album, title: "X",
-                          subtitle: "", thumbnailURL: nil)
-            ]),
+            HomeSection(id: "1", title: "Álbumes", items: [a]),
+            HomeSection(id: "2", title: "アルバム", items: [b]),
+            HomeSection(id: "3", title: "Vídeos", items: [watch]),
         ])
         let releases = InnerTubeClient.releasesFromArtistDetail(page)
         let ids = Set(releases.map(\.id))
-        XCTAssertTrue(ids.contains("a"))
-        XCTAssertTrue(ids.contains("b"))
-        XCTAssertFalse(ids.contains("c"),
-                       "'Discography' alone shouldn't match — keywords are album/single/ep")
+        XCTAssertTrue(ids.contains("a"), "Spanish Albums rail keeps its album tiles")
+        XCTAssertTrue(ids.contains("b"), "Japanese Albums rail keeps its album tiles")
+        XCTAssertFalse(ids.contains("w"),
+                       "watch tiles are not releases, whatever the shelf is called")
     }
 
     /// Empty relatedSections → empty releases, no crash.

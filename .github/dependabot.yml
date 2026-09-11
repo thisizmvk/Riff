@@ -1,0 +1,8 @@
+# Keeps the SHA-pinned GitHub Actions in ci.yml / release.yml receiving
+# update PRs (a pinned SHA never moves on its own).
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

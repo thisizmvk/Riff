@@ -244,6 +244,123 @@ const wrap = (id, title, byline, selected = false) => ({
   check(rdd.length === 1 && rdd[0].ok === false && rdd[0].via === "endpoint:resolveCommand:unverified", "command with no effect → ok=false unverified");
 }
 
+// ---- Case 11e-11l: a queue add is verified by a CHANGE, not presence -------
+// Play next on a row the page already holds (or on the playing track) is
+// present BEFORE the command runs; presence alone reported ok for a no-op
+// and Swift dropped its enforced copy. Every case builds a FRESH fixture
+// (11b-11d share one).
+{
+  window.__riffStoreDispatchEnabled = undefined;
+  const ids = (st) => st.queue.items.map((row) => row.playlistPanelVideoRenderer.videoId).join(",");
+  // `resolver(state, videoId, insertPosition)` plays the page: mutates the
+  // fixture (synchronously — the harness runs short timers inline) or not.
+  const runAdd = async (items, videoId, position, resolver, automix) => {
+    elements.clear(); lists.clear();
+    const state = { queue: { items: items, automixItems: automix || [] } };
+    elements.set("ytmusic-app", { store: { getState: () => state, dispatch: () => { throw new Error("must not dispatch"); } } });
+    elements.set("ytmusic-player-bar", {
+      resolveCommand: (cmd) => {
+        if (resolver) resolver(state, cmd.queueAddEndpoint.queueTarget.videoId, cmd.queueAddEndpoint.queueInsertPosition);
+      },
+    });
+    posted.length = 0; window.__riffQueueSig = undefined;
+    window.musicBridge.queueAddViaPage(videoId, position);
+    await settle(); await settle();
+    return { state: state, results: posted.filter((p) => p.event === "queueAddResult") };
+  };
+  const radio = () => [renderer("a", "A", "A", true), renderer("b", "B", "A"), renderer("c", "C", "A"), renderer("x", "X", "A")];
+
+  // 11e — id already at row 3 (not next); the page ignores the command.
+  let r = await runAdd(radio(), "x", "next", null);
+  check(r.results.length === 1 && r.results[0].ok === false && r.results[0].via === "endpoint:resolveCommand:already-present-unchanged",
+    "11e: Play next on a row already in the page queue + no-op command → ok=false (got " + JSON.stringify(r.results) + ")");
+  check(!posted.some((p) => p.event === "queueSnapshot"), "11e: an unverified add never re-emits the mirror");
+
+  // 11f — same row; the page inserts a copy after the playing row.
+  r = await runAdd(radio(), "x", "next", (st, v) => st.queue.items.splice(1, 0, renderer(v, v, "A")));
+  check(r.results.length === 1 && r.results[0].ok === true && r.results[0].via === "endpoint:resolveCommand@ytmusic-player-bar",
+    "11f: page inserts a copy after the playing row → ok=true (got " + JSON.stringify(r.results) + ")");
+
+  // 11g — id already right after the playing row: intent already satisfied.
+  r = await runAdd([renderer("a", "A", "A", true), renderer("x", "X", "A"), renderer("b", "B", "A")], "x", "next", null);
+  check(r.results.length === 1 && r.results[0].ok === true,
+    "11g: id already next after the playing row + no-op command → ok=true (no legacy reload fallback)");
+
+  // 11h — Play next on the PLAYING track itself (always present in items).
+  r = await runAdd(radio(), "a", "next", null);
+  check(r.results.length === 1 && r.results[0].ok === false, "11h: Play next on the playing track + no-op command → ok=false");
+  r = await runAdd(radio(), "a", "next", (st, v) => st.queue.items.splice(1, 0, renderer(v, v, "A")));
+  check(r.results.length === 1 && r.results[0].ok === true, "11h: Play next on the playing track, page inserts a copy → ok=true");
+
+  // 11i — the page MOVES the existing row (occurrence count unchanged).
+  r = await runAdd(radio(), "x", "next", (st, v) => {
+    const i = st.queue.items.findIndex((row) => row.playlistPanelVideoRenderer.videoId === v);
+    const moved = st.queue.items.splice(i, 1)[0];
+    st.queue.items.splice(1, 0, moved);
+  });
+  check(r.results.length === 1 && r.results[0].ok === true && ids(r.state) === "a,x,b,c",
+    "11i: page moves the row after the playing row → ok=true (positional check, not count)");
+
+  // 11j — Add to queue ("end") on a row in the middle.
+  r = await runAdd(radio(), "b", "end", null);
+  check(r.results.length === 1 && r.results[0].ok === false && r.results[0].via === "endpoint:resolveCommand:already-present-unchanged",
+    "11j: Add to queue on a mid-queue row + no-op command → ok=false");
+  r = await runAdd(radio(), "b", "end", (st, v) => st.queue.items.push(renderer(v, v, "A")));
+  check(r.results.length === 1 && r.results[0].ok === true, "11j: page appends a copy at the end → ok=true");
+  r = await runAdd(radio(), "x", "end", null);
+  check(r.results.length === 1 && r.results[0].ok === true, "11j: Add to queue on the last main row + no-op → ok=true (already at the end)");
+
+  // 11j2 — an automix-tail row is present too; a no-op Play next is still a failure.
+  r = await runAdd([renderer("a", "A", "A", true), renderer("b", "B", "A")], "m2", "next", null, [renderer("m1", "M1", "A"), renderer("m2", "M2", "A")]);
+  check(r.results.length === 1 && r.results[0].ok === false, "11j2: Play next on an automix row + no-op command → ok=false");
+
+  // 11k — the page's insert lands only on a LATER poll (it fetches the
+  // renderer first): ok is posted only after it lands, never on the
+  // first poll because the id was already somewhere in the queue.
+  {
+    elements.clear(); lists.clear();
+    const state = { queue: { items: radio() } };
+    let pendingReads = 0, inserted = false;
+    elements.set("ytmusic-app", { store: {
+      getState: () => {
+        if (pendingReads > 0 && --pendingReads === 0) { state.queue.items.splice(1, 0, renderer("x", "X", "A")); inserted = true; }
+        return state;
+      },
+      dispatch: () => { throw new Error("must not dispatch"); },
+    } });
+    elements.set("ytmusic-player-bar", { resolveCommand: () => { pendingReads = 4; } });
+    const handler = window.webkit.messageHandlers.bridge;
+    const origPost = handler.postMessage;
+    let landedWhenPosted = null;
+    handler.postMessage = (p) => { if (p.event === "queueAddResult") landedWhenPosted = inserted; origPost(p); };
+    posted.length = 0; window.__riffQueueSig = undefined;
+    window.musicBridge.queueAddViaPage("x", "next");
+    await settle(); await settle();
+    handler.postMessage = origPost;
+    const res = posted.filter((p) => p.event === "queueAddResult");
+    check(res.length === 1 && res[0].ok === true && landedWhenPosted === true,
+      "11k: delayed page insert → ok=true posted only after the insert landed (got " + JSON.stringify(res) + ", landed=" + landedWhenPosted + ")");
+  }
+
+  // 11l — opt-in store-dispatch path gets the same change check.
+  {
+    window.__riffStoreDispatchEnabled = true;
+    elements.clear(); lists.clear();
+    const state = { queue: { items: radio() } };
+    elements.set("ytmusic-app", {
+      store: { getState: () => state, dispatch: () => {} },   // no-op reducer
+      networkManager: { fetch: async (path, body) => ({ queueDatas: [{ content: renderer(body.videoIds[0], "Injected", "AI") }] }) },
+    });
+    posted.length = 0;
+    window.musicBridge.queueAddViaPage("x", "next");
+    await settle(); await settle();
+    const res = posted.filter((p) => p.event === "queueAddResult");
+    check(res.length === 1 && res[0].ok === false && res[0].via.endsWith("+unchanged"),
+      "11l: store dispatch that changes nothing for an already-present id → ok=false (got " + JSON.stringify(res) + ")");
+    window.__riffStoreDispatchEnabled = undefined;
+  }
+}
+
 // ---- Case 11: queueAddViaPage happy path (dispatch + verify, opt-in) -------
 {
   window.__riffStoreDispatchEnabled = true;

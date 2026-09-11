@@ -18,7 +18,8 @@ ALL="${2:-}"
 if [ "$ALL" = "--all" ]; then
     BODY="$(cat "$LOG")"
 else
-    PID="$(grep -o 'Riff\[[0-9]*:' "$LOG" | tail -1 | tr -dc '0-9')"
+    PID="$(grep -o 'Riff\[[0-9]*:' "$LOG" | tail -1 | tr -dc '0-9' || true)"
+    [ -n "$PID" ] || { echo "no 'Riff[PID:' lines in $LOG — capture with --style compact (see header) or rerun with --all" >&2; exit 2; }
     BODY="$(grep "Riff\[$PID:" "$LOG" || true)"
     echo "process: PID $PID ($(printf '%s\n' "$BODY" | wc -l | tr -d ' ') lines)"
 fi
@@ -29,7 +30,11 @@ match=$(c "advance arrived=.* match")
 jumps=$(c "jump (row tap)")
 ctxStart=$(c "context start (no shown head)")
 mismatch=$(c "MISMATCH")
-reloads=$(c "] ready$")
+# Build-independent: Release logs a bare "… ready"; Debug echoes the
+# payload too ("… ready [\"event\": \"ready\"]"). Match both, or a
+# Debug-build capture always grades "0 reloads" no matter how many
+# full-page navigations occurred.
+reloads=$(c '] ready\( \[\|$\)')
 ctxSwitch=$(c "context switch → list=")
 override=$(c "overriding to head")
 addVerified=$(c "queueAddResult VERIFIED")
@@ -70,7 +75,7 @@ addDisabled=$(c "via=store-dispatch-disabled")
 [ "$swiftFallback" -eq 0 ] && [ "$jsArmed" -eq 0 ] && verdict PASS "legacy end-of-track paths idle" \
     || verdict OPEN "legacy end-of-track path still used — which context? grep '.ended' $LOG"
 
-api="$(printf '%s\n' "$BODY" | grep -o 'queueApi: .*' | head -1)"
+api="$(printf '%s\n' "$BODY" | grep -o 'queueApi: .*' | head -1 || true)"
 if [ -n "$api" ]; then
     echo
     echo "page queue API surface (one-shot probe):"

@@ -9,15 +9,30 @@ import UniformTypeIdentifiers
 ///
 /// Lyrics come from `env.player.lyrics(Lines)` — whichever is
 /// available — and are pre-seeded into an editable TextField so
-/// the user can trim or rephrase. No network calls.
+/// the user can trim or rephrase. The only network touch is a
+/// one-shot, cache-first artwork prefetch shared by the preview
+/// and the export.
 struct LyricCardSheet: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.dismiss) private var dismiss
 
     @State private var snippet: String = ""
     @State private var statusMessage: String? = nil
+    /// The track the sheet opened on, captured once alongside the
+    /// snippet seed. Without this the sheet silently followed
+    /// `env.player.currentTrack`, so a track change mid-edit exported
+    /// song A's lyric attributed to song B.
+    @State private var capturedTrack: PlayerBridge.Track? = nil
+    /// Artwork prefetched once and shared by the live preview AND the
+    /// export. AsyncImage inside ImageRenderer snapshots the `.empty`
+    /// phase (it never loads outside a live hierarchy), so the export
+    /// must draw a concrete NSImage instead.
+    @State private var artwork: NSImage? = nil
 
-    private var track: PlayerBridge.Track? { env.player.currentTrack }
+    /// Fallback to the live track only for the edge case where nothing
+    /// was playing at open time (the sheet then shows the empty state
+    /// until a track starts).
+    private var track: PlayerBridge.Track? { capturedTrack ?? env.player.currentTrack }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -36,7 +51,7 @@ struct LyricCardSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     if let track {
-                        LyricCardPreview(track: track, snippet: snippet)
+                        LyricCardPreview(track: track, artwork: artwork, snippet: snippet)
                             .frame(width: 480, height: 480)
                             .frame(maxWidth: .infinity)
                         VStack(alignment: .leading, spacing: 6) {
@@ -79,7 +94,26 @@ struct LyricCardSheet: View {
             }
         }
         .frame(width: 560, height: 760)
-        .onAppear { seedSnippet() }
+        .onAppear {
+            // Capture the track and seed the snippet in one step so
+            // the pair always comes from the same moment.
+            if capturedTrack == nil { capturedTrack = env.player.currentTrack }
+            seedSnippet()
+        }
+        .task(id: track?.thumbnailURL) { await loadArtwork() }
+    }
+
+    /// Prefetch the artwork once (same `.returnCacheDataElseLoad`
+    /// pattern as `DominantColor.extract`, so an AsyncImage-warmed
+    /// URLCache makes this near-instant). Preview and export share
+    /// the result, so what's saved always matches what's shown.
+    private func loadArtwork() async {
+        guard let url = track?.thumbnailURL else { return }
+        var req = URLRequest(url: url)
+        req.cachePolicy = .returnCacheDataElseLoad
+        guard let (data, _) = try? await URLSession.shared.data(for: req),
+              let image = NSImage(data: data) else { return }
+        artwork = image
     }
 
     private func seedSnippet() {
@@ -114,10 +148,15 @@ struct LyricCardSheet: View {
     }
 
     private func saveImage(for track: PlayerBridge.Track) {
-        let card = LyricCardPreview(track: track, snippet: snippet)
-            .frame(width: 1080, height: 1080)
+        // Lay out at the SAME 480pt size as the on-screen preview and
+        // scale up to 1080px via renderer.scale — laying out at
+        // 1080×1080 with scale 1 shrank every font/padding to ~44% of
+        // the previewed composition.
+        let card = LyricCardPreview(track: track, artwork: artwork, snippet: snippet)
+            .frame(width: 480, height: 480)
+            .environment(\.colorScheme, .dark)
         let renderer = ImageRenderer(content: card)
-        renderer.scale = 1.0
+        renderer.scale = 1080.0 / 480.0
         guard let nsImage = renderer.nsImage,
               let tiff = nsImage.tiffRepresentation,
               let rep = NSBitmapImageRep(data: tiff),
@@ -147,23 +186,22 @@ struct LyricCardSheet: View {
 /// single source-of-truth layout.
 private struct LyricCardPreview: View {
     let track: PlayerBridge.Track
+    /// Prefetched by the sheet. A concrete NSImage (not AsyncImage)
+    /// because ImageRenderer snapshots synchronously — AsyncImage
+    /// would export its `.empty` phase every time.
+    let artwork: NSImage?
     let snippet: String
 
     var body: some View {
         ZStack {
             // Backdrop: blurred + darkened artwork, falling back to
-            // a flat Riff-red gradient if no artwork is loaded.
-            if let url = track.thumbnailURL {
-                AsyncImage(url: url) { phase in
-                    if case .success(let img) = phase {
-                        img.resizable()
-                            .aspectRatio(contentMode: .fill)
-                            .blur(radius: 24)
-                            .overlay(Color.black.opacity(0.55))
-                    } else {
-                        Theme.red
-                    }
-                }
+            // the Riff-red gradient while it loads / if it fails.
+            if let artwork {
+                Image(nsImage: artwork)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .blur(radius: 24)
+                    .overlay(Color.black.opacity(0.55))
             } else {
                 LinearGradient(
                     colors: [Theme.red, .black],
@@ -182,9 +220,11 @@ private struct LyricCardPreview: View {
                     .multilineTextAlignment(.leading)
                 Spacer()
                 HStack(alignment: .center, spacing: 14) {
-                    AsyncImage(url: track.thumbnailURL) { phase in
-                        if case .success(let img) = phase {
-                            img.resizable().aspectRatio(contentMode: .fill)
+                    Group {
+                        if let artwork {
+                            Image(nsImage: artwork)
+                                .resizable()
+                                .aspectRatio(contentMode: .fill)
                         } else {
                             Theme.Fill.medium
                         }

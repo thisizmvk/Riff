@@ -95,7 +95,11 @@
 
         setPlaybackRate(rate) {
             const v = videoEl();
-            if (v) v.playbackRate = rate;
+            // defaultPlaybackRate too: the HTML media load algorithm
+            // resets playbackRate to defaultPlaybackRate on each new
+            // source, so a podcast rate set only via playbackRate
+            // snapped back to 1.0 at the next episode.
+            if (v) { v.playbackRate = rate; v.defaultPlaybackRate = rate; }
         },
 
         skipBy(seconds) {
@@ -259,8 +263,9 @@
                         // carries) through its command resolver, so the
                         // page updates store AND player coherently. Field
                         // probe 2026-09-10: ytmusic-player-bar exposes
-                        // resolveCommand. Verified by store presence; the
-                        // next advance's "match" audit is the player check.
+                        // resolveCommand. Verified by a store CHANGE (see
+                        // queueAddLanded), never bare presence; the next
+                        // advance's "match" audit is the player check.
                         await queueAddViaPageCommand(videoId, position);
                         return;
                     }
@@ -276,6 +281,8 @@
                     }
                     const slice = resolveQueueSlice();
                     const items = (slice.q && slice.q.items) || [];
+                    // Pre-dispatch probe: verify by a change, not presence.
+                    const before = queueAddProbe(videoId);
                     let selIdx = -1;
                     for (let i = 0; i < items.length; i++) {
                         const it = items[i];
@@ -303,17 +310,8 @@
                     // on success so Swift's display updates immediately.
                     setTimeout(() => {
                         try {
-                            const after = resolveQueueSlice();
-                            const all = (((after.q && after.q.items) || [])).concat((after.q && after.q.automixItems) || []);
-                            const present = all.some((it) => {
-                                const r = it && (it.playlistPanelVideoRenderer
-                                    || (it.playlistPanelVideoWrapperRenderer
-                                        && it.playlistPanelVideoWrapperRenderer.primaryRenderer
-                                        && it.playlistPanelVideoWrapperRenderer.primaryRenderer.playlistPanelVideoRenderer)
-                                    || (typeof it.videoId === "string" ? it : null));
-                                return !!r && r.videoId === videoId;
-                            });
-                            postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: present, via: via });
+                            const present = queueAddLanded(videoId, position, before);
+                            postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: present, via: present ? via : via + "+unchanged" });
                             if (present) {
                                 window.__riffQueueSig = undefined;
                                 emitQueueSnapshot();
@@ -868,8 +866,11 @@
     // Play next / add to queue through the page's own command: the same
     // queueAddEndpoint a "Play next" menu item carries. Verified by
     // polling the store (the page fetches the renderer first), up to
-    // ~3s. On success Swift drops its fallback copy; the item is then
-    // page-owned and plays natively.
+    // ~3s, for a CHANGE (queueAddLanded) — not presence: a Play next on
+    // a row the page already holds, or on the playing track, is present
+    // before the command runs, and reporting ok for a no-op would make
+    // Swift drop its enforced copy. On success Swift drops its fallback
+    // copy; the item is then page-owned and plays natively.
     async function queueAddViaPageCommand(videoId, position) {
         const post = (ok, via) => {
             postEvent({ event: "queueAddResult", videoId: videoId, position: position, ok: ok, via: via });
@@ -883,6 +884,7 @@
                 queueInsertPosition: position === "next" ? "INSERT_AFTER_CURRENT_VIDEO" : "INSERT_AT_END",
             },
         };
+        const before = queueAddProbe(videoId);
         try {
             host.el.resolveCommand(command, host.el);
         } catch (e) {
@@ -891,9 +893,47 @@
         }
         for (let i = 0; i < 12; i++) {
             await new Promise((r) => setTimeout(r, 250));
-            if (queueHoldsVideo(videoId)) { post(true, "endpoint:resolveCommand@" + host.via); return; }
+            if (queueAddLanded(videoId, position, before)) { post(true, "endpoint:resolveCommand@" + host.via); return; }
         }
-        post(false, "endpoint:resolveCommand:unverified");
+        post(false, before.count > 0 ? "endpoint:resolveCommand:already-present-unchanged" : "endpoint:resolveCommand:unverified");
+    }
+
+    // Where `videoId` sits in the page's queue (items ∪ automixItems):
+    // occurrence count, whether it is the row right after the playing
+    // (selected) row, and whether it is the last main row (before the
+    // automix tail). Same unwrap walk as queueHoldsVideo.
+    function queueAddProbe(videoId) {
+        const s = resolveQueueSlice();
+        const main = (s.q && s.q.items) || [];
+        const all = main.concat((s.q && s.q.automixItems) || []);
+        let count = 0, selIdx = -1;
+        for (let i = 0; i < all.length; i++) {
+            const r = unwrapQueueItem(all[i]);
+            if (!r) continue;
+            if (r.videoId === videoId) count++;
+            if (selIdx < 0 && r.selected) selIdx = i;
+        }
+        const afterSel = selIdx >= 0 ? unwrapQueueItem(all[selIdx + 1]) : null;
+        const last = main.length ? unwrapQueueItem(main[main.length - 1]) : null;
+        return {
+            count: count,
+            nextIsId: !!afterSel && afterSel.videoId === videoId,
+            lastIsId: !!last && last.videoId === videoId,
+        };
+    }
+
+    // Did a Play next / Add to queue take effect, given the probe taken
+    // before the command? True when a NEW occurrence appeared (the page
+    // inserts a copy), or when the id now sits where the user asked —
+    // right after the playing row for "next", the last main row for
+    // "end". The positional test covers a page that MOVES an existing
+    // row (count unchanged) and an intent already satisfied (reporting
+    // failure there would hand Swift the legacy pending-URL reload).
+    // A row that merely exists elsewhere is NOT success.
+    function queueAddLanded(videoId, position, before) {
+        const now = queueAddProbe(videoId);
+        if (now.count > before.count) return true;
+        return position === "next" ? now.nextIsId : now.lastIsId;
     }
 
     // Is `videoId` still anywhere in the page's queue (items ∪ automix)?

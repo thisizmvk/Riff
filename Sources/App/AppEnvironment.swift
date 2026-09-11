@@ -269,6 +269,30 @@ final class AppEnvironment {
         UNUserNotificationCenter.current().add(request)
     }
 
+    /// The artist run of a track subtitle. Click-initiated plays keep the
+    /// InnerTube row's joined byline as `Track.subtitle` ("A, B & C •
+    /// Album • 2024"; search rows "Song • A • Album • 4:08"; videos
+    /// "A • 12M views"), but scrobblers and the track-change banner need
+    /// the artist alone. Same rule as `ArtistLinkLine`: split on "•"/"·";
+    /// the first segment that isn't a kind label is the artist run. A
+    /// plain artist string (page-reported autoplay tracks) passes through
+    /// unchanged; with no usable segment the subtitle is returned as-is.
+    /// The album is deliberately NOT derived here — the second segment is
+    /// a view count, year or duration on some row shapes.
+    static func artistRun(fromSubtitle subtitle: String) -> String {
+        let kindLabels: Set<String> = [
+            "song", "video", "album", "single", "ep", "playlist", "artist", "episode", "podcast",
+        ]
+        let parts: [String] = subtitle
+            .split(whereSeparator: { $0 == "·" || $0 == "•" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if let artist = parts.first(where: { !kindLabels.contains($0.lowercased()) }) {
+            return artist
+        }
+        return subtitle.trimmingCharacters(in: .whitespaces)
+    }
+
     /// True on the very first launch (i.e. before the user has
     /// completed or dismissed the onboarding sheet). Read once at
     /// init; flipping `markOnboardingComplete()` sets the persisted
@@ -722,12 +746,17 @@ final class AppEnvironment {
         let path = comps.path
         let parts = path.split(separator: "/").map(String.init)
         if site == "youtu.be", let v = parts.first, !v.isEmpty {
+            // A pasted link is user transport intent: it must override
+            // a live pause-enforcement window (sleep-timer stop), like
+            // every other user-initiated play.
+            player.noteUserTransportIntent()
             Task { await player.play(videoId: v) }
             return true
         }
         switch parts.first ?? "" {
         case "watch":
             guard let v = params["v"], !v.isEmpty else { return false }
+            player.noteUserTransportIntent()
             if let list = params["list"], !list.isEmpty, !list.hasPrefix("RD") {
                 Task { await player.play(videoId: v, explicitPlaylistId: list) }
             } else {
@@ -1044,6 +1073,10 @@ final class AppEnvironment {
             // D1 — scrobbler dispatch. Pin start time on every videoId
             // change so the eventual scrobble carries the real listen
             // start, not the moment the threshold was crossed.
+            // Click-initiated plays keep the row's joined byline as the
+            // subtitle ("A • Album • 2024") — scrobblers and the banner
+            // get the artist run alone.
+            let artistName = Self.artistRun(fromSubtitle: track.subtitle)
             if self.scrobbleLastSeenVideoId != track.videoId {
                 self.scrobbleTrackStartedAt = Date()
                 self.scrobbleLastSeenVideoId = track.videoId
@@ -1052,12 +1085,12 @@ final class AppEnvironment {
                 // already looking at is noise — and only when enabled in
                 // Settings.
                 self.postTrackChangeNotificationIfEnabled(
-                    title: track.title, artist: track.subtitle
+                    title: track.title, artist: artistName
                 )
             }
             let durationSeconds: Int? = self.player.duration > 0 ? Int(self.player.duration) : nil
             let scrobbleTrack = ScrobbleTrack(
-                artist: track.subtitle,
+                artist: artistName,
                 title: track.title,
                 album: nil,  // YT Music's watch URL doesn't surface album text on the player payload; left nil.
                 durationSeconds: durationSeconds,

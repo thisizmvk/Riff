@@ -1,61 +1,102 @@
 # GitHub Actions CI for Riff.
 #
-# What runs on every push / PR:
-#   1. XcodeGen regenerates the .xcodeproj from project.yml — catches
-#      anyone who forgot to commit a project.yml change.
-#   2. `xcodebuild build` against macOS — surfaces compile errors.
-#   3. `xcodebuild test` runs the parser + queue + resolver suites.
+# Two jobs:
+#   harness        — tools/harness/run.sh (static guards + guard
+#                    self-test + Swift logic harness + JS harness).
+#                    Needs only swiftc and node, so it runs on EVERY
+#                    push and pull request, whatever the branch.
+#   build-and-test — XcodeGen + xcodebuild build + test. Runs on pushes
+#                    to main and on PRs targeting main (its original
+#                    scope — macOS build minutes are expensive).
 #
-# Runner: macos-15 because we need Xcode 16+ on it. XcodeGen's modern
-# default writes pbxproj objectVersion 77, which Xcode 15.x can't read
-# (the macos-14 runner default Xcode is 15.4 → "future Xcode project
-# file format (77)"). macos-15 ships with Xcode 16 lines pre-installed.
-# We additionally pin Xcode via setup-xcode so a runner-image version
-# bump doesn't silently change toolchains under us.
+# Runner: macos-15 because we need Xcode 16+ on it. XcodeGen writes
+# pbxproj objectVersion 77 (pinned via options.xcodeVersion in
+# project.yml), which Xcode 15.x can't read — macos-15 ships with
+# Xcode 16 lines pre-installed. Xcode is selected with a plain
+# xcode-select step (no third-party action) so a runner-image bump
+# fails loudly rather than silently changing toolchains under us.
 
 name: CI
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
-    branches: [main]
+  # Manual re-runs (e.g. after a runner-image change) without a push.
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
+  harness:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Check out repo
+        # v5+ runs on Node.js 24; v4 runs on Node.js 20 which Actions
+        # is forcing off in mid-2026. Pinned to the release commit SHA
+        # so a retagged v5 can't change what runs here.
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Run queue harness
+        run: ./tools/harness/run.sh
+
   build-and-test:
+    # Keep the original trigger scope even though the workflow itself
+    # now fires on every branch (for the harness job above).
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && github.base_ref == 'main')
     runs-on: macos-15
     timeout-minutes: 20
     steps:
       - name: Check out repo
-        # v5+ runs on Node.js 24; v4 runs on Node.js 20 which Actions
-        # is forcing off in mid-2026.
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          # Full history so the CFBundleVersion stamp script
-          # (`git rev-list --count HEAD` in project.yml) gets a real
-          # number rather than 1.
-          fetch-depth: 0
+          # No fetch-depth: 0 here — only release.yml needs full history
+          # (its git rev-list --count HEAD CFBundleVersion stamp); CI
+          # builds and tests fine on a shallow checkout.
+          # Don't leave the repo token in .git/config for later steps.
+          persist-credentials: false
 
       - name: Select Xcode 16.x
-        # Pin the toolchain. The "16" wildcard picks the latest 16.x
-        # the runner image has installed; if the runner image only
-        # ships 15.x this step fails loudly rather than silently
+        # Pin the toolchain without a third-party action: pick the
+        # newest installed Xcode 16. If the runner image only ships
+        # another major version this fails loudly rather than silently
         # falling back to an incompatible Xcode.
-        uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: "16"
-
-      - name: Show toolchain versions
         run: |
+          ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1 > "$RUNNER_TEMP/xcode_path"
+          if [ ! -s "$RUNNER_TEMP/xcode_path" ]; then
+            echo "::error::No Xcode 16.x found on this runner image"
+            exit 1
+          fi
+          read -r XCODE_APP < "$RUNNER_TEMP/xcode_path"
+          sudo xcode-select -s "$XCODE_APP"
           xcodebuild -version
           swift --version
 
-      - name: Install XcodeGen
+      - name: Install XcodeGen (pinned + checksummed)
+        # brew can't pin a formula version; the tagged release zip can.
+        # Version and hash move together — bump both when upgrading,
+        # and keep release.yml's copy of this step in sync.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          brew install xcodegen
+          gh release download 2.45.4 \
+            --repo yonaskolb/XcodeGen \
+            --pattern xcodegen.zip \
+            --dir "$RUNNER_TEMP"
+          echo "090ec29491aad50aec10631bf6e62253fed733c50f3aab0f5ffc86bc170bdbef  $RUNNER_TEMP/xcodegen.zip" > "$RUNNER_TEMP/xcodegen.zip.sha256"
+          shasum -a 256 -c "$RUNNER_TEMP/xcodegen.zip.sha256"
+          unzip -q "$RUNNER_TEMP/xcodegen.zip" -d "$RUNNER_TEMP/xcodegen-dist"
+          echo "$RUNNER_TEMP/xcodegen-dist/xcodegen/bin" >> "$GITHUB_PATH"
 
       - name: Generate Xcode project
         run: |
+          xcodegen --version
           xcodegen generate
 
       - name: Build

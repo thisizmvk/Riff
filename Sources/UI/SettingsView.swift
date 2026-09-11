@@ -1,22 +1,17 @@
 import SwiftUI
 import AppKit
 
-/// User-facing OAuth credential setup. Shown when:
-/// 1. The user explicitly opens it from the menu bar / account menu, or
-/// 2. They tap a Library section while signed in with default credentials
-///    (which can't reach Data API v3).
+/// App settings: account (sign-in / sign-out / cookie import),
+/// playback, scrobbling, interface, AI backends, diagnostics.
 ///
-/// The default `client_id` we ship is the public YouTube TV one, which
-/// works for sign-in but its GCP project doesn't have Data API v3
-/// enabled — so Library calls 403. Pasting their own credentials here
-/// fixes that.
+/// The old "Library access (advanced)" custom-OAuth-client section was
+/// removed: it had no Device-Flow entry point left to use the
+/// credentials, stored the client secret in cleartext UserDefaults and
+/// echoed it back into the field, and its "Save & sign out" discarded
+/// the working cookie session.
 struct SettingsView: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.dismiss) private var dismiss
-
-    @State private var clientId: String = ""
-    @State private var clientSecret: String = ""
-    @State private var saved = false
 
     // MARK: - AI features state
     /// Buffer for the Anthropic API key. We load whatever is in
@@ -118,8 +113,6 @@ struct SettingsView: View {
                     Divider().background(Theme.divider)
                     interfaceSection
                     Divider().background(Theme.divider)
-                    libraryAccessSection
-                    Divider().background(Theme.divider)
                     aiFeaturesSection
                     if !env.blockedArtistIds.isEmpty {
                         Divider().background(Theme.divider)
@@ -139,11 +132,6 @@ struct SettingsView: View {
         }
         .frame(minWidth: 540, minHeight: 620)
         .onAppear {
-            let config = OAuthClientConfig.load()
-            if config.isCustom {
-                clientId = config.clientId
-                clientSecret = config.clientSecret
-            }
             // Load AI features state from Keychain. Show a masked
             // placeholder if a key is already saved — never echo the
             // raw key back into the SecureField, even though SwiftUI
@@ -299,7 +287,7 @@ struct SettingsView: View {
                             .lineLimit(2)
                     }
                 }
-                Text("Riff never sees your password — only the resulting session cookie, stored in your local keychain. This is the recommended path if passkey / 2FA won't complete in the in-app window.")
+                Text("Riff never sees your password — only the resulting session cookies, kept in Riff's private, sandboxed cookie store on this Mac (not the Keychain) and deleted when you sign out. This is the recommended path if passkey / 2FA won't complete in the in-app window.")
                     .font(.system(size: 11))
                     .foregroundStyle(Theme.Text.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -747,25 +735,6 @@ struct SettingsView: View {
         }
     }
 
-    private var libraryAccessSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionTitle("Library access (advanced)")
-            Text("Riff signs you in via Google's WebView flow which gives you full Library access through the YouTube Music cookie session — no setup required. The OAuth Device Flow path below is only useful if you want to access the YouTube Data API directly. Most users can ignore this.")
-                .font(.system(size: 12))
-                .foregroundStyle(Theme.Text.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            DisclosureGroup("Configure custom OAuth credentials") {
-                VStack(alignment: .leading, spacing: 16) {
-                    setupSteps
-                    credentialsBlock
-                }
-                .padding(.top, 12)
-            }
-            .font(.system(size: 12, weight: .semibold))
-            .tint(.white)
-        }
-    }
-
     /// "AI features" — BYO-LLM (Anthropic for now). The user
     /// pastes their own API key + picks a model; Riff uses it to
     /// power the Queue Builder ("vibe → queue") sheet. The key
@@ -1137,7 +1106,15 @@ struct SettingsView: View {
     }
 
     private func saveOllamaSettings() {
-        OllamaProvider.setBaseURL(ollamaBaseURL)
+        // setBaseURL validates (scheme, no /v1 suffix, parseable URL)
+        // and returns false on a rejected value — saying "saved" for
+        // an input that was thrown away sent users to a misleading
+        // connection error later.
+        guard OllamaProvider.setBaseURL(ollamaBaseURL) else {
+            aiSaveStatus = "That Ollama URL doesn't look right — use e.g. http://localhost:11434 (no /v1)."
+            aiTestResult = nil
+            return
+        }
         OllamaProvider.setModel(ollamaModel)
         // Re-hydrate the buffers from the store so the user sees the
         // normalized values (trimmed / defaulted) rather than raw input.
@@ -1255,7 +1232,7 @@ struct SettingsView: View {
     }
 
     /// "Export diagnostics" — writes a folder to ~/Downloads with
-    /// the last 24 h of Riff's os_log entries + the played-history
+    /// this process's recent os_log entries + the played-history
     /// journal + a small manifest (app + macOS version). No API
     /// keys, no cookies, no OAuth tokens. Reveals the folder in
     /// Finder so the user can attach it to a bug report in one
@@ -1337,43 +1314,6 @@ struct SettingsView: View {
         }
     }
 
-    private var intro: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Library access")
-                .font(.system(size: 22, weight: .bold))
-            Text("Riff signs you in via Google's Device Flow using a public YouTube TV OAuth client. That works for sign-in, but the underlying Google Cloud project doesn't expose the YouTube Data API — which is what we need to read your liked songs and playlists.")
-                .font(.system(size: 13))
-                .foregroundStyle(Theme.Text.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("To unlock the Library tab, register your own OAuth Limited-Input client in Google Cloud (free, ~5 min) and paste the credentials below.")
-                .font(.system(size: 13))
-                .foregroundStyle(Theme.Text.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var setupSteps: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Setup")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.Text.secondary)
-                .textCase(.uppercase)
-                .tracking(1.2)
-
-            stepRow(n: 1, title: "Open Google Cloud Console") {
-                Button {
-                    NSWorkspace.shared.open(URL(string: "https://console.cloud.google.com/apis/library/youtube.googleapis.com")!)
-                } label: {
-                    Label("Open Cloud Console", systemImage: "arrow.up.right.square")
-                }
-                .buttonStyle(.bordered)
-            }
-            stepRow(n: 2, title: "Enable the YouTube Data API v3 on a new or existing project.") { EmptyView() }
-            stepRow(n: 3, title: "Go to Credentials → Create Credentials → OAuth client ID. Pick \u{201C}TVs and Limited Input devices\u{201D} as the application type.") { EmptyView() }
-            stepRow(n: 4, title: "Copy the client ID and client secret into the fields below and click Save.") { EmptyView() }
-        }
-    }
-
     private func stepRow<Content: View>(n: Int, title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Text("\(n)")
@@ -1389,59 +1329,6 @@ struct SettingsView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 content()
             }
-        }
-    }
-
-    private var credentialsBlock: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("OAuth credentials")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Theme.Text.secondary)
-                .textCase(.uppercase)
-                .tracking(1.2)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Client ID")
-                    .font(.system(size: 12, weight: .semibold))
-                TextField("xxxxxxxxx-xxxxxxxx.apps.googleusercontent.com", text: $clientId)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Client secret")
-                    .font(.system(size: 12, weight: .semibold))
-                SecureField("GOCSPX-…", text: $clientSecret)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-            }
-            HStack {
-                Button("Save & sign out") {
-                    let config = OAuthClientConfig(
-                        clientId: clientId.trimmingCharacters(in: .whitespacesAndNewlines),
-                        clientSecret: clientSecret.trimmingCharacters(in: .whitespacesAndNewlines)
-                    )
-                    config.save()
-                    env.signOut()
-                    saved = true
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.red)
-                .disabled(clientId.isEmpty || clientSecret.isEmpty)
-
-                Button("Reset to defaults") {
-                    OAuthClientConfig.reset()
-                    clientId = ""
-                    clientSecret = ""
-                    env.signOut()
-                }
-                .buttonStyle(.bordered)
-
-                if saved {
-                    Text("Saved. Sign in again to use the new credentials.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.green)
-                }
-            }
-            .padding(.top, 4)
         }
     }
 }

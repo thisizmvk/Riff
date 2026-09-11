@@ -52,6 +52,24 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         let selected: Bool
     }
 
+    // MARK: Page-lifetime recovery state
+
+    /// True once a navigation has COMMITTED a document on a YouTube /
+    /// Google host. Gated on the host, not merely on didCommit: a
+    /// captive portal commits a non-YouTube document whose posts the
+    /// message handler below drops, so `ready` would never arrive —
+    /// the retry must keep going through such a commit.
+    private var hasCommitted = false
+    /// The single in-flight load-retry chain (nil when none). Held so
+    /// a commit can cancel it and a new failure never stacks a second.
+    private var retryTask: Task<Void, Never>?
+    /// Next retry delay: 5s tripling to a 60s cap. Never gives up —
+    /// a bounded retry that stops would recreate the dead-bridge state
+    /// this recovery exists to fix; at 60s cadence looping is cheap.
+    private var retryDelay: TimeInterval = 5
+
+    private static let homeURL = URL(string: "https://music.youtube.com")!
+
     override init() {
         let config = WKWebViewConfiguration()
         let userContent = WKUserContentController()
@@ -88,8 +106,84 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         userContent.add(self, name: "bridge")
         webView.navigationDelegate = self
 
-        if let url = URL(string: "https://music.youtube.com") {
-            webView.load(URLRequest(url: url))
+        webView.load(URLRequest(url: Self.homeURL))
+    }
+
+    // MARK: WKNavigationDelegate — page-lifetime recovery
+    //
+    // These handlers recover the PAGE, not the queue. A launch-time
+    // load that fails (offline / DNS / captive portal) or a WebContent
+    // process WebKit terminates mid-session leaves the bridge
+    // permanently dead otherwise: the user script never (re-)runs,
+    // `ready` never posts, and PlayerBridge queues commands forever
+    // with nothing logged above `.debug`. Contract item 4 ("a failed
+    // page action is never turned into a reload") concerns page
+    // actions on a LIVE page; reloading a page that failed to exist,
+    // or whose process died, is a page-lifecycle concern and never
+    // routes through PlayerBridge.navigate.
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        // Consent / sign-in flows redirect through google.com; both
+        // families count as "the real page is loading". Anything else
+        // (captive portal) keeps the retry chain alive.
+        guard let host = webView.url?.host,
+              host == "youtube.com" || host.hasSuffix(".youtube.com")
+                || host == "google.com" || host.hasSuffix(".google.com")
+        else { return }
+        hasCommitted = true
+        retryTask?.cancel()
+        retryTask = nil
+        retryDelay = 5
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        Log.bridge.notice("page loaded: \(webView.url?.host ?? "?", privacy: .public)")
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        handleLoadFailure(error)
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        handleLoadFailure(error)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        // Memory pressure / JS OOM on long sessions. `reload()` would
+        // re-load the current ?v= watch URL, and with
+        // mediaTypesRequiringUserActionForPlayback = [] YT Music would
+        // autoplay that track from 0 — surprising if the user was
+        // paused when the process died. Load the origin instead; the
+        // re-run user script posts `ready` through the normal path.
+        Log.bridge.error("WebContent process terminated — reloading music.youtube.com")
+        hasCommitted = false
+        retryTask?.cancel()
+        retryTask = nil
+        retryDelay = 5
+        webView.load(URLRequest(url: Self.homeURL))
+    }
+
+    private func handleLoadFailure(_ error: Error) {
+        let ns = error as NSError
+        // NSURLErrorCancelled (-999): every location.href navigate
+        // issued while a load is still pending cancels the earlier
+        // load. WebKitErrorDomain 102 (frame load interrupted by
+        // policy change): fires on redirects. Neither is a failure;
+        // retrying on them would fight legitimate navigations.
+        if ns.domain == NSURLErrorDomain && ns.code == NSURLErrorCancelled { return }
+        if ns.domain == "WebKitErrorDomain" && ns.code == 102 { return }
+        Log.bridge.notice("page load failed: \(ns.localizedDescription, privacy: .public) [\(ns.domain, privacy: .public) \(ns.code)]")
+        // Retry only a load that never produced a real page. A
+        // mid-session failure on a live page must not become a reload.
+        guard !hasCommitted, retryTask == nil else { return }
+        let delay = retryDelay
+        retryDelay = min(retryDelay * 3, 60)
+        retryTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled, let self, !self.hasCommitted else { return }
+            self.retryTask = nil
+            Log.bridge.notice("retrying music.youtube.com load (waited \(Int(delay))s)")
+            self.webView.load(URLRequest(url: Self.homeURL))
         }
     }
 

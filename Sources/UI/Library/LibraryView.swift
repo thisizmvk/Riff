@@ -8,12 +8,35 @@ struct LibraryView: View {
     @State private var items: [MediaItem] = []
     @State private var mixedForYou: [HomeSection] = []
     /// D3 — "New from artists you follow". Bandcamp-inspired
-    /// chronological release feed. Only populated when the user is on
+    /// chronological release feed. Only fetched when the user is on
     /// the Artists sub-section AND signed-in; otherwise we don't pay
-    /// the fan-out cost (up to N parallel /browse calls).
+    /// the fan-out cost (up to N parallel /browse calls). Kept (not
+    /// cleared) on other sections so a return to Artists shows the
+    /// cached tiles at once; it renders on Artists only.
     @State private var followedReleases: [MediaItem] = []
     @State private var followedReleasesLoading: Bool = false
+    /// Cache stamp for the D3 rail: the ids of the artists its last
+    /// fan-out scanned (the first `followedReleasesArtistLimit`
+    /// followed artists, server order) and when it ran. A return to
+    /// Artists with the same scan set inside `followedReleasesTTL`
+    /// reuses the tiles instead of re-downloading up to 25 artist
+    /// pages. Cleared with the other per-account state on sign-out.
+    @State private var followedReleasesKey: [String] = []
+    @State private var followedReleasesFetchedAt: Date?
+    /// True while a network section's fetch (and its empty-library
+    /// session probe) is in flight, so an empty `items` reads as
+    /// "loading" rather than "No liked songs yet" until the answer
+    /// lands. Starts true: `signedInView`'s `.task` always loads on
+    /// appear, so its first frame is a load, not an empty library.
+    @State private var isLoading: Bool = true
     @State private var errorMessage: String?
+
+    /// D3 rail scan width — the same default
+    /// `newReleasesFromFollowedArtists` uses.
+    private static let followedReleasesArtistLimit = 25
+    /// How long a D3 rail stays fresh. After that, a return to Artists
+    /// refreshes it — in the background, the cached tiles stay up.
+    private static let followedReleasesTTL: TimeInterval = 10 * 60
 
     enum Section: String, CaseIterable, Identifiable {
         case liked = "Liked", playlists = "Playlists", albums = "Albums", artists = "Artists", podcasts = "Podcasts", history = "History"
@@ -130,10 +153,45 @@ struct LibraryView: View {
             }
             .navigationDestination(for: MediaItem.self) { DetailView(item: $0) }
         }
+        // LibraryView stays mounted across tab switches, so its
+        // per-account state outlives a sign-out. Drop it on the
+        // transition to signed-out (deliberate sign-out or a
+        // server-side session expiry); the anonymous state is on
+        // screen then, so nothing flashes, and the next sign-in starts
+        // from empty instead of painting the old account's grid, mixes
+        // and releases until its own fetch lands. On the stack itself
+        // (not its root) so it fires even with a detail page pushed.
+        .onChange(of: env.isSignedIn) { _, signedIn in
+            if !signedIn { resetAccountState() }
+        }
+    }
+
+    /// Clears everything LibraryView holds for the signed-in account.
+    /// See the `onChange(of: env.isSignedIn)` in `body`.
+    private func resetAccountState() {
+        items = []
+        mixedForYou = []
+        followedReleases = []
+        followedReleasesKey = []
+        followedReleasesFetchedAt = nil
+        followedReleasesLoading = false
+        // The next sign-in's first frame is a load (see `isLoading`).
+        isLoading = true
+        errorMessage = nil
+        filterText = ""
+        // A DetailView pushed from the old account's library (e.g. one
+        // of its private playlists) must not stay stacked over the
+        // anonymous root or survive into the next account's session.
+        env.libraryNavPath = NavigationPath()
     }
 
     private var signedInView: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        // One filter → sort → pin pass per body evaluation.
+        // `displayedItems` is computed (ICU collation over up to ~2,000
+        // paged rows); reading it at each use site below re-ran the
+        // whole pass two to three times per body.
+        let displayed = displayedItems
+        return VStack(alignment: .leading, spacing: 12) {
             Picker("Section", selection: $section) {
                 ForEach(Section.allCases) { s in Text(s.rawValue).tag(s) }
             }
@@ -163,7 +221,7 @@ struct LibraryView: View {
                 .clipShape(Capsule())
 
                 if !filterText.isEmpty {
-                    Text("\(displayedItems.count) of \(items.count)")
+                    Text("\(displayed.count) of \(items.count)")
                         .font(.system(size: 11))
                         .foregroundStyle(Theme.Text.secondary)
                 }
@@ -235,15 +293,26 @@ struct LibraryView: View {
                     .padding(.bottom, 12)
                 }
                 if items.isEmpty && errorMessage == nil {
-                    EmptyState(
-                        systemImage: sectionEmptyIcon,
-                        title: sectionEmptyTitle,
-                        subtitle: sectionEmptySubtitle,
-                        cta: sectionEmptyCTA
-                    )
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 40)
-                } else if displayedItems.isEmpty {
+                    if isLoading {
+                        // Still fetching — "No liked songs yet" would
+                        // be a claim we can't make until the answer
+                        // (and, for an empty one, the session probe)
+                        // lands.
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 40)
+                    } else {
+                        EmptyState(
+                            systemImage: sectionEmptyIcon,
+                            title: sectionEmptyTitle,
+                            subtitle: sectionEmptySubtitle,
+                            cta: sectionEmptyCTA
+                        )
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 40)
+                    }
+                } else if displayed.isEmpty {
                     EmptyState(
                         systemImage: "line.3.horizontal.decrease.circle",
                         title: "No matches",
@@ -256,7 +325,7 @@ struct LibraryView: View {
                     .padding(.top, 40)
                 } else {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 16)], spacing: 16) {
-                        ForEach(displayedItems) { item in
+                        ForEach(displayed) { item in
                             ThumbnailButton(item: item, showPinAction: true)
                                 .overlay(alignment: .topLeading) {
                                     // Visual cue: tiny pin badge on the
@@ -380,8 +449,16 @@ struct LibraryView: View {
         // mixed feed is best-effort — anonymous responses are empty
         // and any failure should silently hide the carousels rather
         // than show an error banner above the user's primary library
-        // content.
-        async let mixedFetch = env.innerTube.browseMixedForYou()
+        // content. The carousels render on Playlists only, so the feed
+        // is fetched only there (it used to fire on every section
+        // switch, History included); other sections leave the last
+        // carousels untouched for the next Playlists visit.
+        let client = env.innerTube
+        let wantsMixes = section == .playlists
+        async let mixedFetch = Self.fetchMixedForYou(using: client, enabled: wantsMixes)
+        // The server-ordered Artists list this load fetched, handed to
+        // the D3 rail (nil when this isn't Artists or the fetch failed).
+        var followedArtists: [MediaItem]?
         if section == .history {
             // History comes from Riff's OWN journal — the same
             // `playedEntries` Home's "You've been playing" renders. The
@@ -416,7 +493,13 @@ struct LibraryView: View {
                                  setVideoId: item.setVideoId, durationSeconds: item.durationSeconds, year: item.year)
             }
             errorMessage = nil
+            // A cancelled network load (the section just left) exits
+            // without clearing its flag — the replacement load owns it.
+            // History is synchronous, so clear it here or an empty
+            // journal would show a spinner instead of its empty state.
+            isLoading = false
         } else {
+            isLoading = true
             do {
                 var fetched = try await env.innerTube.library(section: section)
                 guard !Task.isCancelled else { return }
@@ -431,16 +514,27 @@ struct LibraryView: View {
                 }
                 items = fetched
                 errorMessage = nil
+                if section == .artists { followedArtists = fetched }
                 // Silent auth decay: a stale-but-unexpired cookie makes
                 // InnerTube answer library calls with an anonymous-shaped
                 // EMPTY response instead of an error — the user then sees
                 // "No liked songs yet" for a library they know is full.
                 // Confirm with a cheap account probe before believing an
-                // empty library from a signed-in user.
-                if fetched.isEmpty, env.isSignedIn,
-                   await env.innerTube.fetchAccountInfo() == nil {
-                    errorMessage = "Your YouTube Music session looks expired — sign in again to see your library."
+                // empty library from a signed-in user. `sessionLiveness`
+                // is tri-state: only a definitive anonymous answer
+                // (false) means expired; a transport failure (nil) is
+                // unknown and falls through to the normal empty state.
+                if fetched.isEmpty, env.isSignedIn {
+                    let alive = await env.innerTube.sessionLiveness()
+                    // A section switch cancels this load mid-probe; the
+                    // cancelled request must not land a stale "session
+                    // looks expired" banner on the NEW section.
+                    guard !Task.isCancelled else { return }
+                    if alive == false {
+                        errorMessage = "Your YouTube Music session looks expired — sign in again to see your library."
+                    }
                 }
+                isLoading = false
             } catch {
                 // A section switch cancels the previous load; its
                 // stale catch must not blank the NEW section or show
@@ -448,28 +542,39 @@ struct LibraryView: View {
                 if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
                 items = []
                 errorMessage = LoadErrorPresenter.message(for: error, env: env)
+                isLoading = false
             }
         }
-        // try? collapses both "feed errored" and "feed returned empty"
-        // into the same hide-the-carousels code path — exactly what we
-        // want for a best-effort secondary surface.
-        let mixedRaw = (try? await mixedFetch) ?? []
+        let mixedRaw = await mixedFetch
         guard !Task.isCancelled else { return }
-        mixedForYou = mixedRaw.compactMap { sec in
-            let kept = sec.items.filter { !env.isBlocked($0) }
-            guard !kept.isEmpty else { return nil }
-            return HomeSection(id: sec.id, title: sec.title, items: kept)
+        if let mixedRaw {
+            mixedForYou = mixedRaw.compactMap { sec in
+                let kept = sec.items.filter { !env.isBlocked($0) }
+                guard !kept.isEmpty else { return nil }
+                return HomeSection(id: sec.id, title: sec.title, items: kept)
+            }
         }
 
-        // D3 — only fetch the followed-artist feed when the user is
+        // D3 — only refresh the followed-artist feed when the user is
         // viewing Artists. Fan-out is expensive (up to N /browse calls
         // in parallel) and the rail only renders on this section, so
-        // we don't pay the cost on every section switch.
-        if section == .artists, env.isSignedIn {
-            await loadFollowedReleases()
-        } else {
-            followedReleases = []
+        // we don't pay the cost on every section switch. The rail is
+        // not cleared elsewhere: it stays cached for the next visit.
+        // If the Artists list itself failed, keep whatever rail we had
+        // (the error banner covers the failure; Retry reloads).
+        if section == .artists, env.isSignedIn, let followedArtists {
+            await loadFollowedReleases(followedArtists: followedArtists)
         }
+    }
+
+    /// "Mixed for you" renders on the Playlists section only, so it is
+    /// fetched only there. nil = not requested (keep the carousels from
+    /// the last Playlists visit); [] = the feed failed or came back
+    /// empty. `try?` collapses both into the same hide-the-carousels
+    /// path — exactly what we want for a best-effort secondary surface.
+    nonisolated private static func fetchMixedForYou(using client: InnerTubeClient, enabled: Bool) async -> [HomeSection]? {
+        guard enabled else { return nil }
+        return (try? await client.browseMixedForYou()) ?? []
     }
 
     /// D3 — header + horizontal release tiles for the followed-artist
@@ -517,13 +622,50 @@ struct LibraryView: View {
     /// any failure (network, parser drift, no subscribed artists)
     /// collapses to an empty rail rather than an error banner — the
     /// Artists grid below remains the user's primary surface.
-    private func loadFollowedReleases() async {
+    ///
+    /// Cached for the session: the fan-out (up to 25 artist pages)
+    /// re-runs only when the scanned artist set changes or the rail is
+    /// older than `followedReleasesTTL`. `followedArtists` is the
+    /// Artists list `load()` already fetched, in server order — never
+    /// the sorted / filtered / pinned `displayedItems`, which would
+    /// change which artists get scanned.
+    private func loadFollowedReleases(followedArtists: [MediaItem]) async {
+        let key = followedArtists.filter { $0.kind == .artist }
+            .prefix(Self.followedReleasesArtistLimit)
+            .map(\.id)
+        guard !key.isEmpty else {
+            // No followed artists: nothing to scan, skip the network.
+            followedReleases = []
+            followedReleasesKey = []
+            followedReleasesFetchedAt = nil
+            return
+        }
+        if key == followedReleasesKey, let fetchedAt = followedReleasesFetchedAt,
+           Date().timeIntervalSince(fetchedAt) < Self.followedReleasesTTL {
+            // Fresh rail for the same artists — reuse it. Re-apply the
+            // block filter: the user may have blocked an artist since.
+            followedReleases = followedReleases.filter { !env.isBlocked($0) }
+            return
+        }
         followedReleasesLoading = true
         defer { followedReleasesLoading = false }
-        let raw = (try? await env.innerTube.newReleasesFromFollowedArtists()) ?? []
+        let raw = (try? await env.innerTube.newReleasesFromFollowedArtists(limit: Self.followedReleasesArtistLimit)) ?? []
+        // A section switch cancels the fan-out mid-flight; its partial
+        // result must neither replace the rail nor seed the cache.
+        guard !Task.isCancelled else { return }
         // Mirror the blocked-artist filter we apply elsewhere — if the
         // user has thumbed-down an artist, their releases shouldn't
         // re-surface here through the side door.
         followedReleases = raw.filter { !env.isBlocked($0) }
+        // Cache only a non-empty rail. Every per-artist failure is
+        // swallowed to [], so an empty result for a non-empty artist
+        // set is almost always transient — let the next visit retry.
+        if raw.isEmpty {
+            followedReleasesKey = []
+            followedReleasesFetchedAt = nil
+        } else {
+            followedReleasesKey = key
+            followedReleasesFetchedAt = Date()
+        }
     }
 }

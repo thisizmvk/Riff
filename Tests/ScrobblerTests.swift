@@ -160,30 +160,62 @@ final class ScrobblerTests: XCTestCase {
             durationSeconds: 200, startedAt: Date()
         )
 
-        // First tick: track just started, not yet eligible.
-        coord.observe(track: track, videoId: "v1", elapsed: 1, duration: 200, isPlaying: true)
+        let t0 = Date()
+
+        // First playing tick: now-playing fires, scrobble doesn't.
+        coord.observe(track: track, videoId: "v1", elapsed: 1, duration: 200,
+                      isPlaying: true, now: t0)
         // Allow the Task in observe() a beat to run.
         await Task.yield()
         await Task.yield()
         XCTAssertEqual(stub.nowPlayingCalls.count, 1, "now-playing fires on first eligible tick")
         XCTAssertEqual(stub.scrobbleCalls.count, 0, "not yet eligible")
 
-        // Subsequent tick: still under threshold. No new dispatches.
-        coord.observe(track: track, videoId: "v1", elapsed: 50, duration: 200, isPlaying: true)
+        // 49 more ticks, 2 s of wall clock apart ⇒ 98 s LISTENED:
+        // still under the 100 s (50 %) threshold. Eligibility is
+        // measured on listened time, not position, so the elapsed
+        // values are irrelevant here.
+        for i in 1...49 {
+            coord.observe(track: track, videoId: "v1", elapsed: Double(i) * 2, duration: 200,
+                          isPlaying: true, now: t0.addingTimeInterval(Double(i) * 2))
+        }
         await Task.yield()
         XCTAssertEqual(stub.nowPlayingCalls.count, 1, "now-playing is once-per-track")
-        XCTAssertEqual(stub.scrobbleCalls.count, 0)
+        XCTAssertEqual(stub.scrobbleCalls.count, 0, "98 s listened < 100 s threshold")
 
-        // Crossing 50% (100s on a 200s track): scrobble fires.
-        coord.observe(track: track, videoId: "v1", elapsed: 105, duration: 200, isPlaying: true)
+        // The tick that crosses 100 s listened: scrobble fires.
+        coord.observe(track: track, videoId: "v1", elapsed: 100, duration: 200,
+                      isPlaying: true, now: t0.addingTimeInterval(100))
         await Task.yield()
         await Task.yield()
         XCTAssertEqual(stub.scrobbleCalls.count, 1)
 
         // Further ticks don't re-scrobble the same track.
-        coord.observe(track: track, videoId: "v1", elapsed: 150, duration: 200, isPlaying: true)
+        coord.observe(track: track, videoId: "v1", elapsed: 102, duration: 200,
+                      isPlaying: true, now: t0.addingTimeInterval(102))
         await Task.yield()
         XCTAssertEqual(stub.scrobbleCalls.count, 1, "scrobble is once-per-track")
+    }
+
+    /// The regression the listened-time gate fixes: a restored session
+    /// (or a seek) that lands past 50 % must NOT scrobble — position
+    /// is not proof the user heard the track.
+    @MainActor
+    func testCoordinatorDoesNotScrobbleOnSeekPastThreshold() async {
+        let stub = StubService()
+        let coord = ScrobblerCoordinator(services: [stub])
+        let track = ScrobbleTrack(artist: "A", title: "T", album: nil,
+                                  durationSeconds: 200, startedAt: Date())
+        let t0 = Date()
+        coord.observe(track: track, videoId: "v1", elapsed: 150, duration: 200,
+                      isPlaying: true, now: t0)
+        coord.observe(track: track, videoId: "v1", elapsed: 151, duration: 200,
+                      isPlaying: true, now: t0.addingTimeInterval(1))
+        await Task.yield()
+        await Task.yield()
+        XCTAssertEqual(stub.nowPlayingCalls.count, 1)
+        XCTAssertEqual(stub.scrobbleCalls.count, 0,
+                       "position 150 s but only ~1 s listened — no scrobble")
     }
 
     @MainActor
@@ -206,16 +238,27 @@ final class ScrobblerTests: XCTestCase {
         let coord = ScrobblerCoordinator(services: [stub])
         let t1 = ScrobbleTrack(artist: "A", title: "T1", album: nil, durationSeconds: 200, startedAt: Date())
         let t2 = ScrobbleTrack(artist: "A", title: "T2", album: nil, durationSeconds: 200, startedAt: Date())
-        // Play first track past threshold.
-        coord.observe(track: t1, videoId: "v1", elapsed: 105, duration: 200, isPlaying: true)
+        let t0 = Date()
+        // Play the first track to 100 s of LISTENED time (51 ticks,
+        // 2 s of wall clock apart).
+        for i in 0...50 {
+            coord.observe(track: t1, videoId: "v1", elapsed: Double(i) * 2, duration: 200,
+                          isPlaying: true, now: t0.addingTimeInterval(Double(i) * 2))
+        }
         await Task.yield(); await Task.yield()
         XCTAssertEqual(stub.scrobbleCalls.count, 1)
         // Switch to a new videoId — now-playing and scrobble both
-        // become available again.
-        coord.observe(track: t2, videoId: "v2", elapsed: 1, duration: 200, isPlaying: true)
+        // become available again, and the listened window restarts
+        // from zero.
+        let s0 = t0.addingTimeInterval(200)
+        coord.observe(track: t2, videoId: "v2", elapsed: 1, duration: 200,
+                      isPlaying: true, now: s0)
         await Task.yield(); await Task.yield()
         XCTAssertEqual(stub.nowPlayingCalls.count, 2)
-        coord.observe(track: t2, videoId: "v2", elapsed: 105, duration: 200, isPlaying: true)
+        for i in 1...50 {
+            coord.observe(track: t2, videoId: "v2", elapsed: Double(i) * 2, duration: 200,
+                          isPlaying: true, now: s0.addingTimeInterval(Double(i) * 2))
+        }
         await Task.yield(); await Task.yield()
         XCTAssertEqual(stub.scrobbleCalls.count, 2)
     }
@@ -227,7 +270,11 @@ final class ScrobblerTests: XCTestCase {
         notReady.isReady = false
         let coord = ScrobblerCoordinator(services: [ready, notReady])
         let track = ScrobbleTrack(artist: "A", title: "T", album: nil, durationSeconds: 200, startedAt: Date())
-        coord.observe(track: track, videoId: "v1", elapsed: 105, duration: 200, isPlaying: true)
+        let t0 = Date()
+        for i in 0...50 {
+            coord.observe(track: track, videoId: "v1", elapsed: Double(i) * 2, duration: 200,
+                          isPlaying: true, now: t0.addingTimeInterval(Double(i) * 2))
+        }
         await Task.yield(); await Task.yield()
         XCTAssertEqual(ready.nowPlayingCalls.count, 1)
         XCTAssertEqual(ready.scrobbleCalls.count, 1)

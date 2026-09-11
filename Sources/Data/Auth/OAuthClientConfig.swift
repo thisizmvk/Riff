@@ -1,11 +1,12 @@
 import Foundation
 
-/// User-configurable OAuth client credentials. Defaults to the public
-/// YouTube TV `client_id`/`secret` pair (works for sign-in but the GCP
-/// project doesn't have YouTube Data API v3 enabled, so Library reads
-/// 403). Users who want Library access register their own OAuth Limited-
-/// Input Device client at console.cloud.google.com, enable the YouTube
-/// Data API v3, and paste the credentials here.
+/// OAuth client credentials for the legacy Device-Flow path. Always the
+/// public YouTube TV `client_id`/`secret` pair in practice: the Settings
+/// UI that let users paste a custom client (and wrote its secret to
+/// cleartext UserDefaults) was removed — that path had no sign-in entry
+/// point and signing out to "apply" it destroyed the working cookie
+/// session. `load()` still honours values an older build stored until
+/// `reset()` purges them; nothing writes them any more.
 struct OAuthClientConfig: Sendable {
     let clientId: String
     let clientSecret: String
@@ -40,16 +41,12 @@ struct OAuthClientConfig: Sendable {
         return .default
     }
 
-    func save() {
-        if isCustom {
-            UserDefaults.standard.set(clientId, forKey: Self.idKey)
-            UserDefaults.standard.set(clientSecret, forKey: Self.secretKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: Self.idKey)
-            UserDefaults.standard.removeObject(forKey: Self.secretKey)
-        }
-    }
+    // No `save()`: a client secret must never be written to
+    // UserDefaults (a cleartext plist). If custom credentials ever come
+    // back, store them with `Keychain.set` like every other credential.
 
+    /// Removes any custom id/secret an older build stored in
+    /// UserDefaults. Safe to call on every launch (no-op when absent).
     static func reset() {
         UserDefaults.standard.removeObject(forKey: idKey)
         UserDefaults.standard.removeObject(forKey: secretKey)

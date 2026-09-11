@@ -246,6 +246,61 @@ do {
     check(none.isEmpty, "context start beyond history clamps safely")
 }
 
+// ── 10b. Repeat All anchor survives the history cap (mirrors ────────
+//         PlayerBridge.archiveCurrent + the .ended cycle builder) ─────
+// The context start is an absolute index into playedEntries; the cap
+// trims from the FRONT, so every trimmed entry must shift the anchor
+// down. Without the shift, a user at the cap (500 plays) got a cycle of
+// just the current track and Repeat All fell into radio.
+do {
+    func archiveShiftingAnchor(_ q: QueueManager, _ id: String, _ anchor: inout Int) {
+        let prevCount = q.playedEntries.count
+        let prevTail = q.playedEntries.last
+        q.archive(item(id))
+        guard q.playedEntries.last != prevTail else { return }   // tail dedupe: nothing appended
+        let trimmed = max(0, prevCount + 1 - q.playedEntries.count)
+        if trimmed > 0 { anchor = max(0, anchor - trimmed) }
+    }
+    func repeatAllCycle(_ q: QueueManager, anchor: Int, current: String) -> [String] {
+        var cycle = q.playedEntries[min(anchor, q.playedEntries.count)...].map(\.item)
+        cycle.append(item(current))
+        var seen = Set<String>()
+        return cycle.filter { seen.insert($0.id).inserted }.map(\.id)
+    }
+
+    // History already AT the cap when the context starts.
+    let full = freshQ(cap: 3)
+    for h in ["h1", "h2", "h3"] { full.archive(item(h)) }
+    var anchor = full.playedEntries.count             // context start
+    archiveShiftingAnchor(full, "a1", &anchor)        // a2 starts
+    archiveShiftingAnchor(full, "a2", &anchor)        // a3 starts
+    check(repeatAllCycle(full, anchor: anchor, current: "a3") == ["a1", "a2", "a3"],
+          "repeat-all at the history cap: 3-track context cycles all 3 tracks (was just the current one)")
+
+    // Cap crossed MID-context.
+    let mid = freshQ(cap: 5)
+    for h in ["h1", "h2", "h3", "h4"] { mid.archive(item(h)) }
+    var midAnchor = mid.playedEntries.count
+    for a in ["a1", "a2", "a3"] { archiveShiftingAnchor(mid, a, &midAnchor) }
+    check(repeatAllCycle(mid, anchor: midAnchor, current: "a4") == ["a1", "a2", "a3", "a4"],
+          "repeat-all when the cap is crossed mid-context: no context track dropped, no pre-context track leaked in")
+
+    // A context longer than the cap stays bounded (anchor clamps at 0).
+    let long = freshQ(cap: 3)
+    var longAnchor = 0
+    for a in ["a1", "a2", "a3", "a4", "a5"] { archiveShiftingAnchor(long, a, &longAnchor) }
+    check(longAnchor == 0 && repeatAllCycle(long, anchor: longAnchor, current: "a6") == ["a3", "a4", "a5", "a6"],
+          "repeat-all context longer than the cap: anchor clamps at 0, cycle = retained history + current")
+
+    // A tail-dedupe no-op at the cap must not shift the anchor.
+    let dup = freshQ(cap: 3)
+    for h in ["h1", "h2", "h3"] { dup.archive(item(h)) }
+    var dupAnchor = 1
+    archiveShiftingAnchor(dup, "h3", &dupAnchor)
+    check(dupAnchor == 1 && dup.playedEntries.map(\.item.id) == ["h1", "h2", "h3"],
+          "archive tail-dedupe at the cap is a no-op for the Repeat All anchor")
+}
+
 
 // ── 11. QueuePolicy decision table — the BEHAVIOR CONTRACT ──────────
 // Each row is a user-facing promise from docs/QUEUE-DESIGN.md. Changing

@@ -132,7 +132,7 @@ struct OnboardingSheet: View {
                 } else {
                     labeledBenefit("nosign", "No ads", "If your Google account has YouTube Music Premium, playback is ad-free.")
                     labeledBenefit("heart.text.square", "Your library", "Liked Songs, playlists, and podcast subscriptions sync in.")
-                    labeledBenefit("lock.shield", "Stays on your Mac", "Riff has no account system — the sign-in cookie lives only in your local keychain, never sent anywhere but Google.")
+                    labeledBenefit("lock.shield", "Stays on your Mac", "Riff has no account system — the sign-in cookie stays in this Mac's local cookie store, never sent anywhere but Google.")
                 }
             }
             .frame(maxWidth: 380)

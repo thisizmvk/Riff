@@ -59,11 +59,22 @@ enum CookieJar {
 
     enum ImportResult { case success(count: Int); case missingAuthCookie; case empty }
 
+    /// Lifetime (seconds) stamped on imported cookies. `document.cookie`
+    /// carries no expiry, and a Set-Cookie without Expires/Max-Age
+    /// builds a SESSION cookie (`isSessionOnly`) that neither jar
+    /// persists — the import vanished on relaunch and then read as
+    /// "session expired". An explicit Max-Age makes both jars save it.
+    /// 400 days is CFNetwork's / Chrome's cap (longer is clamped);
+    /// Google re-sets its own expiry when it rotates cookies, and
+    /// sign-out deletes these like any other youtube.com cookie.
+    private static let importedCookieMaxAge: Int = 400 * 24 * 60 * 60
+
     /// Load a user-pasted session (from a real-browser YT Music
     /// login) into both cookie stores. Parsing lives in
     /// `CookieImporter`; this persists. Cookies are built through
     /// Foundation's URL-scoped parser against `InnerTubeClient.baseURL`
-    /// so their scope matches exactly the endpoint the client uses.
+    /// so their scope matches exactly the endpoint the client uses,
+    /// with an explicit Max-Age so they survive relaunch.
     static func importPastedCookies(_ raw: String) async -> ImportResult {
         let pairs = CookieImporter.parse(raw)
         guard !pairs.isEmpty else { return .empty }
@@ -72,7 +83,7 @@ enum CookieJar {
         let wk = WKWebsiteDataStore.default().httpCookieStore
         var written = 0
         for (key, val) in pairs {
-            let setCookieValue = key + "=" + val + "; Path=/; Secure"
+            let setCookieValue = key + "=" + val + "; Path=/; Secure; Max-Age=" + String(importedCookieMaxAge)
             let built = HTTPCookie.cookies(
                 withResponseHeaderFields: ["Set-Cookie": setCookieValue],
                 for: url

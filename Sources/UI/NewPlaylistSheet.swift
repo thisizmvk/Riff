@@ -101,16 +101,38 @@ struct NewPlaylistSheet: View {
         let source = env.newPlaylistSource
         Task {
             do {
+                // Every branch yields the created playlistId — nil
+                // means nothing was actually created/added (e.g. a 2xx
+                // response without a `playlistId` key, no current
+                // track, or an empty queue). Treat that as a failure
+                // instead of dismissing as if it worked.
+                let plid: String?
                 switch source {
                 case .currentTrack:
-                    _ = try await env.player.createPlaylistWithCurrentTrack(title: trimmed)
+                    plid = try await env.player.createPlaylistWithCurrentTrack(title: trimmed)
                 case .queue:
-                    _ = try await env.player.savePlaylistFromQueue(title: trimmed)
+                    plid = try await env.player.savePlaylistFromQueue(title: trimmed)
                 case .item(let item):
-                    let plid = try await env.innerTube.createPlaylist(title: trimmed)
+                    plid = try await env.innerTube.createPlaylist(title: trimmed)
                     if let plid {
                         try await env.innerTube.addToPlaylist(videoId: item.id, playlistId: plid)
                     }
+                }
+                guard plid != nil else {
+                    let reason: String
+                    switch source {
+                    case .currentTrack where env.player.currentTrack == nil:
+                        reason = "no track is playing."
+                    case .queue where env.player.upNext.isEmpty:
+                        reason = "the queue is empty."
+                    default:
+                        reason = "YouTube Music didn't return a playlist id."
+                    }
+                    await MainActor.run {
+                        self.error = "Couldn't create playlist — \(reason)"
+                        creating = false
+                    }
+                    return
                 }
                 env.reloadUserPlaylists()
                 await MainActor.run {

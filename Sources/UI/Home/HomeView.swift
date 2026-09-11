@@ -15,6 +15,12 @@ struct HomeView: View {
     @State private var activeChip: InnerTubeClient.HomeChip?
     @State private var loading = true
     @State private var errorMessage: String?
+    /// One-shot guard: once a fetch has succeeded, popping back to
+    /// Home doesn't re-run the full browse-home fetch (the `.task`
+    /// modifier restarts on every re-appearance because the ScrollView
+    /// is the NavigationStack root). Explicit refreshes (sign-in flip,
+    /// error-banner retry) bypass it via `load(force: true)`.
+    @State private var didInitialLoad = false
 
     var body: some View {
         @Bindable var env = env
@@ -23,7 +29,7 @@ struct HomeView: View {
                 LazyVStack(alignment: .leading, spacing: 32) {
                     if let errorMessage {
                         ErrorBanner(message: errorMessage) {
-                            Task { await load() }
+                            Task { await load(force: true) }
                         }
                     }
                     // Anonymous sessions get YouTube's tiny generic feed;
@@ -69,7 +75,7 @@ struct HomeView: View {
             // Signed-in state flipped (sign-in, or the liveness probe
             // marked the session dead) → the feed shape changes wholesale;
             // refetch instead of leaving the old feed on screen.
-            .onChange(of: env.isSignedIn) { _, _ in Task { await load() } }
+            .onChange(of: env.isSignedIn) { _, _ in Task { await load(force: true) } }
         }
     }
 
@@ -149,7 +155,15 @@ struct HomeView: View {
         UserDefaults.standard.set(raw, forKey: Self.portraitCacheKey)
     }
 
-    private func load() async {
+    /// `force` bypasses the one-shot re-appearance guard AND resets any
+    /// active mood-chip filter — used when the feed changes wholesale
+    /// (account flip) or the user explicitly retries from the banner.
+    private func load(force: Bool = false) async {
+        // Pop-back re-runs `.task`; if we've already fetched
+        // successfully and have content on screen, skip the refetch
+        // entirely instead of re-issuing the browse-home request (and
+        // clobbering an active chip filter) on every navigation pop.
+        if !force, didInitialLoad, !sections.isEmpty { return }
         // Cache-first render: paint the last successful feed
         // instantly, then fetch fresh in parallel. `loading` only
         // flips true when we have NOTHING to paint (cold cache),
@@ -164,13 +178,25 @@ struct HomeView: View {
         defer { loading = false }
         do {
             let feed = try await env.innerTube.browseHome()
+            // A cancelled load can surface as a truncated "success"
+            // (cancellation during a continuation) — never commit it
+            // to state or the on-disk cache.
+            guard !Task.isCancelled else { return }
             chips = feed.chips
-            // Filter blocked artists out of every carousel. We drop
-            // empty sections too so a section that only contained
-            // blocked artists doesn't render as a titled void.
-            sections = Self.filterBlocked(feed.sections, env: env)
-            activeChip = nil
+            // Read `activeChip` AFTER the await: if a chip filter
+            // landed while this fetch was in flight (or was already
+            // active on a non-forced refresh), keep the chip-scoped
+            // sections instead of silently reverting to the
+            // unfiltered feed.
+            if force || activeChip == nil {
+                // Filter blocked artists out of every carousel. We drop
+                // empty sections too so a section that only contained
+                // blocked artists doesn't render as a titled void.
+                sections = Self.filterBlocked(feed.sections, env: env)
+                activeChip = nil
+            }
             errorMessage = nil
+            didInitialLoad = true
             // Persist the un-filtered feed to disk — blocked
             // artists is a live preference that can change; we
             // want the cache to hold the raw response and re-filter
@@ -179,6 +205,9 @@ struct HomeView: View {
                 .init(chips: feed.chips, sections: feed.sections, savedAt: Date())
             )
         } catch {
+            // A push cancels the `.task`-scoped load; that's not an
+            // error the user should see ("Network error: cancelled").
+            if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
             errorMessage = LoadErrorPresenter.message(for: error, env: env)
             // Keep stale sections visible (if any) so the user can still
             // interact with them while the banner indicates the failure.
@@ -194,20 +223,24 @@ struct HomeView: View {
             // Tap the active chip again to clear the filter.
             do {
                 let feed = try await env.innerTube.browseHome()
+                guard !Task.isCancelled else { return }
                 sections = Self.filterBlocked(feed.sections, env: env)
                 activeChip = nil
                 errorMessage = nil
             } catch {
+                if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
                 errorMessage = LoadErrorPresenter.message(for: error, env: env)
             }
             return
         }
         do {
             let raw = try await env.innerTube.browseHomeFiltered(chipParams: chip.params)
+            guard !Task.isCancelled else { return }
             sections = Self.filterBlocked(raw, env: env)
             activeChip = chip
             errorMessage = nil
         } catch {
+            if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
             errorMessage = LoadErrorPresenter.message(for: error, env: env)
         }
     }

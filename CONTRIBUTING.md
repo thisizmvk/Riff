@@ -27,6 +27,9 @@ xcodegen generate
 open Riff.xcodeproj
 ```
 
+You need **Xcode 16+** — the generated project uses the Xcode 16
+project format (objectVersion 77), which Xcode 15 can't open.
+
 `Riff.xcodeproj` is **gitignored**. [`project.yml`](project.yml) is the
 source of truth. If you add a source file, no project.yml change is
 needed — `xcodegen` picks up everything under `Sources/`. If you add a
@@ -46,6 +49,30 @@ URLSession to drive past unreachable endpoints quickly.
 If you change a renderer-walking parser, **add a fixture test.**
 Renderer drift is the highest-likelihood breakage source.
 
+## The queue harness and git hooks
+
+The playback queue follows a single-authority design (the hidden page
+owns the queue) with a behavior contract in
+[`docs/QUEUE-DESIGN.md`](docs/QUEUE-DESIGN.md). It is fenced by static
+guards and a standalone logic harness that need no Xcode project:
+
+```sh
+./tools/harness/run.sh
+```
+
+Run it before committing to `Sources/Audio/`,
+`Resources/player-bridge.js`, or `tools/harness/` — or let git do it
+for you by enabling the repo's hooks once per clone:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+The pre-commit hook runs the full harness when the queue core is
+staged, and the (sub-second) static guards when anything else under
+`Sources/` is staged — they catch break classes plain `swiftc -parse`
+can't, like duplicate type declarations.
+
 ## Code style
 
 - **Comments explain *why*, not *what*.** A comment paraphrasing the
@@ -55,8 +82,10 @@ Renderer drift is the highest-likelihood breakage source.
 - **No new dependencies in `InnerTubeClient` or `PlayerBridge`.** They
   stay zero-dependency. Adding one needs an ADR (open an issue with
   `[ADR]` in the title; we'll discuss before implementation).
-- **Strict concurrency on.** Swift 6 mode is enabled in `project.yml`.
-  Nothing should fight the type system.
+- **Strict concurrency on.** The project builds in the Swift 5.10
+  language mode with `SWIFT_STRICT_CONCURRENCY: complete` (see
+  `project.yml`) — full concurrency checking, not yet the Swift 6
+  language mode. Nothing should fight the type system.
 - **MainActor everywhere by default.** PlayerBridge, AppEnvironment,
   views — all MainActor. Drop to detached only with a clear reason.
 
@@ -86,10 +115,14 @@ flipping it casually muddies debugging.
 
 1. Fork, branch from `main`.
 2. Make your change. Keep it focused — one logical thing per PR.
-3. `xcodebuild test` should pass locally.
+3. `xcodebuild test` should pass locally — and if you touched the
+   queue core (`Sources/Audio/`, `Resources/player-bridge.js`,
+   `tools/harness/`), `./tools/harness/run.sh` too.
 4. Open the PR with a description that says **why**, not just **what**
    (the diff already shows the what).
-5. CI on macos-14 runs on every push.
+5. CI runs on macos-15 runners with Xcode 16: the queue harness job on
+   every push to any branch, the full build-and-test job on pushes to
+   `main` and PRs targeting `main`.
 
 ## License note
 

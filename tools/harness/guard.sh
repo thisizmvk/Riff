@@ -5,8 +5,13 @@
 # navigation/force-play site without updating the allowlist below —
 # both should be conscious decisions, reviewed against
 # docs/QUEUE-DESIGN.md, not side effects.
+#
+#   ./tools/harness/guard.sh              check this checkout
+#   ./tools/harness/guard.sh --self-test  prove every guard still fires
 set -u
-REPO="$(cd "$(dirname "$0")/../.." && pwd)"
+# RIFF_GUARD_ROOT is set only by --self-test (below), to point the
+# guards at a scratch copy with one violation injected.
+REPO="${RIFF_GUARD_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 JS="$REPO/Resources/player-bridge.js"
 PB="$REPO/Sources/Audio/PlayerBridge.swift"
 QM="$REPO/Sources/Audio/QueueManager.swift"
@@ -14,7 +19,81 @@ fail=0
 say() { echo "GUARD FAIL: $1"; fail=1; }
 # Match CODE only — comment lines legitimately mention the banned
 # patterns while explaining why they are banned.
-code_has() { grep -vE '^[[:space:]]*(//|\*|/\*)' "$2" | grep -qE "$1"; }
+COMMENT_LINE='^[[:space:]]*(//|\*|/\*)'
+code_has() { grep -vE "$COMMENT_LINE" "$2" | grep -qE "$1"; }
+# Number of CODE lines in file $2 matching $1 (prints 0 when none).
+code_count() { grep -vE "$COMMENT_LINE" "$2" | grep -cE "$1"; }
+# Same, summed over every Swift file under Sources/.
+swift_code_count() {
+  local total=0 c f
+  while IFS= read -r f; do
+    c=$(code_count "$1" "$f")
+    total=$((total + c))
+  done < <(find "$REPO/Sources" -name '*.swift')
+  echo "$total"
+}
+# A hard page load from JS: assigning location.href, or location
+# assign / replace / reload. (`new URL(location.href)` is a read.)
+HARD_NAV_RE='location\.(href[[:space:]]*=[^=]|assign\(|replace\(|reload\()'
+
+# ── Self-test ──────────────────────────────────────────────────────────
+# A guard whose regex drifts narrower keeps printing "OK" forever. This
+# copies the guarded files into a scratch tree, checks the clean copy
+# passes, then injects one known-bad pattern at a time and requires a
+# GUARD FAIL for each. Scratch dirs are left under $TMPDIR (see run.sh).
+if [ "${1:-}" = "--self-test" ]; then
+  SELF="$REPO/tools/harness/guard.sh"
+  FX="$(mktemp -d "${TMPDIR:-/tmp}/riff-guard-selftest.XXXXXX")"
+  FX_PB="$FX/Sources/Audio/PlayerBridge.swift"
+  FX_QM="$FX/Sources/Audio/QueueManager.swift"
+  FX_JS="$FX/Resources/player-bridge.js"
+  mkdir -p "$FX/Sources/Audio" "$FX/Resources"
+  reset_fixture() { cp "$PB" "$FX_PB"; cp "$QM" "$FX_QM"; cp "$JS" "$FX_JS"; }
+  run_fixture() { RIFF_GUARD_ROOT="$FX" bash "$SELF" 2>&1; }
+  st_fail=0
+  st_cases=0
+  # The mutation for a case is applied by the caller; this runs the
+  # guards on it, records the verdict, and restores the clean copy.
+  expect_caught() {
+    local out
+    st_cases=$((st_cases + 1))
+    if out=$(run_fixture); then
+      echo "GUARD SELF-TEST FAIL: not caught — $1"
+      st_fail=1
+    elif ! printf '%s\n' "$out" | grep -q "GUARD FAIL"; then
+      echo "GUARD SELF-TEST FAIL: exited non-zero without a GUARD FAIL line — $1"
+      st_fail=1
+    fi
+    reset_fixture
+  }
+
+  reset_fixture
+  if ! out=$(run_fixture); then
+    echo "GUARD SELF-TEST FAIL: the unmodified copy does not pass:"
+    printf '%s\n' "$out"
+    exit 1
+  fi
+
+  printf '%s\n' 'player.playVideoAt(3);' >> "$FX_JS";                         expect_caught "#1 playVideoAt in the JS"
+  printf '%s\n' 'rows[i].click();' >> "$FX_JS";                               expect_caught "#2 positional row click"
+  printf '%s\n' 'let d = Dictionary(uniqueKeysWithValues: pairs)' >> "$FX_QM"; expect_caught "#3 Dictionary(uniqueKeysWithValues:)"
+  printf '%s\n' '        await navigate(url)' >> "$FX_PB";                     expect_caught "#4 extra 'await navigate('"
+  printf '%s\n' '        await self.navigate(url)' >> "$FX_PB";                expect_caught "#4 'await self.navigate(' spelling"
+  printf '%s\n' '        await self?.navigate(url)' >> "$FX_PB";               expect_caught "#4 'await self?.navigate(' spelling"
+  printf '%s\n' '        await eval("window.musicBridge.navigate(u)")' >> "$FX_PB"; expect_caught "#4b direct musicBridge.navigate eval"
+  printf '%s\n' '        await eval("location.href = next")' >> "$FX_PB";      expect_caught "#4b raw location.href from Swift"
+  printf '%s\n' 'if (fallbackUrl) location.href = fallbackUrl;' >> "$FX_JS";   expect_caught "#4c extra JS location.href assignment"
+  printf '%s\n' 'location.replace(next);' >> "$FX_JS";                        expect_caught "#4c JS location.replace"
+  printf '%s\n' '        await self?.play(item: head, clearQueue: false)' >> "$FX_PB"; expect_caught "#5 extra play(item:) site"
+  sed 's/QueuePolicy\.advance(/QueuePolicyGone.advance(/g' "$PB" > "$FX_PB";   expect_caught "#6 QueuePolicy.advance delegation removed"
+  sed 's/var isPageDrivenContext/var isPageDrivenCtx/' "$PB" > "$FX_PB";       expect_caught "#7 isPageDrivenContext removed"
+  printf '%s\n' 'struct GuardSelfTestDup {}' 'struct GuardSelfTestDup {}' >> "$FX_QM"; expect_caught "#8 duplicate type declaration"
+  printf '%s\n' '@MainActor' '/// doc' 'func guardSelfTest() {}' >> "$FX_QM";  expect_caught "#9 attribute split from its declaration"
+
+  [ "$st_fail" -eq 0 ] || { echo "Guard self-test FAILED — a guard no longer fires on the pattern it bans."; exit 1; }
+  echo "guard self-test OK ($st_cases injected violations caught)"
+  exit 0
+fi
 
 # 1. Index-guessing into the page's player playlist played the WRONG
 #    track (index spaces differ). Never again.
@@ -30,13 +109,32 @@ code_has "uniqueKeysWithValues" "$QM" && say "QueueManager uses Dictionary(uniqu
 #    queue. Freeze the number of navigation sites — a new one must bump
 #    this count AND justify itself in QUEUE-DESIGN.md.
 #      play(videoId:) · playPlaylist · playByResolvingBrowseId (x3)
+#    Code lines only; `await self.navigate(` and `await self?.navigate(`
+#    count too (a fixed-string match let those spellings through).
 EXPECTED_NAVIGATE=5
-n=$(grep -c "await navigate(" "$PB")
+n=$(code_count 'await[[:space:]]+(self\??\.)?navigate\(' "$PB")
 [ "$n" -eq "$EXPECTED_NAVIGATE" ] || say "PlayerBridge has $n 'await navigate(' sites (expected $EXPECTED_NAVIGATE) — a navigation was added/removed; review against the single-authority contract"
+
+# 4b. PlayerBridge.navigate(_:) is Swift's only way into a page load. A
+#     direct eval of musicBridge.navigate or of location.href would
+#     bypass the count above.
+EXPECTED_BRIDGE_NAVIGATE=1
+bn=$(swift_code_count 'musicBridge\.navigate\(')
+[ "$bn" -eq "$EXPECTED_BRIDGE_NAVIGATE" ] || say "Sources has $bn 'musicBridge.navigate(' sites (expected $EXPECTED_BRIDGE_NAVIGATE, inside PlayerBridge.navigate(_:)) — route page loads through that wrapper"
+sn=$(swift_code_count "$HARD_NAV_RE")
+[ "$sn" -eq 0 ] || say "Swift evaluates a raw page load (location.href= / assign / replace / reload) on $sn line(s) — route it through PlayerBridge.navigate(_:)"
+
+# 4c. The JS side's own hard navigations, invisible to the Swift counts:
+#       musicBridge.navigate() · the .ended pending-URL advance
+EXPECTED_JS_NAV=2
+jn=$(code_count "$HARD_NAV_RE" "$JS")
+[ "$jn" -eq "$EXPECTED_JS_NAV" ] || say "player-bridge.js has $jn hard page loads (location.href= / assign / replace / reload; expected $EXPECTED_JS_NAV) — a reload path was added/removed; review against the single-authority contract"
 
 # 5. Force-play sites (play(item:) callers) are the other reload path.
 #      playTracks · next() 3b · startRadio · skipTo fallback ·
 #      .ended fallback · trackChanged enforcement
+#    PlayerBridge-internal only. play(item:) calls in UI/ and Intents/
+#    are the user's own "play this" gestures and are not frozen here.
 EXPECTED_PLAY_ITEM=6
 m=$(grep -c "await play(item: \|await self?.play(item: \|await self.play(item: " "$PB")
 [ "$m" -eq "$EXPECTED_PLAY_ITEM" ] || say "PlayerBridge has $m play(item:) call sites (expected $EXPECTED_PLAY_ITEM) — a force-play was added/removed; review against the single-authority contract"

@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import os
 
 /// Native Swift client for YouTube Music's InnerTube endpoints.
 ///
@@ -256,7 +257,9 @@ final class InnerTubeClient: @unchecked Sendable {
                 let client = self
                 group.addTask {
                     do {
-                        let page = try await client.detail(forBrowseId: artist.id)
+                        // Only the release shelves are read — never page
+                        // the artist's song list for this fan-out.
+                        let page = try await client.detail(forBrowseId: artist.id, maxContinuationPages: 0)
                         return Self.releasesFromArtistDetail(page)
                     } catch {
                         Log.innertube.error("followedFeed artist=\(artist.id, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
@@ -288,23 +291,23 @@ final class InnerTubeClient: @unchecked Sendable {
     }
 
     /// Pull album / single / EP tiles out of an artist's detail page.
-    /// Artist pages surface those as `musicCarouselShelfRenderer`
-    /// rails under titles like "Albums", "Singles", "Songs and singles",
-    /// or "EPs"; the items themselves are `musicTwoRowItemRenderer`
-    /// tiles (kind == .album) already carrying release-year runs.
-    /// We deliberately ignore shelves like "Videos", "From your
-    /// library", "Fans might also like" — those don't belong in a
-    /// new-releases feed.
+    ///
+    /// Selection is structural, never by shelf title: titles are
+    /// localized ("Albums" / "Álbumes" / "Alben" / "アルバム"), and
+    /// the old English keyword list silently dropped whole release
+    /// rails outside `en`. On an artist page only the discography
+    /// rails ("Albums", "Singles & EPs") carry album-page tiles
+    /// (`musicTwoRowItemRenderer`, kind == .album, with release-year
+    /// runs). "Videos" / "Live performances" are watch tiles
+    /// (.song), "Featured on" / "Playlists by …" are playlists and
+    /// "Fans might also like" is artists — so keeping only `.album`
+    /// tiles selects exactly the release rails in every locale.
+    /// Song-shaped tiles inside a Singles rail drop too: release-year
+    /// metadata lives on the album-shaped tile and tapping it plays
+    /// the single anyway.
     static func releasesFromArtistDetail(_ page: DetailPage) -> [MediaItem] {
-        let releaseKeywords = ["album", "single", "ep"]
-        return page.relatedSections.flatMap { section -> [MediaItem] in
-            let lower = section.title.lowercased()
-            guard releaseKeywords.contains(where: { lower.contains($0) }) else { return [] }
-            // Keep only album-shaped tiles — an artist's "Singles" rail
-            // sometimes mixes song-shaped tiles, but release-year
-            // metadata lives on the album-shaped tiles and tapping
-            // plays the single anyway.
-            return section.items.filter { $0.kind == .album }
+        page.relatedSections.flatMap { section -> [MediaItem] in
+            section.items.filter { $0.kind == .album }
         }
     }
 
@@ -426,13 +429,29 @@ final class InnerTubeClient: @unchecked Sendable {
         return flat.filter { seen.insert($0.kind.rawValue + ":" + $0.id).inserted }
     }
 
+    /// A fully-paged Library section. `truncated` is true when the
+    /// server still had rows past what this holds — a page/row cap
+    /// stopped the paging or a continuation request failed — so the
+    /// UI can say "Showing first N" instead of passing a partial list
+    /// off as complete.
+    struct LibraryPage: Sendable {
+        let items: [MediaItem]
+        let truncated: Bool
+    }
+
+    /// Thin wrapper preserving the flat-list return shape for callers
+    /// that don't surface truncation.
+    func library(section: LibraryView.Section) async throws -> [MediaItem] {
+        try await libraryPage(section: section).items
+    }
+
     /// Library contents — InnerTube `/browse` with the section-specific
     /// browseId. Auth comes from the SAPISID cookie set by the WebView
     /// sign-in (Kaset's pattern). Walks the response with a deep scanner
     /// because signed-in library responses wrap shelves in
     /// `itemSectionRenderer` while anonymous browse uses
     /// `musicShelfRenderer` / `musicCarouselShelfRenderer` directly.
-    func library(section: LibraryView.Section) async throws -> [MediaItem] {
+    func libraryPage(section: LibraryView.Section) async throws -> LibraryPage {
         let browseId: String
         switch section {
         case .liked:     browseId = BrowseID.likedSongs
@@ -450,7 +469,15 @@ final class InnerTubeClient: @unchecked Sendable {
         // Shuffle queued only what had loaded.
         var token = Self.findShelfContinuation(in: body)
         var pages = 0
-        while let t = token, pages < Self.libraryMaxPages, results.count < Self.libraryRowCap {
+        var truncated = false
+        while let t = token {
+            if pages >= Self.libraryMaxPages || results.count >= Self.libraryRowCap {
+                // Cap reached with rows still on the server — say so
+                // instead of returning a short list as if complete.
+                truncated = true
+                Log.innertube.info("library section=\(String(describing: section), privacy: .public) paging capped at pages=\(pages + 1) rows=\(results.count); more available")
+                break
+            }
             pages += 1
             do {
                 let resp = try await postRaw(.browse, body: ["continuation": t])
@@ -460,6 +487,7 @@ final class InnerTubeClient: @unchecked Sendable {
                 token = Self.findShelfContinuation(in: resp)
             } catch {
                 Log.innertube.error("library continuation \(pages) failed: \(error.localizedDescription, privacy: .public)")
+                truncated = true
                 break
             }
         }
@@ -470,8 +498,8 @@ final class InnerTubeClient: @unchecked Sendable {
         }
         var seen = Set<String>()
         results = results.filter { seen.insert($0.id).inserted }
-        Log.innertube.debug("library section=\(String(describing: section), privacy: .public) results=\(results.count) pages=\(pages + 1)")
-        return results
+        Log.innertube.debug("library section=\(String(describing: section), privacy: .public) results=\(results.count) pages=\(pages + 1) truncated=\(truncated)")
+        return LibraryPage(items: results, truncated: truncated)
     }
 
     private static let libraryMaxPages = 20
@@ -953,6 +981,18 @@ final class InnerTubeClient: @unchecked Sendable {
         return Self.parseRelatedSections(body)
     }
 
+    /// Related tab in ONE `/browse` round trip: the flat song list
+    /// (`related(browseId:)`'s projection) and the titled shelves
+    /// (`relatedSections(browseId:)`'s projection) parsed from the
+    /// same body. Callers needing both should use this — calling the
+    /// two methods concurrently POSTs the same browseId twice. Both
+    /// projections fail together, which is fine: same endpoint, same
+    /// body.
+    func relatedPage(browseId: String) async throws -> (items: [MediaItem], sections: [HomeSection]) {
+        let body = try await postRaw(.browse, body: ["browseId": browseId])
+        return (items: Self.scanForMediaItems(body), sections: Self.parseRelatedSections(body))
+    }
+
     /// Pull `musicCarouselShelfRenderer` (and friends) shelves out of
     /// a Related-tab browse response. Walks both the single-column
     /// and two-column layouts so we don't silently drop shelves on
@@ -1003,6 +1043,13 @@ final class InnerTubeClient: @unchecked Sendable {
         /// Reuses `HomeSection` so the existing `HomeSectionRow` renderer
         /// can be dropped in unchanged.
         let relatedSections: [HomeSection]
+        /// True when the tracklist continues server-side past `tracks`
+        /// — the page/row cap stopped paging, the caller asked for
+        /// fewer pages, or a continuation request failed. Lets the UI
+        /// show "Showing first N" rather than presenting a partial
+        /// list as complete. `var` with a default so the memberwise
+        /// init keeps its existing shape for callers that build pages.
+        var truncated: Bool = false
     }
 
     /// One segment of a styled-text run from InnerTube. When `browseId`
@@ -1016,17 +1063,14 @@ final class InnerTubeClient: @unchecked Sendable {
         let kind: MediaItem.Kind?
     }
 
-    func detail(forBrowseId browseId: String) async throws -> DetailPage {
+    /// - parameter maxContinuationPages: cap on tracklist continuation
+    ///   requests after the first page (nil = `detailMaxPages`). Pass 0
+    ///   when only the header / related shelves / first page are needed
+    ///   so the call stays a single round trip.
+    func detail(forBrowseId browseId: String, maxContinuationPages: Int? = nil) async throws -> DetailPage {
         let body = try await postRaw(.browse, body: ["browseId": browseId])
 
-        // Header lives at one of:
-        //   header.musicDetailHeaderRenderer (older)
-        //   header.musicResponsiveHeaderRenderer (newer)
-        //   header.musicImmersiveHeaderRenderer (artist pages)
-        let header: [String: Any]? =
-            (Parsing.dig(body, ["header", "musicDetailHeaderRenderer"]) as? [String: Any])
-            ?? (Parsing.dig(body, ["header", "musicResponsiveHeaderRenderer"]) as? [String: Any])
-            ?? (Parsing.dig(body, ["header", "musicImmersiveHeaderRenderer"]) as? [String: Any])
+        let header: [String: Any]? = Self.detailHeader(in: body)
 
         let title = Parsing.runs(header, "title") ?? ""
         // Album/playlist headers put the ARTIST in straplineTextOne
@@ -1117,7 +1161,7 @@ final class InnerTubeClient: @unchecked Sendable {
                     tracks = contents.compactMap(Self.parseListItem)
                     tracklistTreeIndex = treeIdx
                     tracklistShelfIndex = i
-                    tracklistContinuation = Parsing.dig(r, ["continuations", "0", "nextContinuationData", "continuation"]) as? String
+                    tracklistContinuation = Self.tracklistContinuationToken(shelf: r)
                     break outer
                 }
                 if let r = shelf["musicPlaylistShelfRenderer"] as? [String: Any],
@@ -1125,30 +1169,51 @@ final class InnerTubeClient: @unchecked Sendable {
                     tracks = contents.compactMap(Self.parseListItem)
                     tracklistTreeIndex = treeIdx
                     tracklistShelfIndex = i
-                    tracklistContinuation = Parsing.dig(r, ["continuations", "0", "nextContinuationData", "continuation"]) as? String
+                    tracklistContinuation = Self.tracklistContinuationToken(shelf: r)
                     break outer
                 }
             }
         }
         // Long playlists page (~100 rows each): follow the shelf's
         // continuation so the page — and Play / Shuffle — hold the
-        // WHOLE list, not the first page.
+        // WHOLE list, not the first page. The current shape carries
+        // the token in a trailing `continuationItemRenderer` and
+        // answers with `onResponseReceivedActions`; the legacy
+        // `continuations` / `continuationContents` shape is still
+        // accepted (see `parseTracklistContinuation`). Rows are
+        // de-duped across pages (setVideoId, else videoId) so a stale
+        // or looping token can't repeat a page; a page with nothing
+        // new ends paging.
+        let pageCap = max(0, maxContinuationPages ?? Self.detailMaxPages)
+        var seenRowKeys = Set(tracks.map(Self.tracklistRowKey))
         var detailPages = 0
-        while let token = tracklistContinuation, detailPages < Self.detailMaxPages, tracks.count < Self.libraryRowCap {
-            detailPages += 1
-            do {
-                let resp = try await postRaw(.browse, body: ["continuation": token])
-                let cont = (Parsing.dig(resp, ["continuationContents", "musicPlaylistShelfContinuation"]) as? [String: Any])
-                    ?? (Parsing.dig(resp, ["continuationContents", "musicShelfContinuation"]) as? [String: Any])
-                guard let cont, let contents = cont["contents"] as? [[String: Any]] else { break }
-                let more = contents.compactMap(Self.parseListItem)
-                if more.isEmpty { break }
-                tracks.append(contentsOf: more)
-                tracklistContinuation = Parsing.dig(cont, ["continuations", "0", "nextContinuationData", "continuation"]) as? String
-            } catch {
-                Log.innertube.error("detail continuation \(detailPages) failed: \(error.localizedDescription, privacy: .public)")
+        var truncated = false
+        while let token = tracklistContinuation {
+            if detailPages >= pageCap || tracks.count >= Self.libraryRowCap {
+                truncated = true
+                if pageCap > 0 {
+                    Log.innertube.info("detail browseId=\(browseId, privacy: .public) paging capped at pages=\(detailPages + 1) tracks=\(tracks.count); more available")
+                }
                 break
             }
+            detailPages += 1
+            let resp: [String: Any]
+            do {
+                resp = try await postRaw(.browse, body: ["continuation": token])
+            } catch {
+                Log.innertube.error("detail continuation \(detailPages) failed: \(error.localizedDescription, privacy: .public)")
+                truncated = true
+                break
+            }
+            guard let chunk = Self.parseTracklistContinuation(resp) else {
+                Log.innertube.error("detail continuation \(detailPages): unrecognised envelope keys=\(Array(resp.keys), privacy: .public)")
+                truncated = true
+                break
+            }
+            let fresh = chunk.tracks.filter { seenRowKeys.insert(Self.tracklistRowKey($0)).inserted }
+            if fresh.isEmpty { break }
+            tracks.append(contentsOf: fresh)
+            tracklistContinuation = chunk.continuation
         }
         if tracks.isEmpty {
             tracks = Self.scanForMediaItems(body)
@@ -1167,6 +1232,9 @@ final class InnerTubeClient: @unchecked Sendable {
         for (treeIdx, shelves) in allShelfTrees.enumerated() {
             for (i, shelf) in shelves.enumerated() {
                 if treeIdx == tracklistTreeIndex && i == tracklistShelfIndex { continue }
+                // The two-column header shelf (primary tab contents[0])
+                // is the page header, never a related rail.
+                if Self.isDetailHeaderShelf(shelf) { continue }
                 candidateShelves.append(shelf)
             }
         }
@@ -1198,16 +1266,132 @@ final class InnerTubeClient: @unchecked Sendable {
             artworkURL: artwork,
             playablePlaylistId: playablePlaylistId,
             tracks: tracks,
-            relatedSections: relatedSections
+            relatedSections: relatedSections,
+            truncated: truncated
         )
+    }
+
+    /// Detail-page header renderer. Lives at one of:
+    ///   - `header.musicDetailHeaderRenderer` (older albums / playlists)
+    ///   - `header.musicResponsiveHeaderRenderer` (newer single-column)
+    ///   - `header.musicImmersiveHeaderRenderer` (artist pages)
+    ///   - `header.musicEditablePlaylistDetailHeaderRenderer.header.*`
+    ///     (owned playlists, older shape)
+    ///   - **two-column layout** (current albums / playlists — no
+    ///     top-level `header` at all): the first shelf of
+    ///     `twoColumnBrowseResultsRenderer.tabs[0]…sectionListRenderer
+    ///     .contents` is a `musicResponsiveHeaderRenderer`, or for owned
+    ///     playlists `musicEditablePlaylistDetailHeaderRenderer.header
+    ///     .musicResponsiveHeaderRenderer` (ytmusicapi resolves it the
+    ///     same way).
+    /// Top-level locations win; the two-column shelf is the fallback.
+    static func detailHeader(in body: [String: Any]) -> [String: Any]? {
+        for key in [RendererKeys.detailHeader, RendererKeys.responsiveHeader, RendererKeys.immersiveHeader] {
+            if let header = Parsing.dig(body, ["header", key]) as? [String: Any] {
+                return header
+            }
+        }
+        for key in [RendererKeys.detailHeader, RendererKeys.responsiveHeader] {
+            if let header = Parsing.dig(body, ["header", RendererKeys.editablePlaylistDetailHeader, "header", key]) as? [String: Any] {
+                return header
+            }
+        }
+        let primaryShelves = Parsing.array(body, "contents",
+            "twoColumnBrowseResultsRenderer", "tabs", "0", "tabRenderer",
+            "content", "sectionListRenderer", "contents") ?? []
+        guard let first = primaryShelves.first else { return nil }
+        if let header = first[RendererKeys.responsiveHeader] as? [String: Any] {
+            return header
+        }
+        if let header = Parsing.dig(first, [RendererKeys.editablePlaylistDetailHeader, "header", RendererKeys.responsiveHeader]) as? [String: Any] {
+            return header
+        }
+        return nil
+    }
+
+    /// True for a shelf that is a detail-page header (the two-column
+    /// layout ships the header as primary-tab `contents[0]`), so it is
+    /// never offered as a related rail.
+    static func isDetailHeaderShelf(_ shelf: [String: Any]) -> Bool {
+        shelf[RendererKeys.responsiveHeader] != nil
+            || shelf[RendererKeys.editablePlaylistDetailHeader] != nil
+            || shelf[RendererKeys.detailHeader] != nil
+    }
+
+    /// Token of a trailing `continuationItemRenderer` in a row list —
+    /// how current responses page a tracklist shelf (and each appended
+    /// continuation chunk).
+    static func trailingContinuationToken(in items: [[String: Any]]) -> String? {
+        for item in items.reversed() {
+            guard let renderer = item["continuationItemRenderer"] as? [String: Any] else { continue }
+            if let token = Parsing.dig(renderer, ["continuationEndpoint", "continuationCommand", "token"]) as? String,
+               !token.isEmpty {
+                return token
+            }
+        }
+        return nil
+    }
+
+    /// Next-page token for a tracklist shelf (`musicShelfRenderer` /
+    /// `musicPlaylistShelfRenderer`, or a legacy `*Continuation`
+    /// envelope): the trailing `continuationItemRenderer` first, then
+    /// the legacy `continuations[0].nextContinuationData`. Only the
+    /// shelf's own token — never a deep walk, which would pick up
+    /// `secondaryContents.sectionListRenderer`'s carousel token.
+    static func tracklistContinuationToken(shelf: [String: Any]) -> String? {
+        if let contents = shelf["contents"] as? [[String: Any]],
+           let token = trailingContinuationToken(in: contents) {
+            return token
+        }
+        if let token = Parsing.dig(shelf, ["continuations", "0", "nextContinuationData", "continuation"]) as? String,
+           !token.isEmpty {
+            return token
+        }
+        return nil
+    }
+
+    /// Rows + next token from one tracklist continuation response.
+    /// Accepts the current envelope
+    /// (`onResponseReceivedActions[*].appendContinuationItemsAction
+    /// .continuationItems`, token in the trailing
+    /// `continuationItemRenderer`) and the legacy one
+    /// (`continuationContents.musicPlaylistShelfContinuation` /
+    /// `musicShelfContinuation`). nil when neither is present.
+    static func parseTracklistContinuation(_ resp: [String: Any]) -> (tracks: [MediaItem], continuation: String?)? {
+        if let actions = resp["onResponseReceivedActions"] as? [[String: Any]] {
+            var rows: [[String: Any]] = []
+            var matched = false
+            for action in actions {
+                guard let items = Parsing.dig(action, ["appendContinuationItemsAction", "continuationItems"]) as? [[String: Any]] else { continue }
+                matched = true
+                rows.append(contentsOf: items)
+            }
+            if matched {
+                return (tracks: rows.compactMap(Self.parseListItem),
+                        continuation: Self.trailingContinuationToken(in: rows))
+            }
+        }
+        let legacy = (Parsing.dig(resp, ["continuationContents", "musicPlaylistShelfContinuation"]) as? [String: Any])
+            ?? (Parsing.dig(resp, ["continuationContents", "musicShelfContinuation"]) as? [String: Any])
+        if let legacy, let contents = legacy["contents"] as? [[String: Any]] {
+            return (tracks: contents.compactMap(Self.parseListItem),
+                    continuation: Self.tracklistContinuationToken(shelf: legacy))
+        }
+        return nil
+    }
+
+    /// Identity of a tracklist row for cross-page de-dupe. Playlists
+    /// may hold the same video twice — `setVideoId` tells those apart.
+    private static func tracklistRowKey(_ item: MediaItem) -> String {
+        item.setVideoId ?? item.id
     }
 
     /// Detail for a YT Music playlist (just delegates — playlist browseIds
     /// are typically `VL<playlistId>`; the caller should already have
     /// VL-stripped if needed).
-    func playlistDetail(playlistId: String) async throws -> DetailPage {
+    func playlistDetail(playlistId: String, maxContinuationPages: Int? = nil) async throws -> DetailPage {
         // Playlist browseId is "VL" + playlistId.
-        try await detail(forBrowseId: "VL" + playlistId)
+        try await detail(forBrowseId: "VL" + playlistId, maxContinuationPages: maxContinuationPages)
     }
 
     /// Signed-in account chrome for the Settings "Account" card.
@@ -1789,13 +1973,85 @@ final class InnerTubeClient: @unchecked Sendable {
     /// google.com auth scheme. Required for signed-in endpoints (library);
     /// returns nil if no SAPISID cookie exists yet (pre-sign-in).
     private static func sapisidHashAuthHeader() -> String? {
-        let sapisid = HTTPCookieStorage.shared.cookies?.first(where: { $0.name == "SAPISID" })?.value
-            ?? HTTPCookieStorage.shared.cookies?.first(where: { $0.name == "__Secure-3PAPISID" })?.value
-        guard let sapisid else { return nil }
+        guard let sapisid = currentAPISIDValue() else { return nil }
         let ts = String(Int(Date().timeIntervalSince1970))
         let raw = "\(ts) \(sapisid) \(Self.origin)"
         let hash = Insecure.SHA1.hash(data: Data(raw.utf8))
         let hex = hash.map { String(format: "%02x", $0) }.joined()
         return "SAPISIDHASH \(ts)_\(hex)"
+    }
+
+    /// The SAPISID value the hash is computed over. The jar can hold
+    /// several copies (`.youtube.com` and `.google.com` from the
+    /// WebView bridge, host-only `music.youtube.com` from a cookie
+    /// import) and `HTTPCookieStorage.cookies` is unordered, so the
+    /// old global `.first` picked an arbitrary — possibly never-sent
+    /// or stale — copy. Consider only cookies URLSession will actually
+    /// attach to music.youtube.com and pick deterministically; the
+    /// global jar is a fallback for a jar with no host-scoped copy
+    /// (previous behaviour). This only makes the choice deterministic
+    /// and loud: a jar holding two live sessions must be cleaned where
+    /// cookies are written (CookieJar import), not here.
+    private static func currentAPISIDValue() -> String? {
+        let storage = HTTPCookieStorage.shared
+        let originURL = URL(string: Self.origin)
+        let host = originURL?.host ?? "music.youtube.com"
+        if let originURL,
+           let sendable = storage.cookies(for: originURL),
+           let cookie = preferredAPISIDCookie(in: sendable, host: host) {
+            return cookie.value
+        }
+        return preferredAPISIDCookie(in: storage.cookies ?? [], host: host)?.value
+    }
+
+    /// Pick the SAPISID (else `__Secure-3PAPISID`) cookie to hash:
+    /// unexpired, non-empty, then the most specific domain for `host`
+    /// (host-only `music.youtube.com` > `.music.youtube.com` >
+    /// `.youtube.com` > non-matching), then the latest expiry. Logs
+    /// once per conflict when live copies disagree — cookie NAMES and
+    /// DOMAINS only, never values.
+    static func preferredAPISIDCookie(in cookies: [HTTPCookie], host: String, now: Date = Date()) -> HTTPCookie? {
+        for name in ["SAPISID", "__Secure-3PAPISID"] {
+            let live = cookies.filter { cookie in
+                cookie.name == name && !cookie.value.isEmpty
+                    && (cookie.expiresDate ?? Date.distantFuture) > now
+            }
+            guard !live.isEmpty else { continue }
+            if Set(live.map { $0.value }).count > 1 {
+                reportAPISIDConflict(name: name, cookies: live)
+            }
+            return live.max(by: { lhs, rhs in
+                apisidPreference(lhs, host: host) < apisidPreference(rhs, host: host)
+            })
+        }
+        return nil
+    }
+
+    /// Sort key for `preferredAPISIDCookie`: (domain matches host,
+    /// domain specificity, expiry). Higher is preferred.
+    private static func apisidPreference(_ cookie: HTTPCookie, host: String) -> (Int, Int, Date) {
+        let domain = cookie.domain.lowercased()
+        let isDomainCookie = domain.hasPrefix(".")
+        let bare = isDomainCookie ? String(domain.dropFirst()) : domain
+        let lowerHost = host.lowercased()
+        let matches: Int = (lowerHost == bare || lowerHost.hasSuffix("." + bare)) ? 1 : 0
+        // Longer domain = more specific; a host-only cookie edges out a
+        // domain cookie of the same name.
+        let specificity: Int = bare.count * 2 + (isDomainCookie ? 0 : 1)
+        return (matches, specificity, cookie.expiresDate ?? Date.distantFuture)
+    }
+
+    /// Conflict signatures already logged — postRaw runs per request,
+    /// so an unthrottled log would repeat on every call.
+    private static let reportedAPISIDConflicts = OSAllocatedUnfairLock(initialState: Set<String>())
+
+    private static func reportAPISIDConflict(name: String, cookies: [HTTPCookie]) {
+        let domains = cookies.map { $0.domain }.sorted().joined(separator: ",")
+        let signature = name + "|" + domains
+        let isNew = reportedAPISIDConflicts.withLock { reported in
+            reported.insert(signature).inserted
+        }
+        guard isNew else { return }
+        Log.innertube.error("auth: \(cookies.count) live \(name, privacy: .public) cookies disagree (domains=\(domains, privacy: .public)); hashing the most specific. A stale session is still in the jar — sign out or re-import to clear it.")
     }
 }

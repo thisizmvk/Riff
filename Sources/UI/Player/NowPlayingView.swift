@@ -25,6 +25,11 @@ struct NowPlayingView: View {
     @State private var translation: LyricsTranslator.Translation? = nil
     @State private var translationLoading: Bool = false
     @State private var translationError: String? = nil
+    /// Token identifying the newest translation request. Bumped on
+    /// every new request and on track/language change so a superseded
+    /// request's completion (success OR failure) can never overwrite
+    /// state that now belongs to a newer request.
+    @State private var translationRequestID = UUID()
 
     /// X-Ray cards for the current track (B4). Held in view state so
     /// the view re-renders when the bundle lands; the service's own
@@ -32,6 +37,8 @@ struct NowPlayingView: View {
     @State private var xrayCards: XRayCardsService.Bundle? = nil
     @State private var xrayLoading: Bool = false
     @State private var xrayError: String? = nil
+    /// Same supersession token as `translationRequestID`, for X-Ray.
+    @State private var xrayRequestID = UUID()
 
     /// The videoId currently being dragged-over inside the Up Next
     /// list. Drives the 2pt red insertion indicator above the target
@@ -149,7 +156,12 @@ struct NowPlayingView: View {
                 backdropColor = nil
                 return
             }
-            backdropColor = await DominantColor.extract(from: url)
+            let color = await DominantColor.extract(from: url)
+            // A cancelled task (fast Previous/Next skip) must not land
+            // late and clobber the NEW track's color with nil — its
+            // cancelled URL fetch surfaces as a nil result.
+            guard !Task.isCancelled else { return }
+            backdropColor = color
         }
         .preferredColorScheme(.dark)
         .onExitCommand {
@@ -173,14 +185,32 @@ struct NowPlayingView: View {
             if mode == .discover { env.player.loadRelatedIfNeeded() }
         }
         // Reset X-Ray view state on track change so a cached bundle for
-        // the new track paints (or a fresh request fires) the next time
-        // the Context tab is opened. The service's own cache means
+        // the new track paints (or a fresh request fires via the
+        // debounced task below). The service's own cache means
         // back-and-forth between two tracks is instant.
         .onChange(of: env.player.currentTrack?.videoId) { _, _ in
+            xrayRequestID = UUID()   // orphan any in-flight request
             xrayCards = nil
             xrayError = nil
             xrayLoading = false
-            if bottomTab == .context { fireXRayIfNeeded() }
+        }
+        // Debounced auto-fire: with the Context tab open, skipping
+        // through tracks must not bill one LLM request per skip — and a
+        // request fired the instant `currentTrack` changes can still
+        // carry the PREVIOUS track's lyrics (the bridge only clears
+        // them once /next returns). SwiftUI cancels the sleep when the
+        // id changes, so only the track the user settles on fires; a
+        // cache hit skips the debounce and paints instantly. The id
+        // also covers configuring an API key while the tab is open.
+        .task(id: "\(track?.videoId ?? "none")#\(env.hasLLMAPIKey)") {
+            guard bottomTab == .context, env.hasLLMAPIKey else { return }
+            if let vid = track?.videoId, env.xrayCardsService.cached(videoId: vid) != nil {
+                fireXRayIfNeeded()
+                return
+            }
+            try? await Task.sleep(for: .seconds(1.2))
+            guard !Task.isCancelled else { return }
+            fireXRayIfNeeded()
         }
     }
 
@@ -204,7 +234,14 @@ struct NowPlayingView: View {
                 .clipShape(Capsule())
             }
             .buttonStyle(.plain)
-            .keyboardShortcut(.cancelAction)
+            // Esc is layered (see onExitCommand): in fullscreen lyrics
+            // the Exit-fullscreen button owns .cancelAction instead —
+            // key shortcuts dispatch via performKeyEquivalent BEFORE
+            // onExitCommand ever sees the key, so an unconditional
+            // shortcut here would close the whole player from
+            // fullscreen lyrics. Exactly one .cancelAction is live at
+            // a time.
+            .keyboardShortcut(lyricsFullscreen ? nil : KeyboardShortcut.cancelAction)
 
             Spacer()
         }
@@ -714,8 +751,24 @@ struct NowPlayingView: View {
                 } else {
                     ForEach(env.userPlaylists) { pl in
                         Button(pl.title) {
+                            // Capture the track at tap time — it can
+                            // change before the Task runs, and a nil
+                            // current track must not toast "Added".
+                            guard let track = env.player.currentTrack else { return }
+                            let videoId = track.videoId
                             Task {
-                                try? await env.player.addCurrentTrackToPlaylist(playlistId: pl.id)
+                                // Toast both outcomes, same copy as
+                                // TrackContextMenu — a silent add read
+                                // as "did that even work?"
+                                do {
+                                    try await env.innerTube.addToPlaylist(
+                                        videoId: videoId,
+                                        playlistId: pl.id
+                                    )
+                                    env.showToast("Added to \(pl.title)")
+                                } catch {
+                                    env.showToast("Couldn't add to \(pl.title)")
+                                }
                             }
                         }
                     }
@@ -983,14 +1036,29 @@ struct NowPlayingView: View {
             // (or queued) before metadata landed have an empty title
             // and no artwork — they render as anonymous slots. Drop
             // them everywhere so neither section shows visual noise.
-            let history = env.player.playedHistory.filter { entry in
-                entry.id != currentId
-                    && !entry.title.trimmingCharacters(in: .whitespaces).isEmpty
-                    && entry.thumbnailURL != nil
+            //
+            // History legally repeats videoIds (A, B, A), so its rows
+            // can't be ForEach-keyed by videoId alone — that logged
+            // "ID occurs multiple times" and mis-animated rows. Keep
+            // each entry's index in the FULL, unfiltered history (it
+            // only shifts when the cap trims the front, unlike an
+            // index into the filtered suffix window) and key rows by
+            // "index-videoId".
+            let historyRows = Array(env.player.playedHistory.enumerated()).filter { pair in
+                pair.element.id != currentId
+                    && !pair.element.title.trimmingCharacters(in: .whitespaces).isEmpty
+                    && pair.element.thumbnailURL != nil
             }
             let upcoming = upcomingList(currentId: currentId).filter {
                 !$0.title.trimmingCharacters(in: .whitespaces).isEmpty
             }
+            // Queue-mutating affordances (drag-reorder, Move Up/Down,
+            // Remove) only make sense when the rows really are the
+            // page's queue — i.e. `upcomingList` returned `upNext`.
+            // The Discover lens (no chips) shows `related` rows;
+            // "editing" those is a no-op that ends in a false
+            // "Couldn't remove" error toast.
+            let upcomingIsQueue = !env.player.availableChips.isEmpty || queueMode != .discover
             let showRadioHint = upcoming.isEmpty
                 && env.player.isRadioContext
                 && currentId != nil
@@ -1004,7 +1072,7 @@ struct NowPlayingView: View {
             // Recently played — the session log. Capped by default;
             // "Show all" reveals the rest. Default lens only (a tuned
             // variant's curation isn't a history).
-            if !history.isEmpty, isDefaultLens {
+            if !historyRows.isEmpty, isDefaultLens {
                 HStack(spacing: 6) {
                     Text("Recently played")
                         .font(.system(size: 10, weight: .semibold))
@@ -1012,8 +1080,8 @@ struct NowPlayingView: View {
                         .tracking(1.2)
                         .foregroundStyle(Theme.Text.tertiary)
                     Spacer()
-                    if history.count > Self.historyDefaultLimit {
-                        Button(historyExpanded ? "Show fewer" : "Show all (\(history.count))") {
+                    if historyRows.count > Self.historyDefaultLimit {
+                        Button(historyExpanded ? "Show fewer" : "Show all (\(historyRows.count))") {
                             historyExpanded.toggle()
                         }
                         .buttonStyle(.plain)
@@ -1027,9 +1095,13 @@ struct NowPlayingView: View {
                 // section, right above "Up next". Capped view keeps
                 // the last N (closest to now).
                 let shown = historyExpanded
-                    ? history
-                    : Array(history.suffix(Self.historyDefaultLimit))
-                queueList(shown, faded: true)
+                    ? historyRows
+                    : Array(historyRows.suffix(Self.historyDefaultLimit))
+                queueList(
+                    shown.map(\.element),
+                    faded: true,
+                    rowKeys: shown.map { "\($0.offset)-\($0.element.id)" }
+                )
                 // Divider only when an Up Next list follows — otherwise a
                 // trailing divider dangles under radio/empty states.
                 if !upcoming.isEmpty {
@@ -1044,10 +1116,10 @@ struct NowPlayingView: View {
                     .tracking(1.2)
                     .foregroundStyle(Theme.Text.tertiary)
                     .padding(.horizontal, 4)
-                queueList(upcoming, faded: false, reorderable: true)
+                queueList(upcoming, faded: false, reorderable: upcomingIsQueue)
             }
             // Nothing to show and not a radio context → neutral empty hint.
-            if history.isEmpty && upcoming.isEmpty && !showRadioHint {
+            if historyRows.isEmpty && upcoming.isEmpty && !showRadioHint {
                 emptyHint(emptyHintText)
             }
         }
@@ -1168,9 +1240,12 @@ struct NowPlayingView: View {
     private var lyricsContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Translate toggle + "Create card" share a header row.
-            // Both surfaces only render when there are lyrics to act on.
-            if !env.player.lyricsLoading,
-               (!env.player.lyricsLines.isEmpty || (env.player.lyrics?.isEmpty == false)) {
+            // Both surfaces only render when there are REAL lyrics to
+            // act on — `lyricsLines` is filled by every successful
+            // fetch, while the plain `lyrics` string can also hold the
+            // "Lyrics not available." UI sentinel, which must not
+            // enable Translate / Create card.
+            if !env.player.lyricsLoading, !env.player.lyricsLines.isEmpty {
                 HStack(spacing: 12) {
                     translationToolbar
                     Spacer()
@@ -1212,26 +1287,33 @@ struct NowPlayingView: View {
                 }
             }
         }
-        // Reset + refire when the source track or target language
-        // changes. The translator's own cache means re-firing is
-        // usually free (cache hit, instant return); the @State here
-        // just keeps the UI in sync.
+        // Reset on track change. The refire is NOT immediate: at this
+        // instant `env.player.lyricsLines` can still hold the PREVIOUS
+        // track's lines (the bridge only clears them once /next
+        // returns), so an immediate request would translate the wrong
+        // song and cache it under the new videoId. The debounced
+        // .task(id:) below fires once the track settles.
         .onChange(of: env.player.currentTrack?.videoId) { _, _ in
+            translationRequestID = UUID()   // orphan any in-flight request
             translation = nil
             translationError = nil
-            if env.lyricsTranslationEnabled { fireTranslateIfNeeded() }
+            translationLoading = false
         }
         .onChange(of: env.translationLanguage) { _, _ in
+            translationRequestID = UUID()
             translation = nil
             translationError = nil
+            translationLoading = false
             if env.lyricsTranslationEnabled { fireTranslateIfNeeded() }
         }
         .onChange(of: env.lyricsTranslationEnabled) { _, newValue in
             if newValue { fireTranslateIfNeeded() } else {
                 // Toggling off doesn't drop the cache — flipping back
                 // on should be free. Just hide.
+                translationRequestID = UUID()
                 translation = nil
                 translationError = nil
+                translationLoading = false
             }
         }
         // Lyrics often land asynchronously after the tab opens — if
@@ -1239,6 +1321,26 @@ struct NowPlayingView: View {
         // first batch of lines arrives.
         .onChange(of: env.player.lyricsLines.count) { _, _ in
             if env.lyricsTranslationEnabled, translation == nil {
+                fireTranslateIfNeeded()
+            }
+        }
+        // Debounced track-change work: re-request the new track's
+        // lyrics (idempotent; a no-op until the bridge has cleared the
+        // previous track's) and, once the track settles, fire the
+        // translation. SwiftUI cancels the sleep when the id changes,
+        // so tracks the user skips past never start a billed request.
+        // A cache hit paints instantly, without the debounce.
+        .task(id: env.player.currentTrack?.videoId) {
+            env.player.loadLyricsIfNeeded()
+            if env.lyricsTranslationEnabled,
+               let vid = env.player.currentTrack?.videoId,
+               env.lyricsTranslator.cached(videoId: vid, language: env.translationLanguage) != nil {
+                fireTranslateIfNeeded()   // cache hit — instant paint
+            }
+            try? await Task.sleep(for: .seconds(1.2))
+            guard !Task.isCancelled else { return }
+            env.player.loadLyricsIfNeeded()
+            if env.lyricsTranslationEnabled, translation == nil, !translationLoading {
                 fireTranslateIfNeeded()
             }
         }
@@ -1307,7 +1409,7 @@ struct NowPlayingView: View {
                         .foregroundStyle(Theme.Text.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
-                    translatedSubtitle(at: idx)
+                    translatedSubtitle(at: idx, selectable: true)
                 }
             }
         }
@@ -1317,29 +1419,38 @@ struct NowPlayingView: View {
     /// Optional translated subtitle for a given source-line index.
     /// Renders nothing when translation is off, errored, or the index
     /// is out of range of what the model returned.
+    ///
+    /// `selectable` is false on the synced (karaoke) path, where the
+    /// row carries a tap-to-seek gesture: a selectable Text would
+    /// consume the mouse-down itself and the tap would never fire.
+    /// An outer .textSelection(.disabled) would NOT be enough — the
+    /// innermost modifier wins, so selectability must be decided here.
     @ViewBuilder
-    private func translatedSubtitle(at idx: Int) -> some View {
+    private func translatedSubtitle(at idx: Int, selectable: Bool) -> some View {
         if env.lyricsTranslationEnabled,
            let lines = translation?.lines,
            idx < lines.count {
             let entry = lines[idx]
             if !entry.translated.isEmpty || (entry.pronunciation?.isEmpty == false) {
-                VStack(alignment: .leading, spacing: 1) {
+                let column = VStack(alignment: .leading, spacing: 1) {
                     if let pron = entry.pronunciation, !pron.isEmpty {
                         Text(pron)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(Theme.Text.tertiary)
-                            .textSelection(.enabled)
                     }
                     if !entry.translated.isEmpty {
                         Text(entry.translated)
                             .font(.system(size: 12, weight: .regular))
                             .italic()
                             .foregroundStyle(Theme.red.opacity(0.9))
-                            .textSelection(.enabled)
                     }
                 }
                 .padding(.leading, 4)
+                if selectable {
+                    column.textSelection(.enabled)
+                } else {
+                    column
+                }
             }
         }
         if env.lyricsTranslationEnabled, idx == 0, let err = translationError {
@@ -1356,22 +1467,19 @@ struct NowPlayingView: View {
     private func fireTranslateIfNeeded() {
         guard env.lyricsTranslationEnabled, env.hasLLMAPIKey else { return }
         guard let track = env.player.currentTrack else { return }
-        // Prefer the structured `lyricsLines` (timed or not) so we
-        // match the renderer's index space; fall back to splitting the
-        // plain-text blob the same way `plainLyricsWithTranslation`
-        // does so indices line up.
-        let lines: [String]
-        if !env.player.lyricsLines.isEmpty {
-            lines = env.player.lyricsLines.map(\.text)
-        } else if let text = env.player.lyrics, !text.isEmpty {
-            lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        } else {
-            return
-        }
+        // Translate only the structured `lyricsLines` — every
+        // successful fetch fills them (the plain `lyrics` blob is
+        // derived from them, so indices line up), while a lyrics-less
+        // track leaves them empty and stores the "Lyrics not
+        // available." UI sentinel in `lyrics`. That sentinel must
+        // never be sent to the model as if it were a verse.
+        guard !env.player.lyricsLines.isEmpty else { return }
+        let lines = env.player.lyricsLines.map(\.text)
         let videoId = track.videoId
         let language = env.translationLanguage
         // Cache hit — render synchronously without flickering loader.
         if let hit = env.lyricsTranslator.cached(videoId: videoId, language: language) {
+            translationRequestID = UUID()   // orphan any stale in-flight request
             translation = hit
             translationError = nil
             translationLoading = false
@@ -1379,6 +1487,12 @@ struct NowPlayingView: View {
         }
         translationLoading = true
         translationError = nil
+        // Every completion path checks this token so a superseded
+        // request (newer request started, or track/language changed)
+        // can neither commit its result nor surface its error — and
+        // never touches the spinner the newer request now owns.
+        let requestID = UUID()
+        translationRequestID = requestID
         let translator = env.lyricsTranslator
         Task { @MainActor in
             do {
@@ -1387,22 +1501,28 @@ struct NowPlayingView: View {
                     language: language,
                     lines: lines
                 )
-                // Only commit if the track + language are still the
-                // same — the user may have skipped while we waited.
-                guard env.player.currentTrack?.videoId == videoId,
-                      env.translationLanguage == language else {
-                    translationLoading = false
-                    return
-                }
+                // Only commit if this is still the newest request and
+                // the track + language still match — the user may have
+                // skipped while we waited.
+                guard translationRequestID == requestID,
+                      env.player.currentTrack?.videoId == videoId,
+                      env.translationLanguage == language else { return }
                 translation = result
+                translationError = nil
                 translationLoading = false
+            } catch is CancellationError {
+                // Cancellation is not an error the user should see.
+                if translationRequestID == requestID { translationLoading = false }
             } catch let err as LLMError {
+                guard translationRequestID == requestID else { return }
                 translationError = err.errorDescription ?? "Translation failed."
                 translationLoading = false
             } catch LyricsTranslator.ParseError.noJSONArray {
+                guard translationRequestID == requestID else { return }
                 translationError = "Couldn't parse the model's response."
                 translationLoading = false
             } catch {
+                guard translationRequestID == requestID else { return }
                 translationError = "Translation failed: \(error.localizedDescription)"
                 translationLoading = false
             }
@@ -1546,8 +1666,11 @@ struct NowPlayingView: View {
                     .controlSize(.small)
             }
         } else {
+            // No onAppear fire here — this branch re-appears on every
+            // track-change reset, and an immediate fire would defeat
+            // the debounced .task(id:) in `body`. Tab-open (onChange of
+            // bottomTab) and the debounced task cover all entry paths.
             emptyHint("Pick a track to surface context.")
-                .onAppear { fireXRayIfNeeded() }
         }
     }
 
@@ -1613,6 +1736,7 @@ struct NowPlayingView: View {
         let videoId = track.videoId
         // Cache hit — render synchronously, no loader flash.
         if !force, let hit = env.xrayCardsService.cached(videoId: videoId) {
+            xrayRequestID = UUID()   // orphan any stale in-flight request
             xrayCards = hit
             xrayError = nil
             xrayLoading = false
@@ -1622,16 +1746,18 @@ struct NowPlayingView: View {
         xrayLoading = true
         xrayError = nil
         xrayCards = nil
+        // See translationRequestID — a superseded request must not
+        // touch state a newer request now owns.
+        let requestID = UUID()
+        xrayRequestID = requestID
         let title = track.title
         let artist = track.subtitle
-        let lyricLines: [String]?
-        if !env.player.lyricsLines.isEmpty {
-            lyricLines = env.player.lyricsLines.map(\.text)
-        } else if let text = env.player.lyrics, !text.isEmpty {
-            lyricLines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        } else {
-            lyricLines = nil
-        }
+        // Only real lyric lines feed the prompt — the plain `lyrics`
+        // string can hold the "Lyrics not available." UI sentinel
+        // (see fireTranslateIfNeeded); X-Ray handles nil lyrics fine.
+        let lyricLines: [String]? = env.player.lyricsLines.isEmpty
+            ? nil
+            : env.player.lyricsLines.map(\.text)
         let service = env.xrayCardsService
         Task { @MainActor in
             do {
@@ -1641,21 +1767,27 @@ struct NowPlayingView: View {
                     artist: artist,
                     lyrics: lyricLines
                 )
-                // Only commit if the track is still the same — the
-                // user may have skipped while we waited.
-                guard env.player.currentTrack?.videoId == videoId else {
-                    xrayLoading = false
-                    return
-                }
+                // Only commit if this is still the newest request and
+                // the track is still the same — the user may have
+                // skipped while we waited.
+                guard xrayRequestID == requestID,
+                      env.player.currentTrack?.videoId == videoId else { return }
                 xrayCards = bundle
+                xrayError = nil
                 xrayLoading = false
+            } catch is CancellationError {
+                // Cancellation is not an error the user should see.
+                if xrayRequestID == requestID { xrayLoading = false }
             } catch let err as LLMError {
+                guard xrayRequestID == requestID else { return }
                 xrayError = err.errorDescription ?? "X-Ray failed."
                 xrayLoading = false
             } catch XRayCardsService.ParseError.noJSONArray {
+                guard xrayRequestID == requestID else { return }
                 xrayError = "Couldn't parse the model's response."
                 xrayLoading = false
             } catch {
+                guard xrayRequestID == requestID else { return }
                 xrayError = "X-Ray failed: \(error.localizedDescription)"
                 xrayLoading = false
             }
@@ -1688,6 +1820,9 @@ struct NowPlayingView: View {
                         .foregroundStyle(Theme.Text.secondary)
                 }
                 .buttonStyle(.borderless)
+                // Owns Esc while fullscreen lyrics is up (the top-bar
+                // Close button's shortcut is nil'd out in this mode).
+                .keyboardShortcut(.cancelAction)
                 .help("Exit fullscreen lyrics (Esc)")
             }
             ScrollView(showsIndicators: false) {
@@ -1718,8 +1853,14 @@ struct NowPlayingView: View {
         return ScrollViewReader { proxy in
             // Re-anchor whenever the player reports a new elapsed value.
             // Between polls (~1Hz) we extrapolate locally so the active
-            // line's per-word fill stays smooth at ~30fps.
-            TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { context in
+            // line's per-word fill stays smooth at ~30fps. Paused while
+            // playback is paused: the extrapolation freezes at the
+            // anchor anyway, so ticking 30×/s would rebuild every lyric
+            // line for identical output. A resume/seek re-anchors via
+            // the `.progress`-driven onChange below, which also restarts
+            // the schedule (isPlaying is @Observable-tracked here).
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0,
+                                    paused: !env.player.isPlaying)) { context in
                 let elapsedMs = extrapolatedElapsedMs(at: context.date)
                 let activeIndex = LyricsKaraoke.activeLyricIndex(
                     for: elapsedMs, in: lines
@@ -1745,6 +1886,14 @@ struct NowPlayingView: View {
             }
             .onChange(of: env.player.elapsed) { _, newValue in
                 anchorElapsed = newValue
+                anchorAt = Date()
+            }
+            // Re-anchor on play/pause flips. Without this, `anchorAt`
+            // keeps its pre-pause timestamp, so the first tick after a
+            // resume extrapolates `now - anchorAt` (capped at 2s) and
+            // the active-line fill jumps ahead until the next ~1Hz poll.
+            .onChange(of: env.player.isPlaying) { _, _ in
+                anchorElapsed = env.player.elapsed
                 anchorAt = Date()
             }
             .onAppear {
@@ -1784,11 +1933,15 @@ struct NowPlayingView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .textSelection(.enabled)
+            // No .textSelection here: on macOS selectable Text consumes
+            // mouse-down to begin a selection, so the row's tap-to-seek
+            // gesture would only fire on the empty space past the
+            // glyphs. Copy/select stays available on the plain-lyrics
+            // path, which has no tap gesture.
             // Inline translation + optional pronunciation, indented
             // slightly so the source line still reads as the "primary"
             // text. Renders nothing when translation is off / loading.
-            translatedSubtitle(at: idx)
+            translatedSubtitle(at: idx, selectable: false)
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -1916,11 +2069,28 @@ struct NowPlayingView: View {
         }
     }
 
-    private func queueList(_ items: [MediaItem], faded: Bool = false, reorderable: Bool = false) -> some View {
+    /// Renders a track list styled as queue rows. `reorderable` marks a
+    /// list whose rows really live in the playback queue: it enables
+    /// drag-reorder AND the queue-mutating actions (Move Up/Down,
+    /// Remove from queue). History, the Related tab, and the Discover
+    /// lens pass false — their rows are NOT in the queue, so those
+    /// actions were silent no-ops ending in a false "Couldn't remove"
+    /// toast. Non-mutating actions (Play next / Add to queue) stay on
+    /// every row. `rowKeys` overrides ForEach identity for lists that
+    /// can legally repeat a videoId (history); defaults to the item
+    /// ids, which upNext/related keep unique.
+    private func queueList(
+        _ items: [MediaItem],
+        faded: Bool = false,
+        reorderable: Bool = false,
+        rowKeys: [String]? = nil
+    ) -> some View {
+        let keys = rowKeys ?? items.map(\.id)
         let currentId = env.player.currentTrack?.videoId
         let visibleIds = items.map(\.id)
         return LazyVStack(alignment: .leading, spacing: 4) {
-            ForEach(items) { item in
+            ForEach(Array(keys.enumerated()), id: \.element) { pos, _ in
+                let item = items[pos]
                 let isCurrent = item.id == currentId
                 let isDropTarget = dragHoverTargetId == item.id
                 Button {
@@ -1932,7 +2102,7 @@ struct NowPlayingView: View {
                     // `consumeUpTo` becomes a no-op. (C1)
                     Task { await env.player.skipTo(item: item) }
                 } label: {
-                    queueRow(item: item, isCurrent: isCurrent)
+                    queueRow(item: item, isCurrent: isCurrent, allowsQueueEdits: reorderable)
                         .opacity(faded ? 0.6 : 1.0)
                         .overlay(alignment: .top) {
                             // Insertion indicator when a drag is
@@ -1966,24 +2136,28 @@ struct NowPlayingView: View {
                 .accessibilityAddTraits(isCurrent ? [.isButton, .isSelected] : .isButton)
                 .contextMenu {
                     // Full track menu plus queue-specific reorder/remove
-                    // operations underneath. omitPrimaryPlay because the
-                    // row's tap already plays it; keep "Start radio" so
-                    // the user can break out of the current queue.
+                    // operations underneath — but ONLY for rows that are
+                    // actually in the queue (see the doc comment above).
+                    // omitPrimaryPlay because the row's tap already plays
+                    // it; keep "Start radio" so the user can break out of
+                    // the current queue.
                     TrackContextMenu(item: item, omitPrimaryPlay: true)
-                    Divider()
-                    Button("Move Up") { env.player.moveInQueue(videoId: item.id, by: -1) }
-                        .disabled(isCurrent)
-                    Button("Move Down") { env.player.moveInQueue(videoId: item.id, by: 1) }
-                        .disabled(isCurrent)
-                    Button("Remove from Queue") {
-                        Task { await env.player.removeFromQueue(videoId: item.id) }
+                    if reorderable {
+                        Divider()
+                        Button("Move Up") { env.player.moveInQueue(videoId: item.id, by: -1) }
+                            .disabled(isCurrent)
+                        Button("Move Down") { env.player.moveInQueue(videoId: item.id, by: 1) }
+                            .disabled(isCurrent)
+                        Button("Remove from Queue") {
+                            Task { await env.player.removeFromQueue(videoId: item.id) }
+                        }
+                        .disabled(isCurrent)  // can't remove the playing track
                     }
-                    .disabled(isCurrent)  // can't remove the playing track
                 }
             }
         }
         // Rows slide when the queue consumes/reorders instead of popping.
-        .animation(reduceMotion ? nil : Theme.Motion.list, value: visibleIds)
+        .animation(reduceMotion ? nil : Theme.Motion.list, value: keys)
     }
 
     /// Compute a drop destination index and hand it to the bridge.
@@ -2004,7 +2178,7 @@ struct NowPlayingView: View {
         )
     }
 
-    private func queueRow(item: MediaItem, isCurrent: Bool) -> some View {
+    private func queueRow(item: MediaItem, isCurrent: Bool, allowsQueueEdits: Bool) -> some View {
         // B5: rows that came from /related via Smart Shuffle get a
         // "+" badge so the user can tell at a glance that this slot
         // is a suggestion rather than the playlist's own next track.
@@ -2075,9 +2249,14 @@ struct NowPlayingView: View {
                         env.player.addToQueueEnd(item: item)
                         env.showToast("Added to queue: \(item.title)")
                     }
-                    Divider()
-                    Button("Remove from queue", role: .destructive) {
-                        Task { await env.player.removeFromQueue(videoId: item.id) }
+                    // Removal only offered on rows that are actually in
+                    // the queue — history/Related/Discover rows aren't,
+                    // and "removing" them only produced an error toast.
+                    if allowsQueueEdits {
+                        Divider()
+                        Button("Remove from queue", role: .destructive) {
+                            Task { await env.player.removeFromQueue(videoId: item.id) }
+                        }
                     }
                 } label: {
                     Image(systemName: "ellipsis")

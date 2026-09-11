@@ -1,5 +1,7 @@
 import Foundation
 import AppKit
+import ImageIO
+import Security
 import WidgetKit
 
 // Bridges PlayerBridge state into the App-Group-shared
@@ -40,6 +42,24 @@ final class NowPlayingSnapshotWriter {
 
     private init() {}
 
+    // The widget reads everything through the App Group, and the App
+    // Group entitlement is off while the widget target is disabled
+    // (project.yml: free-team builds can't provision it). Unentitled,
+    // every suite write, timeline reload and artwork download/re-encode
+    // is pure waste, so the writer idles. Checked once, from the signed
+    // entitlements — `containerURL(forSecurityApplicationGroupIdentifier:)`
+    // can't gate this: on macOS it returns a path even when unentitled.
+    // Re-adding the entitlement (project.yml step 3) re-enables it.
+    private static let appGroupEntitled: Bool = {
+        guard let task = SecTaskCreateFromSelf(nil),
+              let value = SecTaskCopyValueForEntitlement(
+                  task, "com.apple.security.application-groups" as CFString, nil
+              ),
+              let groups = value as? [String]
+        else { return false }
+        return groups.contains(NowPlayingSnapshotStore.appGroupID)
+    }()
+
     // Called from AppEnvironment.player.onUpdate. Cheap when no
     // material change has happened; expensive [JSON encode + plist
     // write + widget reload] only on real transitions.
@@ -52,6 +72,7 @@ final class NowPlayingSnapshotWriter {
         elapsed: Double,
         duration: Double
     ) {
+        guard Self.appGroupEntitled else { return }
         let now = Date()
         let snapshot = NowPlayingSnapshot(
             videoId: videoId,
@@ -95,12 +116,12 @@ final class NowPlayingSnapshotWriter {
         // Fire-and-forget artwork cache refresh on track change.
         // Artwork URL is the only field whose payload doesn't fit in
         // UserDefaults [JPG, not metadata], so we copy it to the
-        // shared container as a separate file. AppKit drawing
-        // primitives are main-thread-only, so the task hops back to
-        // MainActor after the async URLSession download.
+        // shared container as a separate file. Download, decode,
+        // resize and JPEG encode all run OFF the main actor (ImageIO,
+        // not AppKit drawing) so a track transition never hitches.
         if let url = thumbnailURL, lastCachedArtwork != url {
             lastCachedArtwork = url
-            Task { [url] in
+            Task.detached(priority: .utility) {
                 await Self.cacheArtwork(url: url)
             }
         }
@@ -109,6 +130,7 @@ final class NowPlayingSnapshotWriter {
     // Called when there's no active playback so the widget can wipe
     // to its placeholder shell instead of advertising stale state.
     func clear() {
+        guard Self.appGroupEntitled else { return }
         NowPlayingSnapshotStore.clear()
         lastWritten = nil
         lastWriteAt = .distantPast
@@ -119,7 +141,7 @@ final class NowPlayingSnapshotWriter {
 
     private var lastCachedArtwork: URL?
 
-    static func artworkCacheURL() -> URL? {
+    nonisolated static func artworkCacheURL() -> URL? {
         guard let container = FileManager.default
             .containerURL(forSecurityApplicationGroupIdentifier: NowPlayingSnapshotStore.appGroupID)
         else { return nil }
@@ -128,31 +150,44 @@ final class NowPlayingSnapshotWriter {
         return dir.appendingPathComponent("current.jpg", isDirectory: false)
     }
 
-    private static func cacheArtwork(url: URL) async {
+    // Nonisolated: runs on the global executor, never the main thread.
+    // Only thread-safe APIs below (URLSession, ImageIO, Data writes).
+    nonisolated private static func cacheArtwork(url: URL) async {
         guard let dest = artworkCacheURL() else { return }
-        guard let (data, _) = try? await URLSession.shared.data(from: url) else { return }
+        // Same URL NowPlayingCenter fetches at the same moment — let
+        // the shared URLCache serve it instead of a second download.
+        var request = URLRequest(url: url)
+        request.cachePolicy = .returnCacheDataElseLoad
+        guard let (data, _) = try? await URLSession.shared.data(for: request) else { return }
         // Decode + re-encode at a tiny widget-appropriate size to keep
         // the cached blob small. WidgetKit memory limits on macOS are
         // generous, but the systemSmall family renders ~150pt — we
         // don't need a 600x600 source.
-        guard let image = NSImage(data: data) else {
-            try? data.write(to: dest, options: .atomic)
-            return
-        }
-        let target = NSSize(width: 256, height: 256)
-        let resized = NSImage(size: target)
-        resized.lockFocus()
-        image.draw(in: NSRect(origin: .zero, size: target),
-                   from: .zero,
-                   operation: .copy,
-                   fraction: 1.0)
-        resized.unlockFocus()
-        if let tiff = resized.tiffRepresentation,
-           let rep = NSBitmapImageRep(data: tiff),
-           let jpg = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.85]) {
+        if let jpg = widgetJPEG(from: data) {
             try? jpg.write(to: dest, options: .atomic)
         } else {
             try? data.write(to: dest, options: .atomic)
         }
+    }
+
+    // ImageIO thumbnail (longest side 256 px, aspect preserved) encoded
+    // as JPEG at 0.85. Nil when the bytes don't decode — the caller
+    // then stores the original.
+    nonisolated private static func widgetJPEG(from data: Data) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let thumbOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 256,
+        ]
+        guard let thumb = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) else { return nil }
+        let out = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(
+            out as CFMutableData, "public.jpeg" as CFString, 1, nil
+        ) else { return nil }
+        let props: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 0.85]
+        CGImageDestinationAddImage(destination, thumb, props as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return out as Data
     }
 }
