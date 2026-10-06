@@ -40,6 +40,22 @@ struct TrackContextMenu: View {
         Button(item.kind == .song || item.kind == .episode ? "Start song radio" : "Start radio") {
             Task { await env.player.startRadio(for: item) }
         }
+        // "Blend from here" — the offline counterpart to radio: a
+        // personal mix from local history leaning into this artist.
+        // Shown only once there's enough history to blend (else it would
+        // produce an empty or generic queue).
+        if BlendBuilder.seedArtistId(for: item) != nil,
+           BlendBuilder.isAvailable(from: env.player.playedEntries) {
+            Button("Blend from here") {
+                let mix = BlendBuilder.seeded(by: item, from: env.player.playedEntries)
+                guard !mix.isEmpty else {
+                    env.showToast("Not enough history to blend yet.")
+                    return
+                }
+                Task { await env.player.playTracks(mix) }
+                env.showToast("Blending around \(item.title) — \(mix.count) songs")
+            }
+        }
         Divider()
         Button("Play next") {
             env.player.playNext(item: item)

@@ -29,6 +29,11 @@ enum BlendBuilder {
     /// stay personal rather than drifting into "everything I've heard".
     static let defaultLimit: Int = 40
 
+    /// How hard a seeded blend leans toward the seed artist. Multiplies
+    /// the sampling weight of matching songs, so they surface far more
+    /// often without crowding out the rest of the mix entirely.
+    static let seedBoost: Double = 6
+
     /// Build the blend: a de-duplicated, recency-weighted, lightly
     /// artist-declumped ordering of songs drawn from `entries`.
     ///
@@ -38,6 +43,7 @@ enum BlendBuilder {
         from entries: [PlayedEntry],
         limit: Int = defaultLimit,
         now: Date = Date(),
+        boostArtistId: String? = nil,
         using rng: inout some RandomNumberGenerator
     ) -> [MediaItem] {
         let cutoff = now.addingTimeInterval(-Double(windowDays) * 86_400)
@@ -76,8 +82,15 @@ enum BlendBuilder {
         // to surface, but every eligible track keeps a real chance, so
         // the order genuinely varies run to run.
         let keyed: [(item: MediaItem, key: Double, artist: String)] = byId.values.map { agg in
+            // Seeded blends multiply the weight of songs by the seed
+            // artist so the mix leans into them while still sampling the
+            // rest of the library for texture.
+            var weight = agg.weight
+            if let boost = boostArtistId, let aid = agg.item.artistId, aid == boost {
+                weight *= seedBoost
+            }
             let u = Double.random(in: Double.leastNonzeroMagnitude...1, using: &rng)
-            let key = pow(u, 1.0 / max(agg.weight, Double.leastNonzeroMagnitude))
+            let key = pow(u, 1.0 / max(weight, Double.leastNonzeroMagnitude))
             return (agg.item, key, artistKey(for: agg.item))
         }
         let ordered = keyed.sorted { $0.key > $1.key }.map { ($0.item, $0.artist) }
@@ -93,10 +106,33 @@ enum BlendBuilder {
     static func build(
         from entries: [PlayedEntry],
         limit: Int = defaultLimit,
-        now: Date = Date()
+        now: Date = Date(),
+        boostArtistId: String? = nil
     ) -> [MediaItem] {
         var rng = SystemRandomNumberGenerator()
-        return build(from: entries, limit: limit, now: now, using: &rng)
+        return build(from: entries, limit: limit, now: now, boostArtistId: boostArtistId, using: &rng)
+    }
+
+    /// A blend that leans into one seed (artist / album / song): the mix
+    /// is biased toward the seed's artist, then filled out with the rest
+    /// of your recent listening for variety. Pure history — no network —
+    /// so it's "more of this, the way *I* listen" rather than YT radio.
+    /// Returns `[]` on the same thin-history gate as `build`.
+    static func seeded(
+        by seed: MediaItem,
+        from entries: [PlayedEntry],
+        limit: Int = defaultLimit,
+        now: Date = Date()
+    ) -> [MediaItem] {
+        build(from: entries, limit: limit, now: now, boostArtistId: seedArtistId(for: seed))
+    }
+
+    /// The artistId a seed blends around: the artist tile's own id, or
+    /// the primary artist of a song/album/other. nil → an unbiased blend.
+    static func seedArtistId(for seed: MediaItem) -> String? {
+        if seed.kind == .artist { return seed.id.isEmpty ? nil : seed.id }
+        if let aid = seed.artistId, !aid.isEmpty { return aid }
+        return nil
     }
 
     /// Distinct in-window songs available to a blend. Cheap enough to

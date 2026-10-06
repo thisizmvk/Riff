@@ -156,6 +156,39 @@ final class BlendBuilderTests: XCTestCase {
         XCTAssertEqual(Set(covers).count, covers.count)
     }
 
+    // MARK: - Seeded blend
+
+    func testSeededBlendLeansTowardSeedArtist() {
+        let now = Date()
+        // Equal play history for two artists, X and Y. A blend seeded by
+        // X should, over the full mix, contain more X than Y.
+        var entries: [PlayedEntry] = []
+        for i in 0..<20 {
+            entries.append(entry(song("x\(i)", artist: "X", artistId: "X"), daysAgo: Double(i) * 0.3, now: now))
+            entries.append(entry(song("y\(i)", artist: "Y", artistId: "Y"), daysAgo: Double(i) * 0.3, now: now))
+        }
+        let seed = MediaItem(id: "X", kind: .artist, title: "X", subtitle: "", thumbnailURL: nil)
+        var rng = SeededRNG(seed: 555)
+        let mix = BlendBuilder.build(
+            from: entries, limit: 30, now: now,
+            boostArtistId: BlendBuilder.seedArtistId(for: seed), using: &rng
+        )
+        let xCount = mix.filter { $0.artistId == "X" }.count
+        let yCount = mix.filter { $0.artistId == "Y" }.count
+        XCTAssertGreaterThan(xCount, yCount, "seeded blend should favor the seed artist")
+    }
+
+    func testSeedArtistIdResolution() {
+        let artist = MediaItem(id: "A1", kind: .artist, title: "A", subtitle: "", thumbnailURL: nil)
+        XCTAssertEqual(BlendBuilder.seedArtistId(for: artist), "A1")
+        let songWithArtist = song("s", artistId: "A2")
+        XCTAssertEqual(BlendBuilder.seedArtistId(for: songWithArtist), "A2")
+        let songNoArtist = song("s")
+        XCTAssertNil(BlendBuilder.seedArtistId(for: songNoArtist))
+        let emptyArtist = MediaItem(id: "", kind: .artist, title: "", subtitle: "", thumbnailURL: nil)
+        XCTAssertNil(BlendBuilder.seedArtistId(for: emptyArtist))
+    }
+
     func testEligibleSongCountCountsDistinctInWindow() {
         let now = Date()
         let entries = [

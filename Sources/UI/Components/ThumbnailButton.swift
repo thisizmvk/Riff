@@ -77,6 +77,21 @@ struct ThumbnailButton: View {
                     if item.kind == .album || item.kind == .artist || item.kind == .podcast {
                         Button("Start radio") { Task { await playDirect() } }
                     }
+                    // "Blend from here" — a local-history personal mix
+                    // leaning into this artist. Only when there's a seed
+                    // artist and enough history to blend.
+                    if BlendBuilder.seedArtistId(for: item) != nil,
+                       BlendBuilder.isAvailable(from: env.player.playedEntries) {
+                        Button("Blend from here") {
+                            let mix = BlendBuilder.seeded(by: item, from: env.player.playedEntries)
+                            guard !mix.isEmpty else {
+                                env.showToast("Not enough history to blend yet.")
+                                return
+                            }
+                            Task { await env.player.playTracks(mix) }
+                            env.showToast("Blending around \(env.displayTitle(for: item)) — \(mix.count) songs")
+                        }
+                    }
                     // Queue the whole container (albums/playlists/
                     // podcasts). Not for artists (no fixed tracklist).
                     if item.kind != .artist {
