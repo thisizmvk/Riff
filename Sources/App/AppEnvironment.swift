@@ -78,7 +78,7 @@ final class AppEnvironment {
         // A fresh sign-in (or account switch) owns its own playlists;
         // the `isEmpty` guard in loadUserPlaylistsIfNeeded would
         // otherwise keep whatever was loaded before.
-        if becameSignedIn { reloadUserPlaylists() }
+        if becameSignedIn { reloadUserPlaylists(); reloadLikedSongs() }
     }
 
     private static let wasSignedInKey = "auth.wasSignedIn"
@@ -146,6 +146,7 @@ final class AppEnvironment {
         userPlaylists = []
         userPlaylistsLoading = false
         followedArtistIds = []
+        likedSongs.clear()
         UserDefaults.standard.removeObject(forKey: Self.followedArtistsKey)
         HomeFeedCache.clear()
         UserInfoService.cachedEmail = nil
@@ -829,10 +830,27 @@ final class AppEnvironment {
     /// demand when a UI surface needs them; refreshed whenever the user
     /// signs in/out.
     private(set) var userPlaylists: [MediaItem] = []
+    /// App-wide liked-song truth for resting hearts (see LikedSongsStore).
+    let likedSongs = LikedSongsStore()
     private(set) var userPlaylistsLoading = false
     func loadUserPlaylistsIfNeeded() {
         guard isSignedIn, !userPlaylistsLoading, userPlaylists.isEmpty else { return }
         reloadUserPlaylists()
+    }
+
+    /// Resting like state for any row (the playing track's canonical
+    /// state still comes from PlayerBridge.liked).
+    func isLiked(_ videoId: String) -> Bool { likedSongs.contains(videoId) }
+
+    /// Re-seed the liked-song set from the library. Best-effort: a
+    /// failure leaves the persisted set in place.
+    func reloadLikedSongs() {
+        guard isSignedIn else { return }
+        Task { [innerTube, likedSongs] in
+            guard let items = try? await innerTube.library(section: .liked) else { return }
+            let ids = items.filter { $0.kind == .song }.map(\.id)
+            await MainActor.run { likedSongs.seed(ids) }
+        }
     }
 
     func reloadUserPlaylists() {
@@ -1116,6 +1134,11 @@ final class AppEnvironment {
         }
         self.player.onRemoveFailed = { [weak self] _ in
             self?.showToast("Couldn't remove that song from the queue — it's back in the list")
+        }
+        // Keep the resting-heart store in step with the playing track's
+        // like state (toggle, and the /next-reported truth on advance).
+        self.player.onLikeChanged = { [weak self] videoId, liked in
+            self?.likedSongs.set(videoId, liked: liked)
         }
 
         // B9 — drain any widget command that landed while the app was

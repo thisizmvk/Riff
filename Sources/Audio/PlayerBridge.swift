@@ -139,6 +139,11 @@ final class PlayerBridge {
     /// and the row menu failed). The row is put back on screen; the UI
     /// tells the user.
     var onRemoveFailed: ((String) -> Void)? = nil
+    /// Fired with (videoId, liked) whenever a track's like state is
+    /// established or changed — toggleLike and the /next-reported truth.
+    /// AppEnvironment uses it to keep the app-wide liked-song set (and
+    /// every resting heart) in sync.
+    var onLikeChanged: ((String, Bool) -> Void)? = nil
 
     // NOTE: The old `userQueuedIds` set was replaced by
     // `QueueManager.userQueueCount` — a positional region at the
@@ -1049,6 +1054,7 @@ final class PlayerBridge {
                 // inverse of the user's intent.
                 if self.currentTrack?.videoId == id {
                     self.liked = response.likeStatus == .like
+                    self.onLikeChanged?(id, self.liked)
                 }
                 self.availableChips = response.chips
                 // Highlight the chip we sent in the request (if any) so
@@ -1139,6 +1145,7 @@ final class PlayerBridge {
                 // land on the new track.
                 guard self.currentTrack?.videoId == id else { return }
                 self.liked = response.likeStatus == .like
+                self.onLikeChanged?(id, self.liked)
                 self.lyricsBrowseId = response.lyricsBrowseId
                 self.relatedBrowseId = response.relatedBrowseId
             }
@@ -1216,6 +1223,7 @@ final class PlayerBridge {
             } else {
                 try await innerTube.like(videoId: track.videoId)
             }
+            onLikeChanged?(track.videoId, !wasLiked)
         } catch {
             // Roll back on failure (e.g. needsReauth when not signed
             // in) — but only while the SAME track is still showing.

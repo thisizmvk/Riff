@@ -719,7 +719,9 @@ private struct TrackRow: View {
     /// playing row we ignore this and drive directly from
     /// `env.player.liked`, which IS canonical (PlayerBridge syncs it
     /// against /next on every track change).
-    @State private var likedOptimistic: Bool = false
+    /// Per-row optimistic override. nil = show the app-wide resting
+    /// truth (env.isLiked); set on tap so the heart flips instantly.
+    @State private var likedOverride: Bool? = nil
 
     private var isCurrent: Bool {
         env.player.currentTrack?.videoId == item.id
@@ -729,7 +731,8 @@ private struct TrackRow: View {
     /// the PlayerBridge; other rows fall back to the row-local
     /// optimistic flag.
     private var isLiked: Bool {
-        isCurrent ? env.player.liked : likedOptimistic
+        if isCurrent { return env.player.liked }
+        return likedOverride ?? env.isLiked(item.id)
     }
 
     var body: some View {
@@ -830,8 +833,9 @@ private struct TrackRow: View {
                     // re-render with truth the moment it becomes the
                     // current track), and a stuck optimistic state
                     // for a non-playing row is benign.
-                    let willLike = !likedOptimistic
-                    likedOptimistic = willLike
+                    let willLike = !(likedOverride ?? env.isLiked(item.id))
+                    likedOverride = willLike
+                    env.likedSongs.set(item.id, liked: willLike)
                     let videoId = item.id
                     Task {
                         do {
