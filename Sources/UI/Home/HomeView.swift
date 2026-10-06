@@ -13,6 +13,9 @@ struct HomeView: View {
     /// state — every chip pill renders unselected and the rails are the
     /// untruncated FEmusic_home feed.
     @State private var activeChip: InnerTubeClient.HomeChip?
+    /// True while a chip filter fetch is in flight. Drives a light dim on
+    /// the rails so a tap reads as "working" even before the feed swaps.
+    @State private var chipLoading = false
     @State private var loading = true
     @State private var errorMessage: String?
     /// One-shot guard: once a fetch has succeeded, popping back to
@@ -65,9 +68,14 @@ struct HomeView: View {
                         ForEach(personalizedShelves) { section in
                             HomeSectionRow(section: section)
                         }
+                        // Browse rails — these are what the mood chips
+                        // re-scope. Dim them while a chip fetch is in
+                        // flight so the tap has an immediate effect.
                         ForEach(sections) { section in
                             HomeSectionRow(section: section)
                         }
+                        .opacity(chipLoading ? 0.55 : 1)
+                        .animation(.easeOut(duration: 0.15), value: chipLoading)
                     }
                 }
                 .padding(.horizontal, 24)
@@ -226,28 +234,30 @@ struct HomeView: View {
     /// re-fetch the chip list itself — chips are stable across filter
     /// changes and a second fetch would just blink the row.
     private func applyChip(_ chip: InnerTubeClient.HomeChip) async {
-        if activeChip == chip {
-            // Tap the active chip again to clear the filter.
-            do {
-                let feed = try await env.innerTube.browseHome()
-                guard !Task.isCancelled else { return }
-                sections = Self.filterBlocked(feed.sections, env: env)
-                activeChip = nil
-                errorMessage = nil
-            } catch {
-                if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
-                errorMessage = LoadErrorPresenter.message(for: error, env: env)
-            }
-            return
-        }
+        let previous = activeChip
+        let clearing = (activeChip == chip)
+        // Optimistic selection — flip the pill's state on the tap itself,
+        // not after the network returns. Without this the chip looked
+        // dead for the whole fetch ("mood buttons look unresponsive").
+        // Rolled back below if the fetch fails.
+        activeChip = clearing ? nil : chip
+        chipLoading = true
+        defer { chipLoading = false }
         do {
-            let raw = try await env.innerTube.browseHomeFiltered(chipParams: chip.params)
+            let raw: [HomeSection]
+            if clearing {
+                // Tap the active chip again to clear the filter.
+                raw = try await env.innerTube.browseHome().sections
+            } else {
+                raw = try await env.innerTube.browseHomeFiltered(chipParams: chip.params)
+            }
             guard !Task.isCancelled else { return }
             sections = Self.filterBlocked(raw, env: env)
-            activeChip = chip
             errorMessage = nil
         } catch {
             if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
+            // Undo the optimistic selection so the pills match the feed.
+            activeChip = previous
             errorMessage = LoadErrorPresenter.message(for: error, env: env)
         }
     }
