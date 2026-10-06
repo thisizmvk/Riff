@@ -192,6 +192,14 @@ struct LibraryView: View {
         // whole pass two to three times per body.
         let displayed = displayedItems
         return VStack(alignment: .leading, spacing: 12) {
+            // Riff Blend entry point, mirrored from Home so a user who
+            // lives in their Library can start a personal mix without
+            // switching tabs. Hidden until there's enough history.
+            if BlendBuilder.isAvailable(from: env.player.playedEntries) {
+                BlendHeroCard()
+                    .padding(.horizontal, 24)
+                    .padding(.top, 8)
+            }
             Picker("Section", selection: $section) {
                 ForEach(Section.allCases) { s in Text(s.rawValue).tag(s) }
             }
