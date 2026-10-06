@@ -67,6 +67,30 @@ struct MiniPlayerView: View {
                 }
                 Spacer(minLength: 12)
 
+                // Elapsed / -remaining — the mini bar showed only the
+                // thin progress line; a readable time pair is parity
+                // with every other player. Monospaced so the digits
+                // don't jitter as they tick.
+                if track != nil, env.player.duration > 0 {
+                    Text("\(Self.clock(env.player.elapsed))  -\(Self.clock(max(0, env.player.duration - env.player.elapsed)))")
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(Theme.Text.tertiary)
+                        .accessibilityHidden(true)
+                }
+
+                // Like — ⌘L exists but was invisible on the one control
+                // users see 90% of the time.
+                if track != nil {
+                    controlButton(
+                        systemName: env.player.liked ? "heart.fill" : "heart",
+                        size: 15,
+                        help: env.player.liked ? "Unlike" : "Like",
+                        tint: env.player.liked ? Theme.red : nil
+                    ) {
+                        Task { await env.player.toggleLike() }
+                    }
+                }
+
                 controlButton(systemName: "backward.fill", size: 16, help: "Previous") {
                     Task { await env.player.previous() }
                 }
@@ -154,15 +178,23 @@ struct MiniPlayerView: View {
         }
     }
 
-    private func controlButton(systemName: String, size: CGFloat, help: String? = nil, action: @escaping () -> Void) -> some View {
+    private func controlButton(systemName: String, size: CGFloat, help: String? = nil, tint: Color? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: size, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(tint ?? .white)
                 .frame(width: 32, height: 32)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help(help ?? "")
+        .accessibilityLabel(help ?? "")
+    }
+
+    /// "m:ss" for a seconds value, clamped at 0. Shared by the elapsed
+    /// and remaining readouts.
+    static func clock(_ seconds: Double) -> String {
+        let s = Int(max(0, seconds).rounded())
+        return "\(s / 60):\(String(format: "%02d", s % 60))"
     }
 }
