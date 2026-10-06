@@ -346,6 +346,12 @@ struct RootView: View {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    /// Dominant color of the currently-playing artwork, washed very
+    /// faintly into the whole-window background so every tab subtly
+    /// reflects what's playing instead of sitting on flat graphite.
+    /// nil (nothing playing / extraction failed) → plain base.
+    @State private var ambientColor: Color? = nil
+
     var body: some View {
         @Bindable var env = env
         ZStack {
@@ -375,7 +381,42 @@ struct RootView: View {
             }
         }
         .animation(reduceMotion ? nil : Theme.Motion.panel, value: env.player.isFullPlayerOpen)
-        .background(Theme.Bg.base.ignoresSafeArea())
+        .background {
+            // Ambient now-playing wash — the whole-window background.
+            // A faint top-anchored gradient of the playing artwork's
+            // dominant color over the base, so Home / Search / Library
+            // quietly reflect what's playing. Kept low-opacity so white
+            // text and tiles stay fully legible; cross-fades on track
+            // change. Lives in `.background {}`, never a foreground
+            // ZStack sibling (the fullscreen inflation trap).
+            ZStack {
+                Theme.Bg.base
+                if let ambientColor {
+                    LinearGradient(
+                        colors: [ambientColor.opacity(0.22),
+                                 ambientColor.opacity(0.06),
+                                 .clear],
+                        startPoint: .top, endPoint: .center
+                    )
+                    .transition(.opacity)
+                }
+            }
+            .ignoresSafeArea()
+            .animation(.easeInOut(duration: 0.7), value: ambientColor)
+        }
+        .task(id: env.player.currentTrack?.videoId) {
+            // Extract the wash color from the current artwork. Reads the
+            // shared URLCache the mini-player artwork warms, so usually
+            // instant. A cancelled fetch (fast skip) must not land late
+            // and clear the next track's color.
+            guard let url = env.player.currentTrack?.thumbnailURL else {
+                ambientColor = nil
+                return
+            }
+            let color = await DominantColor.extract(from: url)
+            guard !Task.isCancelled else { return }
+            ambientColor = color
+        }
         .focusedSceneValue(\.appEnvironment, env)
         .overlay(alignment: .bottom) {
             // Toast overlay. Slides in above the mini-player when
