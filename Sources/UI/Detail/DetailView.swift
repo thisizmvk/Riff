@@ -358,6 +358,23 @@ struct DetailView: View {
                     index: index,
                     item: track,
                     isUserOwnedPlaylist: isUserOwnedPlaylist,
+                    onPlay: {
+                        // "Play from here": tapping track N of an
+                        // album / playlist / podcast plays the list
+                        // FROM N (N+1… queued), matching Spotify /
+                        // Apple Music / YT Music. Artist top-songs keep
+                        // single-play with auto-radio. Reuses the
+                        // existing playTracks call site — no new
+                        // navigate / play(item:) site, QueuePolicy
+                        // untouched.
+                        switch item.kind {
+                        case .album, .playlist, .podcast:
+                            let rest = Array(backfilled[index...])
+                            await env.player.playTracks(rest, playlistId: page?.playablePlaylistId)
+                        default:
+                            await env.player.play(item: track)
+                        }
+                    },
                     onRemoveFromPlaylist: isUserOwnedPlaylist
                         ? { setId in await removeFromCurrentPlaylist(track: track, setVideoId: setId) }
                         : nil
@@ -431,11 +448,22 @@ struct DetailView: View {
     /// Uses `HomeSectionRow` so the visual treatment matches the Home
     /// tab's carousels — a familiar pattern keeps the page coherent.
     private func relatedSections(_ sections: [HomeSection]) -> some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Divider().background(Theme.divider)
-            ForEach(sections) { section in
-                HomeSectionRow(section: section)
-                    .padding(.horizontal, 32)
+        // Drop tiles YT returned with no title: they render as a
+        // nameless artwork square ("Releases for you" showed anonymous
+        // covers). A section left empty after filtering is dropped too,
+        // so no bare header sits over nothing.
+        let cleaned: [HomeSection] = sections.compactMap { section in
+            let named = section.items.filter { !env.displayTitle(for: $0).trimmingCharacters(in: .whitespaces).isEmpty }
+            guard !named.isEmpty else { return nil }
+            return HomeSection(id: section.id, title: section.title, items: named)
+        }
+        return VStack(alignment: .leading, spacing: 24) {
+            if !cleaned.isEmpty {
+                Divider().background(Theme.divider)
+                ForEach(cleaned) { section in
+                    HomeSectionRow(section: section)
+                        .padding(.horizontal, 32)
+                }
             }
         }
     }
@@ -671,6 +699,10 @@ private struct TrackRow: View {
     let index: Int
     let item: MediaItem
     let isUserOwnedPlaylist: Bool
+    /// "Play from here" — plays the tracklist from this row (albums /
+    /// playlists / podcasts) or single-plays (artist top songs). The
+    /// row owner builds the right action; the row just invokes it.
+    var onPlay: (() async -> Void)? = nil
     /// Callback for "Remove from this playlist" — when nil the menu
     /// entry is hidden. Provided by DetailView with the right
     /// closure context (it needs `self.item` for the playlistId).
@@ -702,7 +734,10 @@ private struct TrackRow: View {
 
     var body: some View {
         Button {
-            Task { await env.player.play(item: item) }
+            Task {
+                if let onPlay { await onPlay() }
+                else { await env.player.play(item: item) }
+            }
         } label: {
             HStack(spacing: 14) {
                 leadingColumn

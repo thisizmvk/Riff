@@ -92,21 +92,7 @@ struct SearchResultRow: View {
                         // same path the tile hover menu uses. Search rows
                         // only offered Play / Radio, so an album found via
                         // search had no way to be queued.
-                        if item.kind == .album || item.kind == .playlist || item.kind == .podcast {
-                            Divider()
-                            Button("Play next") {
-                                Task {
-                                    let n = await env.player.playNextResolved(item)
-                                    env.showToast(n > 0 ? "Added \(n) to play next" : "Nothing to queue")
-                                }
-                            }
-                            Button("Add to queue") {
-                                Task {
-                                    let n = await env.player.addToQueueEndResolved(item)
-                                    env.showToast(n > 0 ? "Added \(n) to queue" : "Nothing to queue")
-                                }
-                            }
-                        }
+                        SearchContainerQueueActions(item: item)
                     }
             }
         }
@@ -261,7 +247,13 @@ struct TopResultCard: View {
                     .buttonStyle(.plain)
                     .contextMenu {
                         Button("Play") { Task { await play() } }
-                        Button("Start radio") { Task { await play() } }
+                        if item.kind != .artist {
+                            Button("Start radio") { Task { await play() } }
+                        }
+                        // Same container queue actions as the list rows —
+                        // the top-result card is often an album/playlist
+                        // and offered no way to queue it.
+                        SearchContainerQueueActions(item: item)
                     }
             }
         }
@@ -383,6 +375,34 @@ struct OptionalFocusModifier: ViewModifier {
                 }
         } else {
             content
+        }
+    }
+}
+
+/// Play-next / add-to-queue menu entries for a container (album /
+/// playlist / podcast) search result. Resolves the whole tracklist via
+/// `playNextResolved` / `addToQueueEndResolved`. Empty for songs,
+/// episodes and artists so the one definition serves every search row
+/// (list rows AND the top-result card) and can never drift apart again.
+private struct SearchContainerQueueActions: View {
+    @Environment(AppEnvironment.self) private var env
+    let item: MediaItem
+
+    var body: some View {
+        if item.kind == .album || item.kind == .playlist || item.kind == .podcast {
+            Divider()
+            Button("Play next") {
+                Task {
+                    let n = await env.player.playNextResolved(item)
+                    env.showToast(n > 0 ? "Added \(n) to play next" : "Nothing to queue")
+                }
+            }
+            Button("Add to queue") {
+                Task {
+                    let n = await env.player.addToQueueEndResolved(item)
+                    env.showToast(n > 0 ? "Added \(n) to queue" : "Nothing to queue")
+                }
+            }
         }
     }
 }
