@@ -1473,6 +1473,15 @@ final class InnerTubeClient: @unchecked Sendable {
         _ = try await postRaw(.like, body: ["target": ["videoId": videoId]])
     }
 
+    /// Save (or unsave) an album / playlist to the library. Same
+    /// like/removelike endpoint family, keyed by the playlist id — for
+    /// an album this is its playable playlist id (`OLAK5uy…`), for a
+    /// playlist its own id. (ytmusicapi's `rate_playlist`.)
+    func setSavedToLibrary(playlistId: String, saved: Bool) async throws {
+        let endpoint: Endpoint = saved ? .like : .removeLike
+        _ = try await postRaw(endpoint, body: ["target": ["playlistId": playlistId]])
+    }
+
     /// Thumbs-down. Unlike the local blocked-artists feature, this
     /// trains YT Music's server-side recommendations — the radio stops
     /// suggesting the track. Same endpoint family as like/removelike.

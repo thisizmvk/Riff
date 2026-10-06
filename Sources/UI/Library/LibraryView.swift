@@ -395,7 +395,7 @@ struct LibraryView: View {
         switch section {
         case .liked:     return "Tap the heart on any song to save it here."
         case .playlists: return "Create one from the current queue, or save one from search."
-        case .albums:    return "Open an album, then choose “Save album” from its menu."
+        case .albums:    return "Open an album and tap Save to add it here."
         case .artists:   return "Follow an artist and their releases show up here."
         case .podcasts:  return "Subscribe to a podcast to see new episodes here."
         case .history:   return "Start playing something — the last songs you heard show up here."

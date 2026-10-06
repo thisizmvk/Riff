@@ -213,6 +213,30 @@ struct DetailView: View {
                     }
                     .buttonStyle(.bordered)
 
+                    // Save to Library — albums and playlists the user
+                    // doesn't already own. Keyed by the playable
+                    // playlist id (album → OLAK5uy…, playlist → its own
+                    // id). Hidden for artists (use Follow) and for
+                    // playlists the user owns (already in their library).
+                    if (item.kind == .album || item.kind == .playlist),
+                       !isUserOwnedPlaylist,
+                       let saveId = page.playablePlaylistId, !saveId.isEmpty {
+                        let saved = env.isSavedToLibrary(saveId)
+                        Button {
+                            env.toggleSavedToLibrary(playlistId: saveId,
+                                                     title: page.title.isEmpty ? item.title : page.title)
+                        } label: {
+                            Label(saved ? "Saved" : "Save",
+                                  systemImage: saved ? "checkmark" : "plus")
+                                .font(.system(size: 13, weight: .semibold))
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(saved ? Theme.red : nil)
+                        .help(saved ? "Remove from your library" : "Save to your library")
+                    }
+
                     // Edit menu — visible only on user-owned
                     // playlists. The endpoints we expose
                     // (rename / privacy / delete) all require

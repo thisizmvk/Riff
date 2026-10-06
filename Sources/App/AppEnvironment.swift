@@ -147,6 +147,7 @@ final class AppEnvironment {
         userPlaylistsLoading = false
         followedArtistIds = []
         likedSongs.clear()
+        savedLibrary.clear()
         UserDefaults.standard.removeObject(forKey: Self.followedArtistsKey)
         HomeFeedCache.clear()
         UserInfoService.cachedEmail = nil
@@ -832,6 +833,8 @@ final class AppEnvironment {
     private(set) var userPlaylists: [MediaItem] = []
     /// App-wide liked-song truth for resting hearts (see LikedSongsStore).
     let likedSongs = LikedSongsStore()
+    /// Albums / playlists the user saved to their library from Riff.
+    let savedLibrary = SavedLibraryStore()
     private(set) var userPlaylistsLoading = false
     func loadUserPlaylistsIfNeeded() {
         guard isSignedIn, !userPlaylistsLoading, userPlaylists.isEmpty else { return }
@@ -841,6 +844,31 @@ final class AppEnvironment {
     /// Resting like state for any row (the playing track's canonical
     /// state still comes from PlayerBridge.liked).
     func isLiked(_ videoId: String) -> Bool { likedSongs.contains(videoId) }
+
+    func isSavedToLibrary(_ playlistId: String) -> Bool { savedLibrary.contains(playlistId) }
+
+    /// Toggle an album / playlist in the library. Optimistic: flips the
+    /// store now, calls InnerTube in the background, rolls back + toasts
+    /// on failure, confirms with a toast on success. Refreshes the
+    /// Library grid so the saved/removed item appears or drops.
+    func toggleSavedToLibrary(playlistId: String, title: String) {
+        guard !playlistId.isEmpty else { return }
+        let willSave = !savedLibrary.contains(playlistId)
+        savedLibrary.set(playlistId, saved: willSave)
+        Task { [innerTube, weak self] in
+            do {
+                try await innerTube.setSavedToLibrary(playlistId: playlistId, saved: willSave)
+                await MainActor.run {
+                    self?.showToast(willSave ? "Saved “\(title)” to your library" : "Removed “\(title)” from your library")
+                }
+            } catch {
+                await MainActor.run {
+                    self?.savedLibrary.set(playlistId, saved: !willSave)   // roll back
+                    self?.showToast(willSave ? "Couldn't save to your library" : "Couldn't remove from your library")
+                }
+            }
+        }
+    }
 
     /// Re-seed the liked-song set from the library. Best-effort: a
     /// failure leaves the persisted set in place.
