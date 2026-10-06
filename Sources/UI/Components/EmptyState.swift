@@ -73,3 +73,57 @@ struct EmptyState: View {
         .padding(24)
     }
 }
+
+/// Pulsing ghost of a tile grid, for a pane that's fetching grid
+/// content (Library sections). Mirrors the real LazyVGrid metrics
+/// (adaptive 180pt tiles) so the layout doesn't jump when results land.
+struct TileGridSkeleton: View {
+    var count: Int = 8
+    @State private var pulse = false
+    private var fill: Color { Color.white.opacity(pulse ? 0.10 : 0.06) }
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 180), spacing: 16)], spacing: 16) {
+            ForEach(0..<count, id: \.self) { _ in
+                VStack(alignment: .leading, spacing: 8) {
+                    RoundedRectangle(cornerRadius: Theme.Radius.tile).fill(fill)
+                        .frame(height: 180)
+                    RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 140, height: 12)
+                    RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 90, height: 10)
+                }
+            }
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) { pulse = true }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// Pulsing ghost of a vertical result list (thumbnail + two text bars
+/// per row), for a pane that's fetching row content (Search results).
+struct RowListSkeleton: View {
+    var rows: Int = 8
+    @State private var pulse = false
+    private var fill: Color { Color.white.opacity(pulse ? 0.10 : 0.06) }
+
+    var body: some View {
+        VStack(spacing: 14) {
+            ForEach(0..<rows, id: \.self) { _ in
+                HStack(spacing: 12) {
+                    RoundedRectangle(cornerRadius: Theme.Radius.row).fill(fill)
+                        .frame(width: 48, height: 48)
+                    VStack(alignment: .leading, spacing: 6) {
+                        RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 220, height: 12)
+                        RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 140, height: 10)
+                    }
+                    Spacer()
+                }
+            }
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) { pulse = true }
+        }
+        .accessibilityHidden(true)
+    }
+}

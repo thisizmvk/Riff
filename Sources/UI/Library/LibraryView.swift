@@ -305,11 +305,11 @@ struct LibraryView: View {
                         // Still fetching — "No liked songs yet" would
                         // be a claim we can't make until the answer
                         // (and, for an empty one, the session probe)
-                        // lands.
-                        ProgressView()
-                            .controlSize(.small)
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 40)
+                        // lands. A tile-grid skeleton holds the layout
+                        // instead of a lone spinner on black.
+                        TileGridSkeleton()
+                            .padding(.horizontal, 24)
+                            .padding(.top, 8)
                     } else {
                         EmptyState(
                             systemImage: sectionEmptyIcon,

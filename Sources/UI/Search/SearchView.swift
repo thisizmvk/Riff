@@ -390,14 +390,11 @@ struct SearchView: View {
                     .padding(.bottom, 12)
                 }
                 if results.isEmpty && (searching || awaitingResults) {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Searching…")
-                            .font(.system(size: 13))
-                            .foregroundStyle(Theme.Text.secondary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 60)
+                    // Row skeleton instead of a lone "Searching…" spinner,
+                    // so the pane reads as loading results rather than idle.
+                    RowListSkeleton()
+                        .padding(.horizontal, 24)
+                        .padding(.top, 16)
                 } else if query.isEmpty && results.isEmpty {
                     // Pre-search empty state. Renders recent
                     // searches (if any) as one-tap chips above the
