@@ -441,16 +441,20 @@ struct NowPlayingView: View {
         }
     }
 
+    /// Transport, in two tiers so the hierarchy reads at a glance: the
+    /// primary row is the core playback transport (centered, large play
+    /// hub); the secondary row holds the lighter utilities (like + the
+    /// rate / output / sleep / playlist / more menus) at reduced weight
+    /// so they no longer compete with prev/play/next.
     private var playbackControls: some View {
-        HStack(spacing: 16) {
-            controlButton(
-                systemName: env.player.liked ? "heart.fill" : "heart",
-                size: 20,
-                tint: env.player.liked ? Theme.red : Theme.Text.secondary,
-                help: env.player.liked ? "Unlike" : "Like"
-            ) {
-                Task { await env.player.toggleLike() }
-            }
+        VStack(spacing: 18) {
+            primaryTransportRow
+            secondaryUtilityRow
+        }
+    }
+
+    private var primaryTransportRow: some View {
+        HStack(spacing: 20) {
             // Shuffle — when ON, our `next()` plays a random upcoming
             // track instead of advancing to the page's natural next.
             // Right-click reveals the Smart Shuffle (B5) toggle: when
@@ -517,12 +521,28 @@ struct NowPlayingView: View {
             ) {
                 Task { await env.player.toggleRepeat() }
             }
+        }
+    }
+
+    private var secondaryUtilityRow: some View {
+        HStack(spacing: 20) {
+            controlButton(
+                systemName: env.player.liked ? "heart.fill" : "heart",
+                size: 18,
+                tint: env.player.liked ? Theme.red : Theme.Text.secondary,
+                help: env.player.liked ? "Unlike" : "Like"
+            ) {
+                Task { await env.player.toggleLike() }
+            }
             playbackRateMenu
             audioOutputButton
             sleepTimerMenu
             addToPlaylistMenu
             moreMenu
         }
+        // Lighter than the transport above — a tier of secondary actions,
+        // not primary controls.
+        .opacity(0.9)
     }
 
     /// Volume bar under the transport controls — the full player had no
