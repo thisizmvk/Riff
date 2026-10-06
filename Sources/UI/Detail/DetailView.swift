@@ -26,6 +26,12 @@ struct DetailView: View {
     /// other pages.
     @State private var trackSort: LibrarySorting.TrackSortOrder = .original
 
+    /// Dominant color of the page artwork, driving the top-anchored
+    /// accent wash behind the header (Apple Music / YT Music signature).
+    /// nil until extracted, and on failure, so the page falls back to the
+    /// plain base background. See `.background` below and `backdropArtURL`.
+    @State private var backdropColor: Color? = nil
+
     /// True when the open detail page represents a playlist owned by
     /// the signed-in user — checked by id against env.userPlaylists.
     /// Drives the Edit affordance: only user-owned playlists can be
@@ -145,7 +151,29 @@ struct DetailView: View {
             // names"). Plain 24 when nothing is playing.
             .padding(.bottom, env.player.hasTrack ? 96 : 24)
         }
-        .background(Theme.Bg.base.ignoresSafeArea())
+        .background {
+            // Backdrops live in a background stack — entirely behind the
+            // ScrollView, so their sizes never feed back into its layout
+            // (the fullscreen-ZStack inflation trap). A top-anchored wash
+            // of the artwork's dominant color tints the header region and
+            // fades to the flat base well before the tracklist, keeping
+            // row text on the familiar dark ground.
+            ZStack(alignment: .top) {
+                Theme.Bg.base
+                if let backdropColor {
+                    LinearGradient(
+                        colors: [backdropColor.opacity(0.42),
+                                 backdropColor.opacity(0.10),
+                                 .clear],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .frame(height: 420)
+                    .transition(.opacity)
+                }
+            }
+            .ignoresSafeArea()
+            .animation(.easeInOut(duration: 0.5), value: backdropColor)
+        }
         .task(id: item.id) {
             await load()
             // Make sure userPlaylists is populated so the
@@ -153,6 +181,26 @@ struct DetailView: View {
             // first navigation. Cheap when already loaded.
             env.loadUserPlaylistsIfNeeded()
         }
+        .task(id: backdropArtURL) {
+            // Pull the accent color off the artwork once it's known. Reads
+            // the shared URLCache the header AsyncImage warms, so it's
+            // usually instant. A cancelled fetch (fast back-navigation)
+            // must not land late and clear the next page's color.
+            guard let url = backdropArtURL else {
+                backdropColor = nil
+                return
+            }
+            let color = await DominantColor.extract(from: url)
+            guard !Task.isCancelled else { return }
+            backdropColor = color
+        }
+    }
+
+    /// The artwork URL the accent wash is sampled from: the resolved
+    /// page artwork once loaded, else the tile thumbnail the user tapped
+    /// in from, so the wash appears immediately rather than after /browse.
+    private var backdropArtURL: URL? {
+        page?.artworkURL ?? item.thumbnailURL
     }
 
     private func header(_ page: InnerTubeClient.DetailPage) -> some View {
