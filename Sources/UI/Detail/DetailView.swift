@@ -136,7 +136,7 @@ struct DetailView: View {
                             .padding(.top, 16)
                     }
                 } else if loading {
-                    ProgressView().frame(maxWidth: .infinity, minHeight: 240)
+                    DetailSkeleton()
                 } else if let error {
                     ErrorBanner(message: error) {
                         Task { await load() }
@@ -991,5 +991,53 @@ private struct TrackRow: View {
             return String(format: "%d:%02d:%02d", h, m, s)
         }
         return String(format: "%d:%02d", m, s)
+    }
+}
+
+/// Loading placeholder for a detail page — a ghost of the header
+/// (artwork + title/subtitle bars) and a handful of tracklist rows,
+/// pulsing gently. Mirrors HomeSkeleton so a cold navigation reads as
+/// "loading this page" rather than a bare centered spinner on black.
+private struct DetailSkeleton: View {
+    @State private var pulse = false
+    private var fill: Color { Color.white.opacity(pulse ? 0.10 : 0.06) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            HStack(alignment: .top, spacing: 24) {
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(fill)
+                    .frame(width: 220, height: 220)
+                VStack(alignment: .leading, spacing: 12) {
+                    RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 80, height: 11)
+                    RoundedRectangle(cornerRadius: 6).fill(fill).frame(width: 260, height: 30)
+                    RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 180, height: 13)
+                    RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 220, height: 11)
+                }
+                .padding(.top, 6)
+                Spacer()
+            }
+            .padding(.horizontal, 32)
+
+            VStack(spacing: 14) {
+                ForEach(0..<7, id: \.self) { _ in
+                    HStack(spacing: 12) {
+                        RoundedRectangle(cornerRadius: Theme.Radius.row).fill(fill).frame(width: 40, height: 40)
+                        VStack(alignment: .leading, spacing: 6) {
+                            RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 200, height: 12)
+                            RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 120, height: 10)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+            .padding(.horizontal, 32)
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
