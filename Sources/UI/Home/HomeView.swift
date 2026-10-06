@@ -49,6 +49,13 @@ struct HomeView: View {
                     if loading && sections.isEmpty {
                         HomeSkeleton()
                     } else {
+                        // Riff Blend — the signature entry point, above
+                        // everything else so a returning listener's first
+                        // move can be one tap into a personal mix. Hidden
+                        // until there's enough history to blend.
+                        if BlendBuilder.isAvailable(from: env.player.playedEntries) {
+                            BlendHeroCard()
+                        }
                         // Personalized shelves — derived purely from
                         // local play history (no network). Rendered
                         // above browse-home so the user's own listening
@@ -593,5 +600,133 @@ private struct SignInNudgeCard: View {
         .background(Theme.Fill.soft)
         .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.tile))
         .overlay(RoundedRectangle(cornerRadius: Theme.Radius.tile).strokeBorder(Theme.Fill.medium, lineWidth: 1))
+    }
+}
+
+/// "Riff Blend" entry point — the app's signature experimental feature.
+/// A single hero card that, on tap, builds a recency-weighted personal
+/// mix from the local play-history journal (`BlendBuilder`) and plays
+/// it. Each tap reshuffles, so the card is a renewable "play me
+/// something I'll like" button that owes nothing to the network.
+///
+/// Rendered only when `BlendBuilder.isAvailable` — a thin history has
+/// nothing to blend, and the ranked shelves already cover that case.
+struct BlendHeroCard: View {
+    @Environment(AppEnvironment.self) private var env
+    @State private var building = false
+
+    var body: some View {
+        let covers = BlendBuilder.previewArtwork(from: env.player.playedEntries, limit: 4)
+        Button(action: play) {
+            HStack(spacing: 16) {
+                collage(covers)
+                    .frame(width: 92, height: 92)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "sparkles")
+                            .font(.system(size: 12, weight: .bold))
+                        Text("EXPERIMENTAL")
+                            .font(.system(size: 10, weight: .bold))
+                            .tracking(1.2)
+                    }
+                    .foregroundStyle(.white.opacity(0.85))
+
+                    Text("Riff Blend")
+                        .font(.system(size: 22, weight: .heavy))
+                        .foregroundStyle(.white)
+                    Text("A fresh mix from what you've been playing")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.white.opacity(0.8))
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+
+                ZStack {
+                    Circle().fill(.white)
+                        .frame(width: 48, height: 48)
+                        .shadow(color: .black.opacity(0.3), radius: 8, y: 2)
+                    if building {
+                        ProgressView().controlSize(.small).tint(.black)
+                    } else {
+                        Image(systemName: "play.fill")
+                            .font(.system(size: 19, weight: .bold))
+                            .foregroundStyle(.black)
+                            .offset(x: 1)
+                    }
+                }
+                .padding(.trailing, 4)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                // Signature "mix" gradient — warm red into deep indigo,
+                // the one place in the app that leans chromatic rather
+                // than graphite, so the feature reads as special.
+                LinearGradient(
+                    colors: [Theme.red, Color(red: 0.42, green: 0.16, blue: 0.62)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing
+                )
+            }
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.tile))
+            .shadow(color: Theme.red.opacity(0.25), radius: 14, y: 6)
+        }
+        .buttonStyle(.plain)
+        .disabled(building)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Riff Blend, experimental personal mix")
+        .accessibilityHint("Plays a fresh shuffle built from your recent listening")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    /// 2×2 artwork collage behind a darkening scrim so the foreground
+    /// text stays legible. Falls back to a flat scrim when there aren't
+    /// four distinct covers yet.
+    @ViewBuilder
+    private func collage(_ covers: [URL]) -> some View {
+        ZStack {
+            Color.black.opacity(0.25)
+            if covers.count >= 4 {
+                VStack(spacing: 0) {
+                    HStack(spacing: 0) { cover(covers[0]); cover(covers[1]) }
+                    HStack(spacing: 0) { cover(covers[2]); cover(covers[3]) }
+                }
+                .opacity(0.9)
+            } else if let first = covers.first {
+                cover(first)
+            }
+            // Inner highlight so the collage reads as a raised tile.
+            RoundedRectangle(cornerRadius: Theme.Radius.card)
+                .strokeBorder(.white.opacity(0.18), lineWidth: 1)
+        }
+    }
+
+    private func cover(_ url: URL) -> some View {
+        AsyncImage(url: url) { phase in
+            if case .success(let img) = phase {
+                img.resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Color.white.opacity(0.06)
+            }
+        }
+        .frame(width: 46, height: 46)
+        .clipped()
+    }
+
+    private func play() {
+        guard !building else { return }
+        building = true
+        let mix = BlendBuilder.build(from: env.player.playedEntries)
+        guard !mix.isEmpty else {
+            building = false
+            env.showToast("Not enough history to blend yet.")
+            return
+        }
+        Task {
+            await env.player.playTracks(mix)
+            building = false
+            env.showToast("Riff Blend — \(mix.count) songs")
+        }
     }
 }
