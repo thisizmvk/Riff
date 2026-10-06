@@ -34,6 +34,15 @@ enum BlendBuilder {
     /// often without crowding out the rest of the mix entirely.
     static let seedBoost: Double = 6
 
+    /// Per-song aggregation bucket. File-scoped rather than local to
+    /// `build` because `build` is generic (`some RandomNumberGenerator`),
+    /// and Swift forbids a type nested in a generic function.
+    private struct Agg {
+        var weight: Double = 0
+        var lastPlayed: Date = .distantPast
+        var item: MediaItem
+    }
+
     /// Build the blend: a de-duplicated, recency-weighted, lightly
     /// artist-declumped ordering of songs drawn from `entries`.
     ///
@@ -50,11 +59,8 @@ enum BlendBuilder {
 
         // Aggregate plays per song. Episodes are excluded — a blend is a
         // music mix; podcast episodes belong to their own linear queues.
-        struct Agg {
-            var weight: Double = 0
-            var lastPlayed: Date = .distantPast
-            var item: MediaItem
-        }
+        // (Agg is file-scoped: a local type can't nest in this generic
+        // function — `some RandomNumberGenerator` makes it generic.)
         var byId: [String: Agg] = [:]
         for entry in entries where entry.playedAt >= cutoff {
             let item = entry.item
