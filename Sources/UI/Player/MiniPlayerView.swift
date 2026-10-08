@@ -67,15 +67,23 @@ struct MiniPlayerView: View {
                 }
                 Spacer(minLength: 12)
 
-                // Elapsed / -remaining — the mini bar showed only the
-                // thin progress line; a readable time pair is parity
-                // with every other player. Monospaced so the digits
-                // don't jitter as they tick.
+                // Elapsed / total — the unambiguous readout every player
+                // uses. (The old "9:58  -1:00" elapsed-and-negative-
+                // remaining pair read as a stray negative number.)
+                // Monospaced so the digits don't jitter as they tick;
+                // elapsed brighter than total so the eye lands on "where
+                // am I" first.
                 if track != nil, env.player.duration > 0 {
-                    Text("\(Self.clock(env.player.elapsed))  -\(Self.clock(max(0, env.player.duration - env.player.elapsed)))")
-                        .font(.system(size: 11, design: .monospaced))
-                        .foregroundStyle(Theme.Text.tertiary)
-                        .accessibilityHidden(true)
+                    HStack(spacing: 4) {
+                        Text(Self.clock(env.player.elapsed))
+                            .foregroundStyle(Theme.Text.secondary)
+                        Text("/")
+                            .foregroundStyle(Theme.Text.tertiary)
+                        Text(Self.clock(env.player.duration))
+                            .foregroundStyle(Theme.Text.tertiary)
+                    }
+                    .font(.system(size: 11, design: .monospaced))
+                    .accessibilityHidden(true)
                 }
 
                 // Like — ⌘L exists but was invisible on the one control
