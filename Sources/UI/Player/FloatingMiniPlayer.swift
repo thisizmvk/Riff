@@ -334,8 +334,13 @@ private struct WindowFloater: NSViewRepresentable {
         /// guard would skip re-applying.
         private func applyLevel() {
             guard let window else { return }
-            window.level = .statusBar
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+            // .screenSaver is the highest practical band — it overlays
+            // other apps' native full-screen Spaces (which .statusBar and
+            // lower render under). .canJoinAllSpaces carries the tile into
+            // every Space including those; .fullScreenAuxiliary lets it
+            // accompany a full-screen Space rather than trigger its own.
+            window.level = .screenSaver
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             // Re-raise to the top of the floating band without activating
             // Riff, so switching to another app can't leave the tile
             // behind that app's windows.
