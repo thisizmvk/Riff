@@ -57,8 +57,11 @@ struct ExploreView: View {
                             HomeSectionRow(section: section)
                                 .id(section.id)
                         }
+                        // Moods & genres as YT-Music-style colorful tiles
+                        // (a solid hue per entry with a tilted artwork
+                        // corner), not plain carousels.
                         ForEach(moods) { section in
-                            HomeSectionRow(section: section)
+                            MoodGenreSection(section: section)
                                 .id(section.id)
                         }
                     }
@@ -139,6 +142,96 @@ private struct SectionJumpBar: View {
             }
         }
         .scrollClipDisabled()
+    }
+}
+
+/// One moods/genres shelf rendered as a colorful tile grid (YT Music's
+/// signature look) instead of a horizontal carousel. Each tile is a
+/// solid hue with the mood name and a tilted artwork corner, and taps
+/// open the mood's curated playlist via the shared navigation.
+private struct MoodGenreSection: View {
+    let section: HomeSection
+
+    private let columns = [GridItem(.adaptive(minimum: 210), spacing: 12)]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if !section.title.trimmingCharacters(in: .whitespaces).isEmpty {
+                Text(section.title)
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+            LazyVGrid(columns: columns, spacing: 12) {
+                ForEach(section.items) { item in
+                    MoodTile(item: item)
+                }
+            }
+        }
+    }
+}
+
+private struct MoodTile: View {
+    let item: MediaItem
+
+    /// Vibrant, dark-ground-friendly palette. A mood keeps the same hue
+    /// across the session (stable hash of its id), mirroring the way YT
+    /// Music assigns each category a fixed color.
+    private static let palette: [Color] = [
+        Color(red: 0.84, green: 0.28, blue: 0.26),
+        Color(red: 0.90, green: 0.49, blue: 0.18),
+        Color(red: 0.86, green: 0.67, blue: 0.18),
+        Color(red: 0.28, green: 0.64, blue: 0.40),
+        Color(red: 0.18, green: 0.56, blue: 0.64),
+        Color(red: 0.24, green: 0.47, blue: 0.80),
+        Color(red: 0.42, green: 0.34, blue: 0.76),
+        Color(red: 0.66, green: 0.30, blue: 0.66),
+        Color(red: 0.82, green: 0.34, blue: 0.53),
+        Color(red: 0.36, green: 0.42, blue: 0.52),
+    ]
+
+    private var baseColor: Color {
+        var h = 5381
+        for b in item.id.utf8 { h = ((h << 5) &+ h) &+ Int(b) }
+        return Self.palette[abs(h) % Self.palette.count]
+    }
+
+    var body: some View {
+        NavigationLink(value: item) {
+            ZStack(alignment: .topLeading) {
+                LinearGradient(
+                    colors: [baseColor, baseColor.opacity(0.78)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing
+                )
+                // Tilted artwork corner — the YT Music mood-tile signature.
+                if let url = item.thumbnailURL {
+                    AsyncImage(url: url) { phase in
+                        if case .success(let img) = phase {
+                            img.resizable().scaledToFill()
+                        } else {
+                            Color.black.opacity(0.12)
+                        }
+                    }
+                    .frame(width: 56, height: 56)
+                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                    .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
+                    .rotationEffect(.degrees(27))
+                    .offset(x: 12, y: 18)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                }
+                Text(item.title)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+                    .padding(12)
+            }
+            .frame(height: 68)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .help(item.title)
     }
 }
 
