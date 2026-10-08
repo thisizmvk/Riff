@@ -287,13 +287,18 @@ private struct WindowFloater: NSViewRepresentable {
         /// `reassertLevel` under a clearer name at the call sites.
         private func scheduleReassert() { reassertLevel() }
 
-        /// Force the window above every app's normal windows, on all
-        /// Spaces, over full-screen spaces. Set unconditionally (no
-        /// `!= .floating` guard — SwiftUI may have reset it to normal and
-        /// the guard would skip re-applying).
+        /// Force the window above every app's windows, on all Spaces,
+        /// INCLUDING over other apps' native full-screen Spaces. For the
+        /// full-screen case the level must be at the menu-bar band or
+        /// higher (`.floating` = 3 renders *under* a full-screen app);
+        /// `.statusBar` (25) clears it while `.canJoinAllSpaces` carries
+        /// the tile into the full-screen Space. Tradeoff: at this level
+        /// the tile can overlap the menu bar if parked at the top.
+        /// Set unconditionally — SwiftUI may have reset the level, and a
+        /// guard would skip re-applying.
         private func applyLevel() {
             guard let window else { return }
-            window.level = .floating
+            window.level = .statusBar
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
             // Re-raise to the top of the floating band without activating
             // Riff, so switching to another app can't leave the tile
