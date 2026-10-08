@@ -239,15 +239,17 @@ private struct WindowFloater: NSViewRepresentable {
 
             guard observers.isEmpty, let window else { return }
             let nc = NotificationCenter.default
-            // App-level activation.
+            // App-level activation → re-float AND follow to the active
+            // screen (the user likely switched context / display).
             for name in [NSApplication.didBecomeActiveNotification,
                          NSApplication.didResignActiveNotification] {
                 observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.scheduleReassert() }
+                    MainActor.assumeIsolated { self?.handleActivation() }
                 })
             }
             // This window's own key/main/geometry changes — SwiftUI resets
-            // the level on several of these (resize, move, becoming key).
+            // the level on several of these. Re-float ONLY (never
+            // reposition here, or dragging the tile would fight us).
             for name in [NSWindow.didBecomeKeyNotification,
                          NSWindow.didBecomeMainNotification,
                          NSWindow.didResizeNotification,
@@ -256,17 +258,51 @@ private struct WindowFloater: NSViewRepresentable {
                     MainActor.assumeIsolated { self?.scheduleReassert() }
                 })
             }
-            // Re-float when ANY other app becomes active — the precise
-            // moment a background app's floating window can get buried if
-            // its level was reset. Riff's own didResignActive doesn't fire
-            // for a switch between two OTHER apps, so watch the workspace.
+            // Re-float + follow when ANY other app becomes active or the
+            // active Space changes — the moments the "current screen" moves
+            // and a background floating window can get buried or stranded
+            // on another display.
             let wsNC = NSWorkspace.shared.notificationCenter
-            workspaceObservers.append(wsNC.addObserver(
-                forName: NSWorkspace.didActivateApplicationNotification,
-                object: nil, queue: .main
-            ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.scheduleReassert() }
-            })
+            for name in [NSWorkspace.didActivateApplicationNotification,
+                         NSWorkspace.activeSpaceDidChangeNotification] {
+                workspaceObservers.append(wsNC.addObserver(
+                    forName: name, object: nil, queue: .main
+                ) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.handleActivation() }
+                })
+            }
+        }
+
+        /// Re-assert the floating level and follow the tile to whatever
+        /// screen is now active.
+        private func handleActivation() {
+            scheduleReassert()
+            moveToActiveScreen()
+        }
+
+        /// Move the tile onto the currently-active display (the screen
+        /// under the cursor), keeping its relative position within the
+        /// screen's visible area. No-op when it's already on that screen,
+        /// so dragging it around a single display is never disturbed.
+        private func moveToActiveScreen() {
+            guard let window else { return }
+            let mouse = NSEvent.mouseLocation
+            let target = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
+                ?? NSScreen.main
+            guard let target else { return }
+            let current = window.screen ?? NSScreen.main
+            guard let current, target !== current else { return }
+
+            let src = current.visibleFrame
+            let dst = target.visibleFrame
+            let fx = src.width > 0 ? (window.frame.minX - src.minX) / src.width : 0.5
+            let fy = src.height > 0 ? (window.frame.minY - src.minY) / src.height : 0.5
+            var origin = NSPoint(x: dst.minX + fx * dst.width,
+                                 y: dst.minY + fy * dst.height)
+            // Keep the whole tile inside the destination's visible area.
+            origin.x = min(max(origin.x, dst.minX), dst.maxX - window.frame.width)
+            origin.y = min(max(origin.y, dst.minY), dst.maxY - window.frame.height)
+            window.setFrameOrigin(origin)
         }
 
         deinit {
