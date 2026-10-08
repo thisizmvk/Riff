@@ -118,12 +118,12 @@ struct FloatingMiniPlayerView: View {
                 Spacer(minLength: 0)
             }
         }
-        // FIXED tile size. A min/ideal/max range let the window resize
+        // FIXED, SQUARE tile. A min/ideal/max range let the window resize
         // itself run-to-run ("size is dynamic"); the user wants one stable
-        // tile. 300×340 matches the ~280×300 they liked, with room for the
-        // title block. WindowFloater locks the NSWindow min==max so the
-        // resize handles are inert too.
-        .frame(width: 300, height: 340)
+        // tile. 300×300 keeps square album art uncropped; the title block
+        // overlays the bottom over its gradient scrim. WindowFloater locks
+        // the NSWindow min==max so the resize handles are inert too.
+        .frame(width: 300, height: 300)
         // Artwork as a BACKGROUND, never a layout sibling. As a ZStack
         // child, the `.fill` image proposed its natural pixel size and
         // the resizable window opened at artwork size — "a full screen
@@ -290,7 +290,7 @@ private struct WindowFloater: NSViewRepresentable {
             window.backgroundColor = .black
             // Lock the size: min == max == the fixed content size, so the
             // window can't be dragged to a new size or reopen at another.
-            let size = NSSize(width: 300, height: 340)
+            let size = NSSize(width: 300, height: 300)
             window.minSize = size
             window.maxSize = size
             window.setContentSize(size)
