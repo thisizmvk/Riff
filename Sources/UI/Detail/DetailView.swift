@@ -162,12 +162,14 @@ struct DetailView: View {
                 Theme.Bg.base
                 if let backdropColor {
                     LinearGradient(
-                        colors: [backdropColor.opacity(0.42),
-                                 backdropColor.opacity(0.10),
-                                 .clear],
+                        stops: [
+                            .init(color: backdropColor.opacity(0.34), location: 0.0),
+                            .init(color: backdropColor.opacity(0.16), location: 0.14),
+                            .init(color: backdropColor.opacity(0.04), location: 0.34),
+                            .init(color: .clear, location: 0.52),
+                        ],
                         startPoint: .top, endPoint: .bottom
                     )
-                    .frame(height: 420)
                     .transition(.opacity)
                 }
             }

@@ -393,10 +393,13 @@ struct RootView: View {
                 Theme.Bg.base
                 if let ambientColor {
                     LinearGradient(
-                        colors: [ambientColor.opacity(0.22),
-                                 ambientColor.opacity(0.06),
-                                 .clear],
-                        startPoint: .top, endPoint: .center
+                        stops: [
+                            .init(color: ambientColor.opacity(0.18), location: 0.0),
+                            .init(color: ambientColor.opacity(0.10), location: 0.18),
+                            .init(color: ambientColor.opacity(0.03), location: 0.42),
+                            .init(color: .clear, location: 0.62),
+                        ],
+                        startPoint: .top, endPoint: .bottom
                     )
                     .transition(.opacity)
                 }

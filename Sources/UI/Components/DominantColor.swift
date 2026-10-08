@@ -81,6 +81,16 @@ enum DominantColor {
             }
         }
         guard let picked = best else { return nil }
-        return Color(red: picked.r, green: picked.g, blue: picked.b)
+        // Grade the raw vivid pixel into a tone that blends over the dark
+        // graphite UI instead of reading as an electric hue. The single
+        // most-vivid pixel is often fully saturated and bright; washing
+        // the app in that looks "off". Pull saturation and brightness
+        // into a mid band so the tint keeps its hue but grades softly.
+        let raw = NSColor(srgbRed: picked.r, green: picked.g, blue: picked.b, alpha: 1)
+        var h: CGFloat = 0, s: CGFloat = 0, v: CGFloat = 0, a: CGFloat = 0
+        raw.getHue(&h, saturation: &s, brightness: &v, alpha: &a)
+        let gradedS = min(s, 0.58)            // cap neon saturation
+        let gradedV = min(max(v, 0.42), 0.70) // hold a mid brightness
+        return Color(hue: Double(h), saturation: Double(gradedS), brightness: Double(gradedV))
     }
 }
