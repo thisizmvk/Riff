@@ -414,8 +414,8 @@ struct SearchView: View {
                         )
                         .padding(.top, 24)
                     }
-                    InitialSearchState()
-                        .padding(.top, recents.isEmpty ? 80 : 24)
+                    InitialSearchState(onPick: { query = $0 })
+                        .padding(.top, recents.isEmpty ? 60 : 24)
                 } else if results.isEmpty, !query.isEmpty, errorMessage == nil {
                     // Reached only once a search has answered this exact
                     // input (`awaitingResults` is false) — never during
@@ -711,12 +711,52 @@ struct SearchView: View {
     }
 
     private struct InitialSearchState: View {
+        /// Fills the search field with a tapped suggestion; the existing
+        /// debounced `.task(id:)` then runs the query.
+        let onPick: (String) -> Void
+
+        /// Curated starter queries for a blank search — genres, moods and
+        /// eras that always return something, so a first-run search isn't
+        /// a staring contest with an empty field.
+        private let suggestions = [
+            "Lo-fi beats", "Top hits", "Workout", "Focus",
+            "Jazz", "90s", "Acoustic", "Chill", "Party", "Running",
+        ]
+
         var body: some View {
-            EmptyState(
-                systemImage: "magnifyingglass",
-                title: "Find your music",
-                subtitle: "Search for songs, albums, artists, playlists, or podcasts."
-            )
+            VStack(spacing: 22) {
+                EmptyState(
+                    systemImage: "magnifyingglass",
+                    title: "Find your music",
+                    subtitle: "Search for songs, albums, artists, playlists, or podcasts."
+                )
+                VStack(spacing: 10) {
+                    Text("TRY")
+                        .font(.system(size: 10, weight: .bold))
+                        .tracking(1.4)
+                        .foregroundStyle(Theme.Text.tertiary)
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 92), spacing: 8)],
+                        alignment: .center, spacing: 8
+                    ) {
+                        ForEach(suggestions, id: \.self) { term in
+                            Button { onPick(term) } label: {
+                                Text(term)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Theme.Text.primary)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 7)
+                                    .background(Capsule().fill(Color.white.opacity(0.06)))
+                                    .overlay(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+                                    .contentShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Search \u{201C}\(term)\u{201D}")
+                        }
+                    }
+                    .frame(maxWidth: 380)
+                }
+            }
             .frame(maxWidth: .infinity)
         }
     }
