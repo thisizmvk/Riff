@@ -230,33 +230,42 @@ private struct WindowFloater: NSViewRepresentable {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             configureWindow()
-            // The level did not stick before: SwiftUI (and AppKit on app
-            // (de)activation) reset a Window scene's level back to normal,
-            // so the tile dropped behind other apps. Re-assert .floating
-            // whenever activation changes or this window becomes key/main.
-            guard observers.isEmpty, window != nil else { return }
+            // SwiftUI re-applies the Window scene's configuration AFTER
+            // this synchronous pass and resets the level back to normal,
+            // so a one-shot set here was silently undone and the tile sat
+            // behind other apps. Re-apply on the next runloop ticks (after
+            // SwiftUI's own pass wins) so our level is the last word.
+            scheduleReassert()
+
+            guard observers.isEmpty, let window else { return }
             let nc = NotificationCenter.default
-            let names: [Notification.Name] = [
-                NSApplication.didBecomeActiveNotification,
-                NSApplication.didResignActiveNotification,
-                NSWindow.didBecomeKeyNotification,
-                NSWindow.didBecomeMainNotification,
-            ]
-            for name in names {
+            // App-level activation.
+            for name in [NSApplication.didBecomeActiveNotification,
+                         NSApplication.didResignActiveNotification] {
                 observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.reassertLevel() }
+                    MainActor.assumeIsolated { self?.scheduleReassert() }
+                })
+            }
+            // This window's own key/main/geometry changes — SwiftUI resets
+            // the level on several of these (resize, move, becoming key).
+            for name in [NSWindow.didBecomeKeyNotification,
+                         NSWindow.didBecomeMainNotification,
+                         NSWindow.didResizeNotification,
+                         NSWindow.didMoveNotification] {
+                observers.append(nc.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.scheduleReassert() }
                 })
             }
             // Re-float when ANY other app becomes active — the precise
             // moment a background app's floating window can get buried if
             // its level was reset. Riff's own didResignActive doesn't fire
-            // for every such switch, so watch the workspace too.
+            // for a switch between two OTHER apps, so watch the workspace.
             let wsNC = NSWorkspace.shared.notificationCenter
             workspaceObservers.append(wsNC.addObserver(
                 forName: NSWorkspace.didActivateApplicationNotification,
                 object: nil, queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.reassertLevel() }
+                MainActor.assumeIsolated { self?.scheduleReassert() }
             })
         }
 
@@ -266,12 +275,26 @@ private struct WindowFloater: NSViewRepresentable {
             workspaceObservers.forEach(wsNC.removeObserver)
         }
 
-        /// Cheap, idempotent — only the properties AppKit/SwiftUI can
-        /// reset out from under us.
+        /// Apply now and again on the next couple of runloop ticks, so a
+        /// SwiftUI layout pass that runs right after a trigger can't leave
+        /// the window reset to normal level.
         private func reassertLevel() {
+            applyLevel()
+            DispatchQueue.main.async { [weak self] in self?.applyLevel() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.applyLevel() }
+        }
+
+        /// `reassertLevel` under a clearer name at the call sites.
+        private func scheduleReassert() { reassertLevel() }
+
+        /// Force the window above every app's normal windows, on all
+        /// Spaces, over full-screen spaces. Set unconditionally (no
+        /// `!= .floating` guard — SwiftUI may have reset it to normal and
+        /// the guard would skip re-applying).
+        private func applyLevel() {
             guard let window else { return }
-            if window.level != .floating { window.level = .floating }
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            window.level = .floating
+            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
             // Re-raise to the top of the floating band without activating
             // Riff, so switching to another app can't leave the tile
             // behind that app's windows.
@@ -280,8 +303,7 @@ private struct WindowFloater: NSViewRepresentable {
 
         func configureWindow() {
             guard let window else { return }
-            window.level = .floating
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            applyLevel()
             window.hidesOnDeactivate = false
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
