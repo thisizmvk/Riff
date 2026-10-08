@@ -421,6 +421,10 @@ struct RootView: View {
             ambientColor = color
         }
         .focusedSceneValue(\.appEnvironment, env)
+        // Keep the close / minimize / zoom buttons visible. With a hidden
+        // title bar they can vanish after a native-fullscreen exit (an
+        // AppKit quirk), leaving no way to close or minimize the window.
+        .background(WindowButtonsFixer())
         .overlay(alignment: .bottom) {
             // Toast overlay. Slides in above the mini-player when
             // env.currentToast is non-nil; auto-dismisses via the
@@ -471,6 +475,39 @@ struct RootView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .riffOpenMiniPlayerWindow)) { _ in
             openWindow(id: "mini-player")
+        }
+    }
+}
+
+/// Zero-size bridge to the hosting NSWindow that keeps the standard
+/// window buttons (close / minimize / zoom) visible. Under
+/// `.windowStyle(.hiddenTitleBar)` AppKit can leave those buttons hidden
+/// after the window returns from native fullscreen — so the user is
+/// stuck with no way to close or minimize. We re-assert them on attach
+/// and on every fullscreen exit for this specific window.
+private struct WindowButtonsFixer: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async { [weak view] in
+            guard let window = view?.window else { return }
+            Self.reveal(window)
+            // Scope the observer to THIS window (not the mini-player one),
+            // and re-reveal each time it leaves fullscreen.
+            NotificationCenter.default.addObserver(
+                forName: NSWindow.didExitFullScreenNotification,
+                object: window, queue: .main
+            ) { _ in Self.reveal(window) }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private static func reveal(_ window: NSWindow) {
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            window.standardWindowButton(button)?.isHidden = false
         }
     }
 }
