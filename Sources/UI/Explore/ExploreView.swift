@@ -13,13 +13,28 @@ struct ExploreView: View {
     @State private var loading = true
     @State private var errorMessage: String?
 
+    /// Chips for the section-jump bar: each top-level Explore shelf, plus
+    /// a single "Moods & genres" chip anchored to the first mood shelf.
+    /// Empty titles (some shelves arrive untitled) are dropped.
+    private var jumpTargets: [(id: String, label: String)] {
+        var t = sections
+            .filter { !$0.title.trimmingCharacters(in: .whitespaces).isEmpty }
+            .map { (id: $0.id, label: $0.title) }
+        if let firstMood = moods.first {
+            t.append((id: firstMood.id, label: "Moods & genres"))
+        }
+        return t
+    }
+
     var body: some View {
         @Bindable var env = env
         NavigationStack(path: $env.exploreNavPath) {
+          ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 32) {
                     ExploreHeader()
                         .padding(.bottom, 4)
+                        .id("explore-top")
                     if let errorMessage {
                         ErrorBanner(message: errorMessage) {
                             Task { await load() }
@@ -28,11 +43,23 @@ struct ExploreView: View {
                     if loading && sections.isEmpty {
                         ExploreSkeleton()
                     } else {
+                        // Quick-jump bar: a long Explore page (charts, new
+                        // releases, videos, moods) is a lot of scrolling;
+                        // these pills scroll straight to a section.
+                        if !jumpTargets.isEmpty {
+                            SectionJumpBar(targets: jumpTargets) { id in
+                                withAnimation(.easeOut(duration: 0.3)) {
+                                    proxy.scrollTo(id, anchor: .top)
+                                }
+                            }
+                        }
                         ForEach(sections) { section in
                             HomeSectionRow(section: section)
+                                .id(section.id)
                         }
                         ForEach(moods) { section in
                             HomeSectionRow(section: section)
+                                .id(section.id)
                         }
                     }
                 }
@@ -42,6 +69,7 @@ struct ExploreView: View {
             }
             .navigationDestination(for: MediaItem.self) { DetailView(item: $0) }
             .task { await load() }
+          }
         }
     }
 
@@ -81,6 +109,36 @@ private struct ExploreHeader: View {
                 .foregroundStyle(Theme.Text.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+/// Horizontal pill bar that scroll-jumps to Explore sections. Pure
+/// navigation — no selected state, since it doesn't filter, it moves.
+private struct SectionJumpBar: View {
+    let targets: [(id: String, label: String)]
+    let onPick: (String) -> Void
+
+    var body: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(targets, id: \.id) { target in
+                    Button { onPick(target.id) } label: {
+                        Text(target.label)
+                            .font(.system(size: 13, weight: .medium))
+                            .foregroundStyle(Theme.Text.primary)
+                            .lineLimit(1)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 7)
+                            .background(Capsule().fill(Color.white.opacity(0.06)))
+                            .overlay(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+                            .contentShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .help("Jump to \(target.label)")
+                }
+            }
+        }
+        .scrollClipDisabled()
     }
 }
 
