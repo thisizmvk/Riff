@@ -28,8 +28,12 @@ struct HomeView: View {
     var body: some View {
         @Bindable var env = env
         NavigationStack(path: $env.homeNavPath) {
+          ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 32) {
+                    // Scroll anchor: switching mood chips jumps back here
+                    // so the re-scoped feed is seen from the top.
+                    Color.clear.frame(height: 0).id("home-top")
                     if let errorMessage {
                         ErrorBanner(message: errorMessage) {
                             Task { await load(force: true) }
@@ -51,6 +55,31 @@ struct HomeView: View {
                     }
                     if loading && sections.isEmpty {
                         HomeSkeleton()
+                    } else if let activeChip {
+                        // A mood chip is active → the whole feed IS that
+                        // mood. Personalized shelves + Blend are hidden so
+                        // the filter visibly transforms the page (leaving
+                        // them on top made the chip feel like it did
+                        // nothing). An empty filtered result says so
+                        // rather than silently falling back.
+                        if sections.isEmpty {
+                            EmptyState(
+                                systemImage: "line.3.horizontal.decrease.circle",
+                                title: "No \(activeChip.label) rails right now",
+                                subtitle: "YouTube didn't return a feed for this mood. Try another, or clear the filter.",
+                                cta: EmptyState.CTA("Clear filter", systemImage: "xmark") {
+                                    Task { await applyChip(activeChip) }
+                                }
+                            )
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 40)
+                        } else {
+                            ForEach(sections) { section in
+                                HomeSectionRow(section: section)
+                            }
+                            .opacity(chipLoading ? 0.55 : 1)
+                            .animation(.easeOut(duration: 0.15), value: chipLoading)
+                        }
                     } else {
                         // Riff Blend — the signature entry point, above
                         // everything else so a returning listener's first
@@ -68,9 +97,6 @@ struct HomeView: View {
                         ForEach(personalizedShelves) { section in
                             HomeSectionRow(section: section)
                         }
-                        // Browse rails — these are what the mood chips
-                        // re-scope. Dim them while a chip fetch is in
-                        // flight so the tap has an immediate effect.
                         ForEach(sections) { section in
                             HomeSectionRow(section: section)
                         }
@@ -91,6 +117,14 @@ struct HomeView: View {
             // marked the session dead) → the feed shape changes wholesale;
             // refetch instead of leaving the old feed on screen.
             .onChange(of: env.isSignedIn) { _, _ in Task { await load(force: true) } }
+            // Re-scoping by mood chip → jump to the top so the new feed
+            // isn't hidden below the fold where the last one was scrolled.
+            .onChange(of: activeChip) { _, _ in
+                withAnimation(.easeOut(duration: 0.2)) {
+                    proxy.scrollTo("home-top", anchor: .top)
+                }
+            }
+          }
         }
     }
 
