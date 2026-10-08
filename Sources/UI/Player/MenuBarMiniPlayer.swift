@@ -13,7 +13,6 @@ import AppKit
 /// state, honors the architectural rule.
 struct MenuBarMiniPlayer: View {
     @Environment(AppEnvironment.self) private var env
-    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         let track = env.player.currentTrack
@@ -252,7 +251,7 @@ struct MenuBarMiniPlayer: View {
 
                 Divider()
                 Button {
-                    openWindow(id: "mini-player")
+                    MiniPlayerPanelController.shared.show(environment: env)
                 } label: {
                     Label("Open Mini Player", systemImage: "rectangle.on.rectangle")
                         .frame(maxWidth: .infinity, alignment: .leading)

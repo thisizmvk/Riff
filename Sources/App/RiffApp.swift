@@ -71,7 +71,7 @@ struct RiffApp: App {
                     .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(after: .windowArrangement) {
-                MiniPlayerMenuItem()
+                MiniPlayerMenuItem(environment: environment)
             }
             CommandGroup(before: .toolbar) {
                 TabSwitchMenuItems()
@@ -113,20 +113,12 @@ struct RiffApp: App {
             }
         }
 
-        // Always-on-top compact playback tile in a separate window.
-        // Open via Window → Mini Player (⌥⌘M). Resizable between the
-        // content's 220×200 minimum and 600×600 maximum — never to a
-        // full screen of artwork (`.contentSize` binds the window to the
-        // view's min/max frame; `.contentMinSize` let it grow without
-        // bound and open at the artwork's natural size). The chosen size
-        // persists across launches.
-        Window("Mini Player", id: "mini-player") {
-            FloatingMiniPlayerView()
-                .environment(environment)
-        }
-        .defaultSize(width: 300, height: 300)
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
+        // NOTE: the always-on-top compact tile is NOT a SwiftUI `Window`
+        // scene — a regular app's NSWindow can't float over other apps'
+        // native full-screen. It's a non-activating NSPanel owned by
+        // `MiniPlayerPanelController`, toggled from the Window menu / ⌥⌘M /
+        // command palette (see MiniPlayerMenuItem and the notification
+        // handler in RootView).
 
         // System menu-bar mini player. Compact transport + scrubber that
         // lives next to the system clock, so the user can pause/skip
@@ -200,13 +192,16 @@ private struct AccountCommandItems: View {
     }
 }
 
-/// Re-usable menu item that opens the Mini Player window. Lives in its
-/// own struct so it can use `@Environment(\.openWindow)`.
+/// Menu item that toggles the always-on-top Mini Player panel. Takes the
+/// AppEnvironment directly (Commands can't read scene @Environment) so it
+/// can hand it to the panel controller.
 private struct MiniPlayerMenuItem: View {
-    @Environment(\.openWindow) private var openWindow
+    let environment: AppEnvironment
     var body: some View {
-        Button("Mini Player") { openWindow(id: "mini-player") }
-            .keyboardShortcut("M", modifiers: [.command, .option])
+        Button("Mini Player") {
+            MiniPlayerPanelController.shared.toggle(environment: environment)
+        }
+        .keyboardShortcut("M", modifiers: [.command, .option])
     }
 }
 
@@ -343,7 +338,6 @@ extension FocusedValues {
 
 struct RootView: View {
     @Environment(AppEnvironment.self) private var env
-    @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Dominant color of the currently-playing artwork, washed very
@@ -474,7 +468,7 @@ struct RootView: View {
             EditMetadataSheet(item: item)
         }
         .onReceive(NotificationCenter.default.publisher(for: .riffOpenMiniPlayerWindow)) { _ in
-            openWindow(id: "mini-player")
+            MiniPlayerPanelController.shared.show(environment: env)
         }
     }
 }

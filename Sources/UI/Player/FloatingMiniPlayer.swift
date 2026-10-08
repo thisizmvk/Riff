@@ -118,11 +118,10 @@ struct FloatingMiniPlayerView: View {
                 Spacer(minLength: 0)
             }
         }
-        // FIXED, SQUARE tile. A min/ideal/max range let the window resize
-        // itself run-to-run ("size is dynamic"); the user wants one stable
-        // tile. 300×300 keeps square album art uncropped; the title block
-        // overlays the bottom over its gradient scrim. WindowFloater locks
-        // the NSWindow min==max so the resize handles are inert too.
+        // FIXED, SQUARE tile. 300×300 keeps square album art uncropped;
+        // the title block overlays the bottom over its gradient scrim. The
+        // hosting panel (MiniPlayerPanelController) locks min==max so the
+        // resize handles are inert.
         .frame(width: 300, height: 300)
         // Artwork as a BACKGROUND, never a layout sibling. As a ZStack
         // child, the `.fill` image proposed its natural pixel size and
@@ -151,7 +150,6 @@ struct FloatingMiniPlayerView: View {
         }
         .contentShape(Rectangle())
         .contextMenu { nowPlayingMenuItems }
-        .background(WindowFloater())
     }
 
     @ViewBuilder
@@ -206,164 +204,129 @@ struct FloatingMiniPlayerView: View {
     }
 }
 
-/// Reaches into the hosting NSWindow to set window level + appearance to
-/// match a floating utility panel: always-on-top (above other apps'
-/// windows too), joins all spaces, hidden from Mission Control. Done via
-/// NSViewRepresentable because SwiftUI doesn't expose `.windowLevel`.
-///
-/// Applied from `viewDidMoveToWindow`, not a one-shot `DispatchQueue.main
-/// .async` after `makeNSView`: the SwiftUI `Window` scene attaches the
-/// view to its NSWindow later than that tick, so the old guard returned
-/// early and the tile stayed a normal-level window — behind every other
-/// app ("mini player isn't hovering over Comet / Claude"). Re-applied on
-/// each update so nothing SwiftUI resets can stick.
-private struct WindowFloater: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { FloaterView() }
-    func updateNSView(_ nsView: NSView, context: Context) {
-        (nsView as? FloaterView)?.configureWindow()
+/// A non-activating floating panel for the Mini Player. A regular,
+/// Dock-based app cannot show a plain `NSWindow` over ANOTHER app's native
+/// full-screen Space at any window level — but an `NSPanel` with
+/// `.nonactivatingPanel`, pinned at `.screenSaver` level with
+/// `.canJoinAllSpaces`, floats over everything (other apps' normal windows
+/// AND their full-screen Spaces) and never steals focus when clicked.
+final class FloatingPanel: NSPanel {
+    // Controls must be clickable, but the panel must never become the
+    // app's main window — it's an accessory overlay.
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+/// Owns the single Mini Player panel: builds it on demand, keeps it above
+/// everything on the active display, and toggles it from the Window menu /
+/// ⌥⌘M / command palette. Replaces the old SwiftUI `Window` scene, whose
+/// `NSWindow` could not be coaxed over other apps' full-screen.
+@MainActor
+final class MiniPlayerPanelController {
+    static let shared = MiniPlayerPanelController()
+    private init() {}
+
+    private var panel: FloatingPanel?
+    private var observers: [NSObjectProtocol] = []
+    private var workspaceObservers: [NSObjectProtocol] = []
+    private static let tileSize = NSSize(width: 300, height: 300)
+
+    /// Show when hidden, hide when visible (⌥⌘M behaves as a toggle).
+    func toggle(environment: AppEnvironment) {
+        if let panel, panel.isVisible {
+            panel.orderOut(nil)
+        } else {
+            show(environment: environment)
+        }
     }
 
-    final class FloaterView: NSView {
-        private var observers: [NSObjectProtocol] = []
-        private var workspaceObservers: [NSObjectProtocol] = []
+    func show(environment: AppEnvironment) {
+        let panel = panel ?? makePanel(environment: environment)
+        self.panel = panel
+        applyLevel()
+        moveToActiveScreen()
+        panel.orderFrontRegardless()
+    }
 
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            configureWindow()
-            // SwiftUI re-applies the Window scene's configuration AFTER
-            // this synchronous pass and resets the level back to normal,
-            // so a one-shot set here was silently undone and the tile sat
-            // behind other apps. Re-apply on the next runloop ticks (after
-            // SwiftUI's own pass wins) so our level is the last word.
-            scheduleReassert()
-
-            guard observers.isEmpty, let window else { return }
-            let nc = NotificationCenter.default
-            // App-level activation → re-float AND follow to the active
-            // screen (the user likely switched context / display).
-            for name in [NSApplication.didBecomeActiveNotification,
-                         NSApplication.didResignActiveNotification] {
-                observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.handleActivation() }
-                })
-            }
-            // This window's own key/main/geometry changes — SwiftUI resets
-            // the level on several of these. Re-float ONLY (never
-            // reposition here, or dragging the tile would fight us).
-            for name in [NSWindow.didBecomeKeyNotification,
-                         NSWindow.didBecomeMainNotification,
-                         NSWindow.didResizeNotification,
-                         NSWindow.didMoveNotification] {
-                observers.append(nc.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.scheduleReassert() }
-                })
-            }
-            // Re-float + follow when ANY other app becomes active or the
-            // active Space changes — the moments the "current screen" moves
-            // and a background floating window can get buried or stranded
-            // on another display.
-            let wsNC = NSWorkspace.shared.notificationCenter
-            for name in [NSWorkspace.didActivateApplicationNotification,
-                         NSWorkspace.activeSpaceDidChangeNotification] {
-                workspaceObservers.append(wsNC.addObserver(
-                    forName: name, object: nil, queue: .main
-                ) { [weak self] _ in
-                    MainActor.assumeIsolated { self?.handleActivation() }
-                })
-            }
+    private func makePanel(environment: AppEnvironment) -> FloatingPanel {
+        let panel = FloatingPanel(
+            contentRect: NSRect(origin: .zero, size: Self.tileSize),
+            styleMask: [.titled, .fullSizeContentView, .nonactivatingPanel],
+            backing: .buffered, defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.titleVisibility = .hidden
+        panel.titlebarAppearsTransparent = true
+        panel.isMovableByWindowBackground = true
+        panel.backgroundColor = .black
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            panel.standardWindowButton(button)?.isHidden = true
         }
+        let host = NSHostingView(rootView: FloatingMiniPlayerView().environment(environment))
+        host.frame = NSRect(origin: .zero, size: Self.tileSize)
+        panel.contentView = host
+        panel.setContentSize(Self.tileSize)
+        panel.minSize = Self.tileSize
+        panel.maxSize = Self.tileSize
+        panel.center()
+        installObservers()
+        return panel
+    }
 
-        /// Re-assert the floating level and follow the tile to whatever
-        /// screen is now active.
-        private func handleActivation() {
-            scheduleReassert()
-            moveToActiveScreen()
+    /// Re-float + follow when the app or the active Space/app changes —
+    /// the moments the "current screen" moves or a background overlay can
+    /// get buried.
+    private func installObservers() {
+        guard observers.isEmpty else { return }
+        let nc = NotificationCenter.default
+        for name in [NSApplication.didBecomeActiveNotification,
+                     NSApplication.didResignActiveNotification] {
+            observers.append(nc.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.handleActivation() }
+            })
         }
-
-        /// Move the tile onto the currently-active display (the screen
-        /// under the cursor), keeping its relative position within the
-        /// screen's visible area. No-op when it's already on that screen,
-        /// so dragging it around a single display is never disturbed.
-        private func moveToActiveScreen() {
-            guard let window else { return }
-            let mouse = NSEvent.mouseLocation
-            let target = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
-                ?? NSScreen.main
-            guard let target else { return }
-            let current = window.screen ?? NSScreen.main
-            guard let current, target !== current else { return }
-
-            let src = current.visibleFrame
-            let dst = target.visibleFrame
-            let fx = src.width > 0 ? (window.frame.minX - src.minX) / src.width : 0.5
-            let fy = src.height > 0 ? (window.frame.minY - src.minY) / src.height : 0.5
-            var origin = NSPoint(x: dst.minX + fx * dst.width,
-                                 y: dst.minY + fy * dst.height)
-            // Keep the whole tile inside the destination's visible area.
-            origin.x = min(max(origin.x, dst.minX), dst.maxX - window.frame.width)
-            origin.y = min(max(origin.y, dst.minY), dst.maxY - window.frame.height)
-            window.setFrameOrigin(origin)
+        let wsNC = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didActivateApplicationNotification,
+                     NSWorkspace.activeSpaceDidChangeNotification] {
+            workspaceObservers.append(wsNC.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.handleActivation() }
+            })
         }
+    }
 
-        deinit {
-            observers.forEach(NotificationCenter.default.removeObserver)
-            let wsNC = NSWorkspace.shared.notificationCenter
-            workspaceObservers.forEach(wsNC.removeObserver)
-        }
+    private func handleActivation() {
+        guard let panel, panel.isVisible else { return }
+        applyLevel()
+        moveToActiveScreen()
+    }
 
-        /// Apply now and again on the next couple of runloop ticks, so a
-        /// SwiftUI layout pass that runs right after a trigger can't leave
-        /// the window reset to normal level.
-        private func reassertLevel() {
-            applyLevel()
-            DispatchQueue.main.async { [weak self] in self?.applyLevel() }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in self?.applyLevel() }
-        }
+    private func applyLevel() {
+        guard let panel else { return }
+        panel.level = .screenSaver
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.orderFrontRegardless()
+    }
 
-        /// `reassertLevel` under a clearer name at the call sites.
-        private func scheduleReassert() { reassertLevel() }
-
-        /// Force the window above every app's windows, on all Spaces,
-        /// INCLUDING over other apps' native full-screen Spaces. For the
-        /// full-screen case the level must be at the menu-bar band or
-        /// higher (`.floating` = 3 renders *under* a full-screen app);
-        /// `.statusBar` (25) clears it while `.canJoinAllSpaces` carries
-        /// the tile into the full-screen Space. Tradeoff: at this level
-        /// the tile can overlap the menu bar if parked at the top.
-        /// Set unconditionally — SwiftUI may have reset the level, and a
-        /// guard would skip re-applying.
-        private func applyLevel() {
-            guard let window else { return }
-            // .screenSaver is the highest practical band — it overlays
-            // other apps' native full-screen Spaces (which .statusBar and
-            // lower render under). .canJoinAllSpaces carries the tile into
-            // every Space including those; .fullScreenAuxiliary lets it
-            // accompany a full-screen Space rather than trigger its own.
-            window.level = .screenSaver
-            window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            // Re-raise to the top of the floating band without activating
-            // Riff, so switching to another app can't leave the tile
-            // behind that app's windows.
-            window.orderFrontRegardless()
-        }
-
-        func configureWindow() {
-            guard let window else { return }
-            applyLevel()
-            window.hidesOnDeactivate = false
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
-            window.styleMask.insert(.fullSizeContentView)
-            window.isMovableByWindowBackground = true
-            window.backgroundColor = .black
-            // Lock the size: min == max == the fixed content size, so the
-            // window can't be dragged to a new size or reopen at another.
-            let size = NSSize(width: 300, height: 300)
-            window.minSize = size
-            window.maxSize = size
-            window.setContentSize(size)
-            window.standardWindowButton(.zoomButton)?.isEnabled = false
-        }
+    /// Move the tile onto the currently-active display (the screen under
+    /// the cursor), preserving its relative position. No-op when already
+    /// there, so dragging it around one display is never disturbed.
+    private func moveToActiveScreen() {
+        guard let panel else { return }
+        let mouse = NSEvent.mouseLocation
+        let target = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
+        guard let target else { return }
+        let current = panel.screen ?? NSScreen.main
+        guard let current, target !== current else { return }
+        let src = current.visibleFrame
+        let dst = target.visibleFrame
+        let fx = src.width > 0 ? (panel.frame.minX - src.minX) / src.width : 0.5
+        let fy = src.height > 0 ? (panel.frame.minY - src.minY) / src.height : 0.5
+        var origin = NSPoint(x: dst.minX + fx * dst.width, y: dst.minY + fy * dst.height)
+        origin.x = min(max(origin.x, dst.minX), dst.maxX - panel.frame.width)
+        origin.y = min(max(origin.y, dst.minY), dst.maxY - panel.frame.height)
+        panel.setFrameOrigin(origin)
     }
 }
 
