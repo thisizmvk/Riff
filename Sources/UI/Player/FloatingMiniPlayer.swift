@@ -222,6 +222,7 @@ private struct WindowFloater: NSViewRepresentable {
 
     final class FloaterView: NSView {
         private var observers: [NSObjectProtocol] = []
+        private var workspaceObservers: [NSObjectProtocol] = []
 
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
@@ -243,9 +244,24 @@ private struct WindowFloater: NSViewRepresentable {
                     MainActor.assumeIsolated { self?.reassertLevel() }
                 })
             }
+            // Re-float when ANY other app becomes active — the precise
+            // moment a background app's floating window can get buried if
+            // its level was reset. Riff's own didResignActive doesn't fire
+            // for every such switch, so watch the workspace too.
+            let wsNC = NSWorkspace.shared.notificationCenter
+            workspaceObservers.append(wsNC.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.reassertLevel() }
+            })
         }
 
-        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+        deinit {
+            observers.forEach(NotificationCenter.default.removeObserver)
+            let wsNC = NSWorkspace.shared.notificationCenter
+            workspaceObservers.forEach(wsNC.removeObserver)
+        }
 
         /// Cheap, idempotent — only the properties AppKit/SwiftUI can
         /// reset out from under us.
@@ -253,6 +269,10 @@ private struct WindowFloater: NSViewRepresentable {
             guard let window else { return }
             if window.level != .floating { window.level = .floating }
             window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            // Re-raise to the top of the floating band without activating
+            // Riff, so switching to another app can't leave the tile
+            // behind that app's windows.
+            window.orderFrontRegardless()
         }
 
         func configureWindow() {
