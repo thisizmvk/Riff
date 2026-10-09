@@ -51,7 +51,7 @@ final class DiagnosticsCenter: NSObject {
 }
 
 #if canImport(MetricKit)
-extension DiagnosticsCenter: @preconcurrency MXMetricManagerSubscriber {
+extension DiagnosticsCenter: MXMetricManagerSubscriber {
     // Note: `MXMetricPayload` is iOS-only — Apple does not ship it on
     // macOS as of the macOS 15.5 SDK (the runner image), even though
     // `MXMetricManagerSubscriber` is available. The macOS subscriber

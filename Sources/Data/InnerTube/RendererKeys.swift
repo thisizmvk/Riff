@@ -74,7 +74,9 @@ enum RendererKeys {
     /// `["contents", singleColumnBrowse, "tabs", "0", tabRenderer,
     ///   "content", sectionList, "contents"]` — used by browseHome,
     /// library, detail page tracklists.
-    static let homeShelvesPath: [Any] = [
+    // nonisolated(unsafe): an immutable path constant ([Any] can't be
+    // Sendable, but this is never mutated after init).
+    nonisolated(unsafe) static let homeShelvesPath: [Any] = [
         "contents", singleColumnBrowse, "tabs", "0", tabRenderer,
         "content", sectionList, "contents"
     ]

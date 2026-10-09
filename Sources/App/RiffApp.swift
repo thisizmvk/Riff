@@ -497,7 +497,10 @@ private struct WindowButtonsFixer: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {}
 
-    private static func reveal(_ window: NSWindow) {
+    // nonisolated: called from the main-queue notification closures above
+    // (not the MainActor-inferred representable context), and it only
+    // touches NSWindow APIs, which aren't actor-isolated.
+    nonisolated private static func reveal(_ window: NSWindow) {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {

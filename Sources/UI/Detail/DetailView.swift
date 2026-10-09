@@ -657,7 +657,7 @@ struct DetailView: View {
         // removal immediately. We don't refetch here because that
         // would scroll the user back to the top; the next time the
         // page loads it'll be authoritative.
-        if var current = page {
+        if let current = page {
             let pruned = current.tracks.filter { $0.id != track.id || $0.setVideoId != setVideoId }
             page = InnerTubeClient.DetailPage(
                 title: current.title,

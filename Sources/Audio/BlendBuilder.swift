@@ -23,10 +23,7 @@ enum BlendBuilder {
     /// Minimum distinct songs in-window before a blend is offered. Below
     /// this the sample is too thin to feel like a mix, so the Home card
     /// stays hidden (the ranked shelves already cover light histories).
-    ///
-    /// TEMPORARY (testing): lowered to 3 so the Blend surfaces appear on
-    /// a thin history. Restore to 8 before launch.
-    static let minimumDistinctSongs: Int = 3
+    static let minimumDistinctSongs: Int = 8
 
     /// Default mix length. Long enough to be a session, short enough to
     /// stay personal rather than drifting into "everything I've heard".
