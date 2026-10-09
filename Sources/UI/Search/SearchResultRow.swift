@@ -72,6 +72,11 @@ struct SearchResultRow: View {
     @State private var hovering = false
     @State private var isFocused = false
 
+    /// Local play count — tracks only (containers don't accumulate one).
+    private var playCount: Int {
+        (item.kind == .song || item.kind == .episode) ? env.localPlayCount(item.id) : 0
+    }
+
     var body: some View {
         Group {
             if item.kind == .song || item.kind == .episode {
@@ -139,12 +144,31 @@ struct SearchResultRow: View {
                             .accessibilityLabel("Metadata edited")
                     }
                 }
-                Text(formattedSubtitle)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.Text.secondary)
-                    .lineLimit(1)
+                // Songs/episodes: clickable artist(s). Containers keep a
+                // plain subtitle (their subtitle isn't an artist credit).
+                if item.kind == .song || item.kind == .episode {
+                    ArtistLinkLine(
+                        subtitle: formattedSubtitle,
+                        primaryArtistId: item.artistId,
+                        fontSize: 12,
+                        baseOpacity: 0.7
+                    )
+                } else {
+                    Text(formattedSubtitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.Text.secondary)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 12)
+            // Local play-count badge for tracks played in Riff.
+            if playCount >= 1 {
+                Text("\(playCount)×")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Theme.Text.tertiary)
+                    .help("\(playCount) play\(playCount == 1 ? "" : "s") in Riff")
+                    .accessibilityLabel("\(playCount) plays")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

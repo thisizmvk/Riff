@@ -710,6 +710,13 @@ final class AppEnvironment {
         navigate(to: item)
     }
 
+    /// Local play count for a videoId, from the play-history journal
+    /// (YT exposes no per-song counts). O(history); callers rendering a
+    /// whole list should prefer `LibrarySorting.playCounts` once instead.
+    func localPlayCount(_ videoId: String) -> Int {
+        player.playedEntries.reduce(0) { $0 + ($1.item.id == videoId ? 1 : 0) }
+    }
+
     /// Open an artist's page. Prefers a known browseId; when the source
     /// (e.g. the now-playing track) doesn't carry one — common for radio
     /// tracks whose `/next` row lacked an artist nav endpoint — resolves

@@ -415,6 +415,9 @@ struct DetailView: View {
         // handoff is safe here because tracklist(...) is only ever
         // called from inside signedInBody where `page` is non-nil.
         let backfilled: [MediaItem] = page.map { p in tracks.map { backfillMetadata($0, page: p) } } ?? tracks
+        // Local play counts (YT exposes no per-song counts) — computed
+        // once for the whole list and handed to each row.
+        let counts = LibrarySorting.playCounts(from: env.player.playedEntries)
         return LazyVStack(alignment: .leading, spacing: 0) {
             // Row identity: a playlist may legally hold the same song
             // twice (that is what `setVideoId` is for). Keying by videoId
@@ -431,6 +434,7 @@ struct DetailView: View {
                 TrackRow(
                     index: index,
                     item: track,
+                    playCount: counts[track.id] ?? 0,
                     isUserOwnedPlaylist: isUserOwnedPlaylist,
                     onPlay: {
                         // "Play from here": tapping track N of an
@@ -772,6 +776,8 @@ private struct TrackRow: View {
     @Environment(AppEnvironment.self) private var env
     let index: Int
     let item: MediaItem
+    /// Local play count for this track (0 when never played in Riff).
+    var playCount: Int = 0
     let isUserOwnedPlaylist: Bool
     /// "Play from here" — plays the tracklist from this row (albums /
     /// playlists / podcasts) or single-plays (artist top songs). The
@@ -832,12 +838,29 @@ private struct TrackRow: View {
                         .font(.system(size: 14, weight: isCurrent ? .semibold : .medium))
                         .foregroundStyle(isCurrent ? Theme.red : Color.white)
                         .lineLimit(2)
-                    Text(item.subtitle)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(isCurrent ? 0.75 : 0.55))
-                        .lineLimit(1)
+                    // Clickable artist(s): each credited name links to its
+                    // artist page (nested plain buttons; the row's own tap
+                    // still plays elsewhere). Empty subtitle → renders
+                    // nothing, same as before.
+                    if !item.subtitle.isEmpty {
+                        ArtistLinkLine(
+                            subtitle: item.subtitle,
+                            primaryArtistId: item.artistId,
+                            fontSize: 12,
+                            baseOpacity: isCurrent ? 0.75 : 0.55
+                        )
+                    }
                 }
                 Spacer()
+                // Local play-count badge (YT exposes none). Shown once the
+                // track has been played in Riff; absent otherwise.
+                if playCount >= 1 {
+                    Text("\(playCount)×")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Theme.Text.tertiary)
+                        .help("\(playCount) play\(playCount == 1 ? "" : "s") in Riff")
+                        .accessibilityLabel("\(playCount) plays")
+                }
                 // Hover-revealed action cluster: like + overflow menu.
                 // Sits between the title block and the duration, fading
                 // in on hover. Duration stays put — on narrow rows the
