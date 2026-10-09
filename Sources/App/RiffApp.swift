@@ -483,24 +483,26 @@ private struct WindowButtonsFixer: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         DispatchQueue.main.async { [weak view] in
-            guard let window = view?.window else { return }
-            Self.reveal(window)
-            // Scope the observer to THIS window (not the mini-player one),
-            // and re-reveal each time it leaves fullscreen.
-            NotificationCenter.default.addObserver(
-                forName: NSWindow.didExitFullScreenNotification,
-                object: window, queue: .main
-            ) { _ in Self.reveal(window) }
+            // Both this and the notification below run on the main queue,
+            // so asserting MainActor lets us touch MainActor-isolated
+            // NSWindow/NSView APIs (and `reveal`) without warnings.
+            MainActor.assumeIsolated {
+                guard let window = view?.window else { return }
+                Self.reveal(window)
+                // Scope the observer to THIS window (not the mini-player
+                // one), and re-reveal each time it leaves fullscreen.
+                NotificationCenter.default.addObserver(
+                    forName: NSWindow.didExitFullScreenNotification,
+                    object: window, queue: .main
+                ) { _ in MainActor.assumeIsolated { Self.reveal(window) } }
+            }
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {}
 
-    // nonisolated: called from the main-queue notification closures above
-    // (not the MainActor-inferred representable context), and it only
-    // touches NSWindow APIs, which aren't actor-isolated.
-    nonisolated private static func reveal(_ window: NSWindow) {
+    private static func reveal(_ window: NSWindow) {
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
