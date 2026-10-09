@@ -544,15 +544,19 @@ private struct TabPane: ViewModifier {
             .disabled(!active)
             .accessibilityHidden(!active)
             .zIndex(active ? 1 : 0)
-            // Only the ACTIVE pane may contribute to the window toolbar.
+            // Hide the window toolbar on EVERY pane, unconditionally.
             // Each mounted pane wraps a NavigationStack; on macOS a stack
-            // with a pushed page adds back-button/title toolbar items.
-            // Two mounted stacks with pushed pages fed DUPLICATE item
-            // identifiers into the one NSToolbar, which throws — and
-            // macOS 27 crashes on the exception (field crash 2026-09-11,
-            // NSToolbar _insertNewItemWithItemIdentifier under
-            // AppKitToolbarStrategy.updateLocations).
-            .toolbar(active ? .automatic : .hidden, for: .windowToolbar)
+            // with a pushed page adds back-button/title toolbar items, and
+            // two mounted stacks fed DUPLICATE item identifiers into the
+            // one NSToolbar, which throws — macOS 27 crashes on it
+            // (NSToolbar _insertNewItemWithItemIdentifier under
+            // AppKitToolbarStrategy). The earlier fix left the ACTIVE pane
+            // on `.automatic`, but a tab switch / navigation briefly has
+            // two panes contributing and still crashed. Riff never uses
+            // the macOS toolbar — detail pages carry their OWN in-content
+            // back button and set no navigationTitle — so suppressing it
+            // everywhere removes the crash with no UX loss.
+            .toolbar(.hidden, for: .windowToolbar)
     }
 }
 
