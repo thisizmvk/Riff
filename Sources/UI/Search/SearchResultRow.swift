@@ -310,10 +310,24 @@ struct TopResultCard: View {
                             .accessibilityLabel("Metadata edited")
                     }
                 }
-                Text(formattedSubtitle)
-                    .font(.system(size: 12))
-                    .foregroundStyle(Theme.Text.secondary)
-                    .lineLimit(1)
+                if item.kind == .song || item.kind == .episode {
+                    ArtistLinkLine(
+                        subtitle: formattedSubtitle,
+                        primaryArtistId: item.artistId,
+                        fontSize: 12,
+                        baseOpacity: 0.7
+                    )
+                    if env.localPlayCount(item.id) >= 1 {
+                        Text("\(env.localPlayCount(item.id))× in Riff")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.Text.tertiary)
+                    }
+                } else {
+                    Text(formattedSubtitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.Text.secondary)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 4)
                 HStack(spacing: 8) {
                     // Play pill — primary action, always visible. Stops
