@@ -102,6 +102,12 @@ struct DetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                // In-content back button. The window toolbar (which would
+                // otherwise carry NavigationStack's back button) is hidden
+                // app-wide to dodge the NSToolbar duplicate-identifier
+                // crash, so detail pages provide their own.
+                backButton
+                    .padding(.horizontal, 24)
                 if let page {
                     header(page)
                     Divider().background(Theme.divider)
@@ -203,6 +209,40 @@ struct DetailView: View {
     /// in from, so the wash appears immediately rather than after /browse.
     private var backdropArtURL: URL? {
         page?.artworkURL ?? item.thumbnailURL
+    }
+
+    /// Pops the active tab's navigation stack by one. Mirrors the
+    /// per-tab path switch used elsewhere; no-ops at the root.
+    private func goBack() {
+        switch env.activeTab {
+        case .home:    if !env.homeNavPath.isEmpty    { env.homeNavPath.removeLast() }
+        case .explore: if !env.exploreNavPath.isEmpty { env.exploreNavPath.removeLast() }
+        case .search:  if !env.searchNavPath.isEmpty  { env.searchNavPath.removeLast() }
+        case .library: if !env.libraryNavPath.isEmpty { env.libraryNavPath.removeLast() }
+        }
+    }
+
+    /// Back affordance for detail pages (the macOS toolbar back button is
+    /// unavailable — the window toolbar is hidden app-wide). ⌘[ also pops.
+    private var backButton: some View {
+        Button(action: goBack) {
+            HStack(spacing: 5) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Back")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Color.white.opacity(0.10)))
+            .overlay(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut("[", modifiers: .command)
+        .help("Back")
+        .accessibilityLabel("Back")
     }
 
     private func header(_ page: InnerTubeClient.DetailPage) -> some View {
