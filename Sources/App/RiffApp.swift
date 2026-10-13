@@ -480,33 +480,56 @@ struct RootView: View {
 /// stuck with no way to close or minimize. We re-assert them on attach
 /// and on every fullscreen exit for this specific window.
 private struct WindowButtonsFixer: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView(frame: .zero)
-        DispatchQueue.main.async { [weak view] in
-            // Both this and the notification below run on the main queue,
-            // so asserting MainActor lets us touch MainActor-isolated
-            // NSWindow/NSView APIs (and `reveal`) without warnings.
-            MainActor.assumeIsolated {
-                guard let window = view?.window else { return }
-                Self.reveal(window)
-                // Scope the observer to THIS window (not the mini-player
-                // one), and re-reveal each time it leaves fullscreen.
-                NotificationCenter.default.addObserver(
-                    forName: NSWindow.didExitFullScreenNotification,
-                    object: window, queue: .main
-                ) { _ in MainActor.assumeIsolated { Self.reveal(window) } }
-            }
-        }
-        return view
+    func makeNSView(context: Context) -> NSView { ButtonsRevealer() }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? ButtonsRevealer)?.reveal()
     }
 
-    func updateNSView(_ nsView: NSView, context: Context) {}
+    /// Keeps the close/minimize/zoom buttons visible. With the window
+    /// toolbar hidden (to dodge the NSToolbar crash) on a hidden-title-bar
+    /// window, SwiftUI re-hides those buttons AFTER our first reveal — so
+    /// re-assert them on every relevant window event and on a delayed tick
+    /// so our reveal is the last word.
+    final class ButtonsRevealer: NSView {
+        private var observers: [NSObjectProtocol] = []
 
-    private static func reveal(_ window: NSWindow) {
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-            window.standardWindowButton(button)?.isHidden = false
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window, observers.isEmpty else { reveal(); return }
+            reveal()
+            scheduleReveal()
+            let nc = NotificationCenter.default
+            for name in [NSWindow.didBecomeKeyNotification,
+                         NSWindow.didBecomeMainNotification,
+                         NSWindow.didResizeNotification,
+                         NSWindow.didEnterFullScreenNotification,
+                         NSWindow.didExitFullScreenNotification] {
+                observers.append(nc.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        self?.reveal()
+                        self?.scheduleReveal()
+                    }
+                })
+            }
+        }
+
+        /// Re-reveal on the next couple of runloop ticks, after any SwiftUI
+        /// toolbar/titlebar pass that would re-hide the buttons.
+        private func scheduleReveal() {
+            DispatchQueue.main.async { [weak self] in self?.reveal() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.reveal() }
+        }
+
+        func reveal() {
+            guard let window else { return }
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                guard let button = window.standardWindowButton(type) else { continue }
+                button.isHidden = false
+                button.alphaValue = 1
+                button.superview?.isHidden = false
+            }
         }
     }
 }
