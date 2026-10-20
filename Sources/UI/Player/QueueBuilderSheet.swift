@@ -152,7 +152,7 @@ struct QueueBuilderSheet: View {
                 Button {
                     Task {
                         let tracks = resolved
-                        await env.player.playTracks(tracks)
+                        await env.player.playTracks(tracks, sourceTitle: "Queue Builder")
                         dismiss()
                     }
                 } label: {

@@ -359,9 +359,13 @@ struct NowPlayingView: View {
                     Button {
                         withAnimation(.easeInOut(duration: 0.18)) { bottomTab = t }
                     } label: {
-                        VStack(spacing: 6) {
+                        VStack(spacing: 7) {
+                            // Uppercase + tracked — YT Music web's watch-
+                            // page tab treatment (UP NEXT / LYRICS / …).
                             Text(t.rawValue)
-                                .font(.system(size: 13, weight: bottomTab == t ? .semibold : .regular))
+                                .font(.system(size: 11, weight: .semibold))
+                                .textCase(.uppercase)
+                                .tracking(1.1)
                                 .foregroundStyle(bottomTab == t ? Color.white : Theme.Text.tertiary)
                             Rectangle()
                                 .fill(bottomTab == t ? Theme.red : Color.clear)
@@ -914,6 +918,27 @@ struct NowPlayingView: View {
             .truncationMode(.tail)
     }
 
+    /// Autoplay switch — YT web's watch-page queue toggle, wired to the
+    /// existing `autoplayEnabled` setting (same one as Settings →
+    /// Playback). OFF stops playback when the queue runs out instead of
+    /// extending it with related tracks.
+    private var autoplayToggle: some View {
+        Toggle(isOn: Binding(
+            get: { env.player.autoplayEnabled },
+            set: { env.player.setAutoplayEnabled($0) }
+        )) {
+            Text("Autoplay")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.Text.secondary)
+        }
+        .toggleStyle(.switch)
+        .controlSize(.mini)
+        .tint(Theme.red)
+        .fixedSize()
+        .help("When on, the queue auto-extends with similar music as it nears the end.")
+        .accessibilityLabel("Autoplay")
+    }
+
     /// Save / Clear / Build / Tune — mirrors YT Music's popover-driven
     /// pattern instead of always-visible mode pills.
     @ViewBuilder
@@ -1028,6 +1053,45 @@ struct NowPlayingView: View {
 
     private var upNextContent: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // "Playing from <album/playlist>" + Save — YT web's watch-page
+            // queue header. Only when the queue context came from a named
+            // tracklist (playTracks with a sourceTitle); radio and bare
+            // single-track contexts show nothing here.
+            if let src = env.player.queueSourceTitle {
+                HStack(alignment: .center, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Playing from")
+                            .font(.system(size: 9, weight: .semibold))
+                            .textCase(.uppercase)
+                            .tracking(1.2)
+                            .foregroundStyle(Theme.Text.tertiary)
+                        Text(src)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    if let pid = env.player.queueSourcePlaylistId, !pid.isEmpty {
+                        let saved = env.isSavedToLibrary(pid)
+                        Button {
+                            env.toggleSavedToLibrary(playlistId: pid, title: src)
+                        } label: {
+                            Label(saved ? "Saved" : "Save",
+                                  systemImage: saved ? "checkmark" : "plus")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(saved ? Theme.red : .white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help(saved ? "Remove from your library" : "Save to your library")
+                    }
+                }
+                .padding(.horizontal, 4)
+                Divider().background(Theme.Fill.medium)
+            }
             // Header: mode label + Save / Clear / Build / Tune chips.
             // One row when the pane is wide enough; otherwise the label
             // takes its own line above the chips. Chips are fixed-size
@@ -1038,11 +1102,13 @@ struct NowPlayingView: View {
                     queueModeLabel
                     Spacer()
                     queueHeaderChips
+                    autoplayToggle
                 }
                 VStack(alignment: .leading, spacing: 8) {
                     queueModeLabel
                     HStack(spacing: 6) {
                         queueHeaderChips
+                        autoplayToggle
                         Spacer(minLength: 0)
                     }
                 }
@@ -2292,6 +2358,16 @@ struct NowPlayingView: View {
                 .frame(width: 22)
                 .help("Queue actions")
                 .accessibilityLabel("Queue actions for \(item.title)")
+            }
+            // Row duration — YT-web queue rows carry one on the right.
+            // Present for /next-fetched and page-mirrored rows; absent
+            // (renders nothing) for rows whose source had no lengthText.
+            if let secs = item.durationSeconds {
+                Text(secs >= 3600
+                     ? String(format: "%d:%02d:%02d", secs / 3600, (secs % 3600) / 60, secs % 60)
+                     : String(format: "%d:%02d", secs / 60, secs % 60))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white.opacity(isCurrent ? 0.8 : 0.5))
             }
             if isSmartShuffleInjected {
                 Image(systemName: "plus")

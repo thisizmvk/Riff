@@ -88,6 +88,8 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         let title: String
         let byline: String
         let thumbnailURL: URL?
+        /// Raw "3:42" duration text from the page row ("" when absent).
+        let lengthText: String
         let selected: Bool
     }
 
@@ -338,6 +340,7 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
                     title: (dict["title"] as? String) ?? "",
                     byline: (dict["byline"] as? String) ?? "",
                     thumbnailURL: (dict["thumbnail"] as? String).flatMap(URL.init(string:)),
+                    lengthText: (dict["length"] as? String) ?? "",
                     selected: (dict["selected"] as? Bool) ?? false
                 )
             }

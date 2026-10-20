@@ -883,8 +883,11 @@ final class InnerTubeClient: @unchecked Sendable {
             // longBylineText runs are usually [artist, " • ", album] with
             // both artist and album carrying their own navigationEndpoint.
             let (albumId, artistId) = Self.extractIdsFromQueueRow(r)
+            // Row duration ("3:42") — queue rows show it YT-web style.
+            let durationSeconds = Parsing.runs(r, "lengthText").flatMap(Self.parseDurationString)
             return MediaItem(id: videoId, kind: .song, title: title, subtitle: subtitle,
-                             thumbnailURL: thumb, albumId: albumId, artistId: artistId)
+                             thumbnailURL: thumb, albumId: albumId, artistId: artistId,
+                             durationSeconds: durationSeconds)
         }
 
         // Tabs[1].endpoint.browseEndpoint.browseId → lyrics

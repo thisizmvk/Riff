@@ -658,6 +658,10 @@ final class PlayerBridge {
             contextTracksIds = [item.id]
             contextPlaylistId = nil
             contextIsPageOrdered = true
+            // Fresh per-track context: the previous album/playlist is no
+            // longer what's playing — drop the "Playing from" header.
+            queueSourceTitle = nil
+            queueSourcePlaylistId = nil
         } else {
             // A track that is about to play is never an upcoming row.
             // currentTrack is set optimistically below, so the real
@@ -1364,8 +1368,20 @@ final class PlayerBridge {
     /// which navigates to `upNext.first` — always the correct next
     /// album track because the user region preserves insertion
     /// order.
-    func playTracks(_ tracks: [MediaItem], playlistId: String? = nil, preservesListOrder: Bool = true) async {
+    /// Human-readable source of the current queue context ("The
+    /// Paradise (Telugu)") plus its playable playlist id. Set when
+    /// playback starts from an album/playlist tracklist; cleared on
+    /// fresh per-track watch contexts. DISPLAY-ONLY — drives the
+    /// "Playing from" header + Save button in Up Next; never consulted
+    /// by QueuePolicy or any navigation decision.
+    private(set) var queueSourceTitle: String? = nil
+    private(set) var queueSourcePlaylistId: String? = nil
+
+    func playTracks(_ tracks: [MediaItem], playlistId: String? = nil, preservesListOrder: Bool = true,
+                    sourceTitle: String? = nil) async {
         guard let first = tracks.first else { return }
+        queueSourceTitle = sourceTitle
+        queueSourcePlaylistId = playlistId
         let rest = Array(tracks.dropFirst())
         Log.bridge.debug("playTracks ENTRY firstId=\(first.id, privacy: .public) restCount=\(rest.count) plid=\(playlistId ?? "nil", privacy: .public)")
         // User intent (album / playlist / queue-builder play): lift any
@@ -1505,6 +1521,12 @@ final class PlayerBridge {
         contextPlaylistId = playlistId
         contextIsPageOrdered = true
         contextStartHistoryIndex = queue.playedEntries.count
+        // Navigated contexts (playPlaylist / playAlbum URL loads) don't
+        // come through playTracks — don't let a previous album's
+        // "Playing from" header survive into this one. The id is still
+        // known, so Save keeps working; the title is page-owned.
+        queueSourceTitle = nil
+        queueSourcePlaylistId = playlistId
         Audit.note("context switch → list=\(playlistId ?? "nil") (display cleared, click grace armed)")
     }
 
@@ -2704,7 +2726,8 @@ final class PlayerBridge {
                 .filter { $0.videoId != curId }
                 .map {
                     MediaItem(id: $0.videoId, kind: .song, title: $0.title,
-                              subtitle: $0.byline, thumbnailURL: $0.thumbnailURL)
+                              subtitle: $0.byline, thumbnailURL: $0.thumbnailURL,
+                              durationSeconds: InnerTubeClient.parseDurationString($0.lengthText))
                 }
                 .filter { !shouldBlock($0) }
             queue.replaceServerRegion(mapped)

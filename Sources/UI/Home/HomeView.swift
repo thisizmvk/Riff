@@ -782,7 +782,7 @@ struct BlendHeroCard: View {
             return
         }
         Task {
-            await env.player.playTracks(mix)
+            await env.player.playTracks(mix, sourceTitle: "Riff Blend")
             building = false
             env.showToast("Riff Blend — \(mix.count) songs")
         }

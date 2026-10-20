@@ -730,7 +730,7 @@ struct DetailView: View {
                         switch item.kind {
                         case .album, .playlist, .podcast:
                             let rest = Array(backfilled[index...])
-                            await env.player.playTracks(rest, playlistId: page?.playablePlaylistId)
+                            await env.player.playTracks(rest, playlistId: page?.playablePlaylistId, sourceTitle: resolvedTitle)
                         default:
                             await env.player.play(item: track)
                         }
@@ -914,7 +914,7 @@ struct DetailView: View {
             let backfilled = ordered.map { backfillArtwork($0, page: page) }
             // Thread the album/playlist ID so /next auto-extension
             // stays in-context when the user region drains. (C5)
-            await env.player.playTracks(backfilled, playlistId: page.playablePlaylistId)
+            await env.player.playTracks(backfilled, playlistId: page.playablePlaylistId, sourceTitle: resolvedTitle)
         } else if let plid = page.playablePlaylistId {
             // Empty tracklist — fall back to YT's playlist endpoint.
             // Reaches here only for entities where we couldn't parse
@@ -961,7 +961,7 @@ struct DetailView: View {
         // playTracks so the entire shuffle chains via the queue.
         guard !page.tracks.isEmpty else { return }
         let shuffled = page.tracks.shuffled().map { backfillArtwork($0, page: page) }
-        await env.player.playTracks(shuffled, playlistId: page.playablePlaylistId, preservesListOrder: false)
+        await env.player.playTracks(shuffled, playlistId: page.playablePlaylistId, preservesListOrder: false, sourceTitle: resolvedTitle)
     }
 
     /// Returns `track` with its missing thumbnail filled from the

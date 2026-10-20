@@ -1383,8 +1383,12 @@
                     // SMALLEST variant: these rows render at 36pt in the
                     // queue list, and AsyncImage decodes at native size —
                     // the largest variant would cost ~1MB of decoded
-                    // bitmap per row across up to 80 rows.
+                    // bitmap per row across up to 80 rows. (Swift upscales
+                    // via the =wN-hN host rewrite where it renders larger.)
                     thumbnail: thumbs.length ? thumbs[0].url : "",
+                    // Row duration ("3:42") — display-only; Swift parses
+                    // it into durationSeconds for the Up Next rows.
+                    length: text(r.lengthText),
                     selected: !!r.selected,
                 });
                 if (rows.length >= 80) break;   // cap payload; radio can run long
