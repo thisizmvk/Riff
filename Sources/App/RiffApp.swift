@@ -68,11 +68,15 @@ struct RiffApp: App {
                 .preferredColorScheme(.dark)
                 .onAppear { appDelegate.env = environment }
         }
-        .windowStyle(.hiddenTitleBar)
-        // NOTE: no .windowToolbarStyle — Riff never uses the window
-        // toolbar (in-content tabs + back button), and the hidden
-        // unifiedCompact toolbar both fed the NSToolbar duplicate-item
-        // crash and swallowed the traffic-light buttons.
+        // NOTE: no .windowStyle(.hiddenTitleBar) and no .windowToolbarStyle.
+        // Riff never uses the window toolbar (in-content tabs + back
+        // button); the hidden toolbar fed the NSToolbar duplicate-item
+        // crash, and on macOS 27 hiddenTitleBar-without-a-toolbar leaves
+        // NO titlebar view hosting the close/minimize/zoom buttons, so
+        // they vanished entirely (live audit 2026-10-20). Instead the
+        // window keeps its REAL titlebar — which hosts the buttons — and
+        // WindowButtonsFixer makes it chromeless the AppKit way:
+        // transparent titlebar, hidden title, full-size content view.
         .commands {
             CommandGroup(after: .appInfo) {
                 AccountCommandItems()
@@ -531,8 +535,14 @@ private struct WindowButtonsFixer: NSViewRepresentable {
 
         func reveal() {
             guard let window else { return }
+            // Chromeless the AppKit way: keep the REAL titlebar (it hosts
+            // the traffic-light buttons — SwiftUI's hiddenTitleBar without
+            // a toolbar has no view to host them), but make it invisible
+            // and let content extend underneath.
+            window.styleMask.insert(.fullSizeContentView)
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
             for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
                 guard let button = window.standardWindowButton(type) else { continue }
                 button.isHidden = false
