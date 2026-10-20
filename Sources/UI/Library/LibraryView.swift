@@ -152,6 +152,7 @@ struct LibraryView: View {
                 }
             }
             .navigationDestination(for: MediaItem.self) { DetailView(item: $0) }
+            .navigationDestination(for: HomeSection.self) { SectionGridView(section: $0) }
         }
         // LibraryView stays mounted across tab switches, so its
         // per-account state outlives a sign-out. Drop it on the

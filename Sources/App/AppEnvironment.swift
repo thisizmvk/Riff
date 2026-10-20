@@ -695,6 +695,20 @@ final class AppEnvironment {
         }
     }
 
+    /// Push a whole shelf ("More" on a rail header) onto the active
+    /// tab's stack. Lands on SectionGridView — every tile at once.
+    func navigate(toSection section: HomeSection) {
+        if player.isFullPlayerOpen {
+            player.isFullPlayerOpen = false
+        }
+        switch activeTab {
+        case .home:    homeNavPath.append(section)
+        case .explore: exploreNavPath.append(section)
+        case .search:  searchNavPath.append(section)
+        case .library: libraryNavPath.append(section)
+        }
+    }
+
     /// Convenience: navigate to an album / artist by its browseId,
     /// synthesizing a minimal `MediaItem`. Used when we have only the
     /// id (e.g. from a now-playing track's `albumId`) and not a full

@@ -309,7 +309,10 @@ struct NowPlayingView: View {
     /// the system browser so the video plays in a real browser tab
     /// instead of an embedded WebView Riff has to reparent.
     private func heroMedia(track: PlayerBridge.Track?) -> some View {
-        AsyncImage(url: track?.thumbnailURL) { phase in
+        // 320pt hero = 640px on Retina; the track thumbnail PlayerBridge
+        // reports is typically 544px or smaller. Upscale via the =wN-hN
+        // host rewrite for a crisp hero.
+        AsyncImage(url: track?.thumbnailURL?.upscaledArtwork(to: 720)) { phase in
             switch phase {
             case .success(let img): img.resizable().aspectRatio(contentMode: .fit)
             default: Theme.Fill.soft
@@ -2056,7 +2059,7 @@ struct NowPlayingView: View {
                             Task { await env.player.play(item: item) }
                         } label: {
                             VStack(alignment: .leading, spacing: 6) {
-                                AsyncImage(url: item.thumbnailURL) { phase in
+                                AsyncImage(url: item.thumbnailURL?.upscaledArtwork(to: 240)) { phase in
                                     if case .success(let img) = phase {
                                         img.resizable().aspectRatio(contentMode: .fill)
                                     } else {
@@ -2205,7 +2208,7 @@ struct NowPlayingView: View {
         let isSmartShuffleInjected = env.player.smartShuffleInjectedIds.contains(item.id)
         return HStack(spacing: 10) {
             ZStack {
-                AsyncImage(url: item.thumbnailURL) { phase in
+                AsyncImage(url: item.thumbnailURL?.upscaledArtwork(to: 120)) { phase in
                     if case .success(let img) = phase {
                         img.resizable().aspectRatio(contentMode: .fill)
                     } else {

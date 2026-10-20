@@ -108,7 +108,8 @@ struct SearchResultRow: View {
     private var rowContent: some View {
         HStack(spacing: 14) {
             ZStack {
-                AsyncImage(url: item.thumbnailURL) { phase in
+                // 48pt = 96px on Retina; YT's list-row thumb is often 60px.
+                AsyncImage(url: item.thumbnailURL?.upscaledArtwork(to: 120)) { phase in
                     if case .success(let img) = phase {
                         img.resizable().aspectRatio(contentMode: .fill)
                     } else {
@@ -161,8 +162,14 @@ struct SearchResultRow: View {
                 }
             }
             Spacer(minLength: 12)
-            // Local play-count badge for tracks played in Riff.
-            if playCount >= 1 {
+            // Stats: YT's GLOBAL count when the row carried one
+            // ("1.2M views"); the local in-Riff badge only as fallback.
+            if let plays = item.playsText {
+                Text(plays)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.Text.tertiary)
+                    .lineLimit(1)
+            } else if playCount >= 1 {
                 Text("\(playCount)×")
                     .font(.system(size: 11, weight: .medium, design: .monospaced))
                     .foregroundStyle(Theme.Text.tertiary)
@@ -286,7 +293,7 @@ struct TopResultCard: View {
 
     private var cardContent: some View {
         HStack(spacing: 16) {
-            AsyncImage(url: item.thumbnailURL) { phase in
+            AsyncImage(url: item.thumbnailURL?.upscaledArtwork(to: 240)) { phase in
                 if case .success(let img) = phase {
                     img.resizable().aspectRatio(contentMode: .fill)
                 } else {
@@ -317,7 +324,11 @@ struct TopResultCard: View {
                         fontSize: 12,
                         baseOpacity: 0.7
                     )
-                    if env.localPlayCount(item.id) >= 1 {
+                    if let plays = item.playsText {
+                        Text(plays)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.Text.tertiary)
+                    } else if env.localPlayCount(item.id) >= 1 {
                         Text("\(env.localPlayCount(item.id))× in Riff")
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(Theme.Text.tertiary)

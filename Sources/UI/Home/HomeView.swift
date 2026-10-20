@@ -109,6 +109,7 @@ struct HomeView: View {
                 .padding(.bottom, 24)
             }
             .navigationDestination(for: MediaItem.self) { DetailView(item: $0) }
+            .navigationDestination(for: HomeSection.self) { SectionGridView(section: $0) }
             .task { await load() }
             // Resolve portraits for top artists we haven't seen yet (one
             // /browse per new artist, sequential, cached to disk).
@@ -421,10 +422,7 @@ struct HomeSectionRow: View {
         return lower.contains("quick picks") || lower == "quick picks"
     }
 
-    /// Hover reveals paging chevrons — the carousel had no mouse
-    /// affordance at all (indicators hidden, no arrows), so mouse users
-    /// could only ever see the ~7 tiles that fit.
-    @State private var hovering = false
+    @Environment(AppEnvironment.self) private var env
     @State private var pageStart = 0
     /// Keyboard focus by tile key: ←/→ move focus (and scroll to it).
     @FocusState private var focusedTile: String?
@@ -433,62 +431,77 @@ struct HomeSectionRow: View {
     private func tileKey(_ idx: Int) -> String { "\(section.id)#\(idx)" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(section.title)
-                .font(.system(size: 28, weight: .bold))
-                .foregroundStyle(.white)
-
-            if renderAsQuickPicks {
-                quickPicksGrid
-            } else {
-                carousel
-            }
-        }
-    }
-
-    private var carousel: some View {
+        // ScrollViewReader wraps the WHOLE row so the header chevrons
+        // (YT Music web puts paging in the section header, not hover
+        // overlays) can drive the carousel's scroll position.
         ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                LazyHStack(spacing: 16) {
-                    ForEach(Array(section.items.enumerated()), id: \.offset) { idx, item in
-                        ThumbnailButton(item: item, externalFocus: $focusedTile, focusKey: tileKey(idx))
-                            .id(tileKey(idx))
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .center, spacing: 10) {
+                    Text(section.title)
+                        .font(.system(size: 28, weight: .bold))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    if !renderAsQuickPicks, section.items.count > Self.pageSize {
+                        Button {
+                            env.navigate(toSection: section)
+                        } label: {
+                            Text("More")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 6)
+                                .background(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help("Show all of \(section.title)")
+                        headerChevron("chevron.left", help: "Previous tiles",
+                                      disabled: pageStart <= 0) { page(-1, proxy) }
+                        headerChevron("chevron.right", help: "More tiles",
+                                      disabled: pageStart + Self.pageSize >= section.items.count) { page(+1, proxy) }
                     }
                 }
-            }
-            .overlay(alignment: .leading) {
-                if hovering, pageStart > 0 {
-                    chevron("chevron.left", help: "Previous tiles") { page(-1, proxy) }
+
+                if renderAsQuickPicks {
+                    quickPicksGrid
+                } else {
+                    carousel(proxy)
                 }
             }
-            .overlay(alignment: .trailing) {
-                if hovering, pageStart + Self.pageSize < section.items.count {
-                    chevron("chevron.right", help: "More tiles") { page(+1, proxy) }
-                }
-            }
-            .onHover { hovering = $0 }
-            // Arrow keys move tile focus once a tile in this row has
-            // keyboard focus (Tab into it), scrolling to keep it visible.
-            .onKeyPress(.rightArrow) { moveFocus(+1, proxy); return .handled }
-            .onKeyPress(.leftArrow) { moveFocus(-1, proxy); return .handled }
         }
     }
 
-    private func chevron(_ symbol: String, help: String, action: @escaping () -> Void) -> some View {
+    private func carousel(_ proxy: ScrollViewProxy) -> some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(spacing: 16) {
+                ForEach(Array(section.items.enumerated()), id: \.offset) { idx, item in
+                    ThumbnailButton(item: item, externalFocus: $focusedTile, focusKey: tileKey(idx))
+                        .id(tileKey(idx))
+                }
+            }
+        }
+        // Arrow keys move tile focus once a tile in this row has
+        // keyboard focus (Tab into it), scrolling to keep it visible.
+        .onKeyPress(.rightArrow) { moveFocus(+1, proxy); return .handled }
+        .onKeyPress(.leftArrow) { moveFocus(-1, proxy); return .handled }
+    }
+
+    /// Always-visible outlined paging circle in the section header —
+    /// YT Music web's pattern. Disabled (dimmed, inert) at the ends so
+    /// the pair also communicates where you are in the rail.
+    private func headerChevron(_ symbol: String, help: String, disabled: Bool,
+                               action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 14, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 36, height: 36)
-                .background(Color.black.opacity(0.72))
-                .clipShape(Circle())
-                .overlay(Circle().strokeBorder(Theme.Fill.strong, lineWidth: 1))
-                .shadow(color: .black.opacity(0.5), radius: 8)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.white.opacity(disabled ? 0.3 : 1))
+                .frame(width: 30, height: 30)
+                .background(Circle().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .padding(.horizontal, 6)
+        .disabled(disabled)
         .help(help)
-        .transition(.opacity)
     }
 
     private func page(_ direction: Int, _ proxy: ScrollViewProxy) {
@@ -543,7 +556,7 @@ private struct QuickPickRow: View {
         } label: {
             HStack(spacing: 10) {
                 ZStack {
-                    AsyncImage(url: item.thumbnailURL) { phase in
+                    AsyncImage(url: item.thumbnailURL?.upscaledArtwork(to: 120)) { phase in
                         if case .success(let img) = phase {
                             img.resizable().aspectRatio(contentMode: .fill)
                         } else {

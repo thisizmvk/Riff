@@ -133,7 +133,11 @@ struct ThumbnailButton: View {
     private var content: some View {
         VStack(alignment: .leading, spacing: 8) {
             ZStack(alignment: .bottomTrailing) {
-                AsyncImage(url: item.thumbnailURL) { phase in
+                // Tiles render at 180pt = 360px on Retina; the raw browse
+                // thumbnail is often 226px and arrives soft. The =wN-hN
+                // host rewrite fetches a crisp variant (no-op for hosts
+                // without the size segment).
+                AsyncImage(url: item.thumbnailURL?.upscaledArtwork(to: 448)) { phase in
                     switch phase {
                     case .success(let img):
                         img.resizable().aspectRatio(contentMode: .fill)

@@ -467,6 +467,7 @@ struct SearchView: View {
             }
         }
         .navigationDestination(for: MediaItem.self) { DetailView(item: $0) }
+        .navigationDestination(for: HomeSection.self) { SectionGridView(section: $0) }
         // Keyboard navigation across the result list. Live at the
         // container level so the shortcuts fire whenever this pane
         // is on-screen; up/down aren't caret nav for a single-line

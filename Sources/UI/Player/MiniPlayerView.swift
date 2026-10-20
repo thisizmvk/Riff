@@ -45,7 +45,7 @@ struct MiniPlayerView: View {
             .accessibilityHint("Click to seek")
 
             HStack(spacing: 14) {
-                AsyncImage(url: track?.thumbnailURL) { phase in
+                AsyncImage(url: track?.thumbnailURL?.upscaledArtwork(to: 120)) { phase in
                     switch phase {
                     case .success(let img): img.resizable().aspectRatio(contentMode: .fill)
                     default: Color.gray.opacity(0.2)

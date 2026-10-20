@@ -1717,10 +1717,48 @@ final class InnerTubeClient: @unchecked Sendable {
         // Year — scan flexColumns[1+] runs for a plain "YYYY" text run.
         // YT puts year in the byline alongside the artist + plays count.
         let year = extractYearFromFlexColumns(cols: cols)
+        // Global play count — album tracklists put "347M plays" in its
+        // own flex column; video rows put "1.2M views" in the byline.
+        let playsText = extractPlaysFromFlexColumns(cols: cols)
         return MediaItem(id: id, kind: kind, title: title, subtitle: subtitle,
                          thumbnailURL: thumb, albumId: albumId, artistId: artistId,
                          setVideoId: setVideoId,
-                         durationSeconds: durationSeconds, year: year)
+                         durationSeconds: durationSeconds, year: year,
+                         playsText: playsText)
+    }
+
+    /// Pull YT's global play/view-count label ("347M plays", "1,204
+    /// plays", "1.2M views") out of a row's flex columns. Only
+    /// plain-text runs count — linked runs are artist/album names. The
+    /// shape check is strict (number-with-optional-suffix + the word)
+    /// so a song *titled* "Plays" can't fake a stat.
+    static func extractPlaysFromFlexColumns(cols: [[String: Any]]) -> String? {
+        for col in cols.dropFirst() {
+            let runs = (Parsing.dig(col, ["musicResponsiveListItemFlexColumnRenderer", "text", "runs"]) as? [[String: Any]]) ?? []
+            for run in runs where run["navigationEndpoint"] == nil {
+                guard let txt = (run["text"] as? String)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines) else { continue }
+                if isPlaysLabel(txt) { return txt }
+            }
+        }
+        return nil
+    }
+
+    /// "347M plays" / "1.2B views" / "1,204 plays" → true.
+    static func isPlaysLabel(_ text: String) -> Bool {
+        let parts = text.split(separator: " ")
+        guard parts.count == 2 else { return false }
+        let word = parts[1].lowercased()
+        guard word == "plays" || word == "views" || word == "play" || word == "view" else { return false }
+        var digitsSeen = false
+        for ch in parts[0] {
+            if ch.isNumber { digitsSeen = true; continue }
+            if ch == "." || ch == "," { continue }
+            // Magnitude suffix must be the LAST character.
+            if "KMB".contains(ch.uppercased()), ch == parts[0].last { continue }
+            return false
+        }
+        return digitsSeen
     }
 
     /// Parse "mm:ss" or "h:mm:ss" into seconds. Returns nil for any
