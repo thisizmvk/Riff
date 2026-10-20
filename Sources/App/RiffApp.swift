@@ -11,6 +11,12 @@ import Combine
 final class RiffAppDelegate: NSObject, NSApplicationDelegate {
     var env: AppEnvironment?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Riff is single-window; macOS window tabbing only added useless
+        // "Show Tab Bar" / "Show All Tabs" items to the View menu.
+        NSWindow.allowsAutomaticWindowTabbing = false
+    }
+
     func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
         guard let env else { return nil }
         let menu = NSMenu()
