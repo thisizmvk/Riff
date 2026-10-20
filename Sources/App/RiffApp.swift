@@ -591,19 +591,18 @@ private struct TabPane: ViewModifier {
             .disabled(!active)
             .accessibilityHidden(!active)
             .zIndex(active ? 1 : 0)
-            // Hide the window toolbar on EVERY pane, unconditionally.
-            // Each mounted pane wraps a NavigationStack; on macOS a stack
-            // with a pushed page adds back-button/title toolbar items, and
-            // two mounted stacks fed DUPLICATE item identifiers into the
-            // one NSToolbar, which throws — macOS 27 crashes on it
-            // (NSToolbar _insertNewItemWithItemIdentifier under
-            // AppKitToolbarStrategy). The earlier fix left the ACTIVE pane
-            // on `.automatic`, but a tab switch / navigation briefly has
-            // two panes contributing and still crashed. Riff never uses
-            // the macOS toolbar — detail pages carry their OWN in-content
-            // back button and set no navigationTitle — so suppressing it
-            // everywhere removes the crash with no UX loss.
-            .toolbar(.hidden, for: .windowToolbar)
+            // NOTE: no `.toolbar(.hidden, for: .windowToolbar)` here. It
+            // was the belt against the NSToolbar duplicate-item crash, but
+            // on macOS 27 the titlebar and toolbar are unified — hiding
+            // the window toolbar collapses the WHOLE titlebar, so the
+            // close/minimize/zoom buttons cease to exist
+            // (standardWindowButton returns nil; live audit 2026-10-20).
+            // The crash is fixed at the SOURCE instead: every pushed page
+            // is DetailView, which sets .navigationBarBackButtonHidden, so
+            // no back-button toolbar item is ever registered and the
+            // duplicate-identifier throw can't happen. If a new
+            // navigationDestination is added, it MUST also hide the back
+            // button (grep DetailView for the CRITICAL comment).
     }
 }
 
