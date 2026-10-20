@@ -536,9 +536,27 @@ private struct WindowButtonsFixer: NSViewRepresentable {
         func reveal() {
             guard let window else { return }
             // Chromeless the AppKit way: keep the REAL titlebar (it hosts
-            // the traffic-light buttons — SwiftUI's hiddenTitleBar without
-            // a toolbar has no view to host them), but make it invisible
-            // and let content extend underneath.
+            // the traffic-light buttons), make it invisible, and let
+            // content extend underneath.
+            //
+            // The load-bearing line is the EMPTY NSToolbar. On macOS 27 a
+            // SwiftUI window with no toolbar never materializes the
+            // titlebar button cluster at all — standardWindowButton()
+            // returns nil, so un-hiding is a no-op (verified live
+            // 2026-10-20: buttons absent even after the toolbar-hidden
+            // belt was removed). Attaching an item-less toolbar forces
+            // AppKit to build the unified titlebar WITH close/minimize/
+            // zoom. It is crash-safe: the NSToolbar duplicate-identifier
+            // crash came from SwiftUI registering duplicate BACK-BUTTON
+            // items, which every pushed page now suppresses
+            // (navigationBarBackButtonHidden) — this toolbar has no
+            // items and no delegate.
+            if window.toolbar == nil {
+                let tb = NSToolbar(identifier: "RiffChromeToolbar")
+                tb.showsBaselineSeparator = false
+                window.toolbar = tb
+            }
+            window.toolbarStyle = .unifiedCompact
             window.styleMask.insert(.fullSizeContentView)
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
