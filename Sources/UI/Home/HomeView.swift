@@ -502,6 +502,7 @@ struct HomeSectionRow: View {
         .buttonStyle(.plain)
         .disabled(disabled)
         .help(help)
+        .accessibilityLabel(help)
     }
 
     private func page(_ direction: Int, _ proxy: ScrollViewProxy) {
