@@ -9,7 +9,7 @@ import SwiftUI
 struct ExploreView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var sections: [HomeSection] = []
-    @State private var moods: [HomeSection] = []
+    @State private var moods: [InnerTubeClient.MoodShelf] = []
     @State private var loading = true
     @State private var errorMessage: String?
 
@@ -92,9 +92,9 @@ struct ExploreView: View {
                         // Moods & genres as YT-Music-style colorful tiles
                         // (a solid hue per entry with a tilted artwork
                         // corner), not plain carousels.
-                        ForEach(moods) { section in
-                            MoodGenreSection(section: section)
-                                .id(section.id)
+                        ForEach(moods) { shelf in
+                            MoodGenreSection(shelf: shelf)
+                                .id(shelf.id)
                         }
                     }
                 }
@@ -104,6 +104,7 @@ struct ExploreView: View {
             }
             .navigationDestination(for: MediaItem.self) { DetailView(item: $0) }
             .navigationDestination(for: HomeSection.self) { SectionGridView(section: $0) }
+            .navigationDestination(for: InnerTubeClient.MoodCategory.self) { MoodCategoryView(category: $0) }
             .task { await load() }
           }
         }
@@ -121,11 +122,8 @@ struct ExploreView: View {
                 guard !kept.isEmpty else { return nil }
                 return HomeSection(id: sec.id, title: sec.title, items: kept)
             }
-            moods = mg.compactMap { sec in
-                let kept = sec.items.filter { !env.isBlocked($0) }
-                guard !kept.isEmpty else { return nil }
-                return HomeSection(id: sec.id, title: sec.title, items: kept)
-            }
+            // Category buttons, not artist tiles — nothing to block.
+            moods = mg
             errorMessage = nil
         } catch {
             if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
@@ -271,25 +269,25 @@ private struct ChartRow: View {
     }
 }
 
-/// One moods/genres shelf rendered as a colorful tile grid (YT Music's
-/// signature look) instead of a horizontal carousel. Each tile is a
-/// solid hue with the mood name and a tilted artwork corner, and taps
-/// open the mood's curated playlist via the shared navigation.
+/// One Moods & Genres shelf ("Moods & moments" / "Genres") rendered
+/// as YT Music web's category buttons: a dark pill with the category's
+/// OWN color (served by YT as leftStripeColor) as a left stripe.
+/// Tapping opens the category's curated-playlist page.
 private struct MoodGenreSection: View {
-    let section: HomeSection
+    let shelf: InnerTubeClient.MoodShelf
 
-    private let columns = [GridItem(.adaptive(minimum: 210), spacing: 12)]
+    private let columns = [GridItem(.adaptive(minimum: 200, maximum: 260), spacing: 10)]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            if !section.title.trimmingCharacters(in: .whitespaces).isEmpty {
-                Text(section.title)
-                    .font(.system(size: 20, weight: .bold))
+            if !shelf.title.trimmingCharacters(in: .whitespaces).isEmpty {
+                Text(shelf.title)
+                    .font(.system(size: 22, weight: .bold))
                     .foregroundStyle(.white)
             }
-            LazyVGrid(columns: columns, spacing: 12) {
-                ForEach(section.items) { item in
-                    MoodTile(item: item)
+            LazyVGrid(columns: columns, spacing: 10) {
+                ForEach(shelf.categories) { category in
+                    MoodTile(category: category)
                 }
             }
         }
@@ -297,67 +295,35 @@ private struct MoodGenreSection: View {
 }
 
 private struct MoodTile: View {
-    let item: MediaItem
-
-    /// Vibrant, dark-ground-friendly palette. A mood keeps the same hue
-    /// across the session (stable hash of its id), mirroring the way YT
-    /// Music assigns each category a fixed color.
-    private static let palette: [Color] = [
-        Color(red: 0.84, green: 0.28, blue: 0.26),
-        Color(red: 0.90, green: 0.49, blue: 0.18),
-        Color(red: 0.86, green: 0.67, blue: 0.18),
-        Color(red: 0.28, green: 0.64, blue: 0.40),
-        Color(red: 0.18, green: 0.56, blue: 0.64),
-        Color(red: 0.24, green: 0.47, blue: 0.80),
-        Color(red: 0.42, green: 0.34, blue: 0.76),
-        Color(red: 0.66, green: 0.30, blue: 0.66),
-        Color(red: 0.82, green: 0.34, blue: 0.53),
-        Color(red: 0.36, green: 0.42, blue: 0.52),
-    ]
-
-    private var baseColor: Color {
-        var h = 5381
-        for b in item.id.utf8 { h = ((h << 5) &+ h) &+ Int(b) }
-        return Self.palette[abs(h) % Self.palette.count]
-    }
+    let category: InnerTubeClient.MoodCategory
+    @State private var hovering = false
 
     var body: some View {
-        NavigationLink(value: item) {
-            ZStack(alignment: .topLeading) {
-                LinearGradient(
-                    colors: [baseColor, baseColor.opacity(0.78)],
-                    startPoint: .topLeading, endPoint: .bottomTrailing
-                )
-                // Tilted artwork corner — the YT Music mood-tile signature.
-                if let url = item.thumbnailURL {
-                    AsyncImage(url: url) { phase in
-                        if case .success(let img) = phase {
-                            img.resizable().scaledToFill()
-                        } else {
-                            Color.black.opacity(0.12)
-                        }
-                    }
-                    .frame(width: 56, height: 56)
-                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .shadow(color: .black.opacity(0.3), radius: 4, y: 2)
-                    .rotationEffect(.degrees(27))
-                    .offset(x: 12, y: 18)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                }
-                Text(item.title)
-                    .font(.system(size: 14, weight: .bold))
+        NavigationLink(value: category) {
+            HStack(spacing: 0) {
+                // YT's category color as the left stripe — the
+                // signature of its moods grid.
+                Rectangle()
+                    .fill(Color(argb: category.colorARGB))
+                    .frame(width: 5)
+                Text(category.title)
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
-                    .padding(12)
+                    .lineLimit(1)
+                    .padding(.horizontal, 12)
+                Spacer(minLength: 0)
             }
-            .frame(height: 68)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            .contentShape(RoundedRectangle(cornerRadius: 8))
+            .frame(height: 48)
+            .background(hovering ? Theme.Fill.medium : Color.white.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Theme.Fill.strong, lineWidth: 1))
+            .contentShape(RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
-        .help(item.title)
+        .onHover { hovering = $0 }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .help("Open \(category.title)")
+        .accessibilityLabel("\(category.title) category")
     }
 }
 

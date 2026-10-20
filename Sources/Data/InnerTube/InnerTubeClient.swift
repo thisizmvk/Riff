@@ -233,16 +233,70 @@ final class InnerTubeClient: @unchecked Sendable {
         return []
     }
 
-    /// Fetch the Moods & Genres feed — a flat list of mood/genre
-    /// "tile" items, each pointing to a curated playlist when tapped.
-    /// Reuses parseHomeShelf for the same reason browseExplore does.
-    func browseMoodsAndGenres() async throws -> [HomeSection] {
+    /// One mood/genre category button ("Chill", "Bollywood & Indian").
+    /// Carries YT's OWN stripe color for the tile and the params blob
+    /// that opens its category page (curated-playlist shelves).
+    struct MoodCategory: Identifiable, Hashable, Sendable, Codable {
+        let title: String
+        let params: String
+        /// ARGB word from `solid.leftStripeColor` — YT's category color.
+        let colorARGB: UInt32
+        var id: String { params }
+    }
+
+    /// A titled group of category buttons ("Moods & moments", "Genres").
+    struct MoodShelf: Identifiable, Hashable, Sendable, Codable {
+        let title: String
+        let categories: [MoodCategory]
+        var id: String { title }
+    }
+
+    /// Fetch the Moods & Genres index. NOT a tile feed: the response is
+    /// gridRenderer sections of `musicNavigationButtonRenderer` buttons
+    /// (no artwork, no playlists) — which is why the old
+    /// parseHomeShelf-based version always came back EMPTY (verified
+    /// against the live anonymous feed 2026-10-20: 2 grids, 39 buttons,
+    /// 0 carousel shelves). Each button browses to
+    /// FEmusic_moods_and_genres_category with its params; see
+    /// `browseMoodCategory(params:)`.
+    func browseMoodsAndGenres() async throws -> [MoodShelf] {
         let body = try await postRaw(.browse, body: ["browseId": BrowseID.moodsAndGenres])
+        let sections = Parsing.array(body, "contents",
+            "singleColumnBrowseResultsRenderer", "tabs", "0", "tabRenderer",
+            "content", "sectionListRenderer", "contents") ?? []
+        let shelves: [MoodShelf] = sections.compactMap { section in
+            guard let grid = section["gridRenderer"] as? [String: Any] else { return nil }
+            let title = Parsing.runs(grid, "header", "gridHeaderRenderer", "title") ?? ""
+            let items = (grid["items"] as? [[String: Any]]) ?? []
+            let cats: [MoodCategory] = items.compactMap { item in
+                guard let b = item["musicNavigationButtonRenderer"] as? [String: Any] else { return nil }
+                let label = (Parsing.runs(b, "buttonText") ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !label.isEmpty,
+                      let params = Parsing.dig(b, ["clickCommand", "browseEndpoint", "params"]) as? String,
+                      !params.isEmpty else { return nil }
+                let color = (Parsing.dig(b, ["solid", "leftStripeColor"]) as? NSNumber)?.uint32Value ?? 0
+                return MoodCategory(title: label, params: params, colorARGB: color)
+            }
+            guard !cats.isEmpty else { return nil }
+            return MoodShelf(title: title, categories: cats)
+        }
+        Log.innertube.debug("moodsAndGenres shelves=\(shelves.count) buttons=\(shelves.reduce(0) { $0 + $1.categories.count })")
+        return shelves
+    }
+
+    /// Fetch one mood/genre category page — standard carousel shelves
+    /// of curated playlists, so parseHomeShelf applies unchanged.
+    func browseMoodCategory(params: String) async throws -> [HomeSection] {
+        let body = try await postRaw(.browse, body: [
+            "browseId": BrowseID.moodsCategory,
+            "params": params,
+        ])
         let shelves = Parsing.array(body, "contents",
             "singleColumnBrowseResultsRenderer", "tabs", "0", "tabRenderer",
             "content", "sectionListRenderer", "contents") ?? []
         let sections = shelves.compactMap(Self.parseHomeShelf)
-        Log.innertube.debug("moodsAndGenres sections=\(sections.count)")
+        Log.innertube.debug("moodCategory sections=\(sections.count)")
         return sections
     }
 
