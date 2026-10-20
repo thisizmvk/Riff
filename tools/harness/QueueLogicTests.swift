@@ -671,10 +671,13 @@ do {
     let gapTime = ny.date(from: DateComponents(year: 2026, month: 3, day: 8, hour: 2, minute: 30))!  // non-existent local time
     check([S.morning, S.lateNight].contains(S.slot(for: gapTime, calendar: ny)), "non-existent local time resolves to a neighboring slot without crashing")
 
+    // Distinct subtitle per track: rails cap at 3 tiles per album/artist
+    // run (capPerAlbum), so threshold/limit fixtures must not share one
+    // artist or the cap - not the property under test - trims them.
     func thumbed(_ id: String) -> MediaItem {
-        MediaItem(id: id, kind: .song, title: id, subtitle: "A", thumbnailURL: URL(string: "https://x/\(id).jpg"))
+        MediaItem(id: id, kind: .song, title: id, subtitle: "Artist-\(id)", thumbnailURL: URL(string: "https://x/\(id).jpg"))
     }
-    func bare(_ id: String) -> MediaItem { MediaItem(id: id, kind: .song, title: id, subtitle: "A", thumbnailURL: nil) }
+    func bare(_ id: String) -> MediaItem { MediaItem(id: id, kind: .song, title: id, subtitle: "Artist-\(id)", thumbnailURL: nil) }
     let now = at(10, 8)
     // Build `counts[i]` morning plays of track i.
     func history(_ counts: [Int], make: (String) -> MediaItem = thumbed) -> [PlayedEntry] {
@@ -704,6 +707,15 @@ do {
     // limit + recency tiebreak.
     let thirteen = PersonalizedShelves.timeOfDayShelf(from: history(Array(repeating: 2, count: 13)), now: now, calendar: utc)
     check(thirteen?.items.count == 12, "limit caps the rail at 12")
+    // Per-album cap: a single album/artist run may occupy at most 3
+    // tiles, so an album binge doesn't render the rail as N copies of
+    // one artwork (field audit 2026-10-20: 7 identical Lenin OST tiles).
+    func oneAlbum(_ id: String) -> MediaItem {
+        MediaItem(id: id, kind: .song, title: id, subtitle: "SameArtist", thumbnailURL: URL(string: "https://x/\(id).jpg"))
+    }
+    let binge = PersonalizedShelves.timeOfDayShelf(from: history(Array(repeating: 2, count: 13), make: oneAlbum), now: now, calendar: utc)
+    check(binge?.items.count == 3, "one album/artist run is capped at 3 tiles per rail (got \(binge?.items.count ?? -1))")
+    check(PersonalizedShelves.capPerAlbum([oneAlbum("a"), oneAlbum("b"), thumbed("x"), oneAlbum("c"), oneAlbum("d")]).map(\.id) == ["a", "b", "x", "c"], "capPerAlbum keeps order, caps the clustered album at 3, and leaves other albums alone")
     var tie = history(Array(repeating: 2, count: 8))
     tie.append(PlayedEntry(item: thumbed("late"), playedAt: at(9, 9)))
     tie.append(PlayedEntry(item: thumbed("late"), playedAt: at(9, 10)))

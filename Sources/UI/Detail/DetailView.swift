@@ -202,6 +202,15 @@ struct DetailView: View {
             guard !Task.isCancelled else { return }
             backdropColor = color
         }
+        // CRITICAL — do not remove: suppresses NavigationStack's automatic
+        // back-button toolbar item AT THE SOURCE. With four tab panes
+        // mounted, pushed pages in two stacks registered duplicate toolbar
+        // item identifiers and NSToolbar throws (macOS 27 crashes on it).
+        // Hiding the toolbar did NOT stop the registration — field crashes
+        // 2026-10-09 and 2026-10-20 both died in
+        // NSToolbar _insertNewItemWithItemIdentifier. Riff's back
+        // affordance is the in-content `backButton` above.
+        .navigationBarBackButtonHidden(true)
     }
 
     /// The artwork URL the accent wash is sampled from: the resolved

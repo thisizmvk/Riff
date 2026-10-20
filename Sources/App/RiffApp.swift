@@ -63,7 +63,10 @@ struct RiffApp: App {
                 .onAppear { appDelegate.env = environment }
         }
         .windowStyle(.hiddenTitleBar)
-        .windowToolbarStyle(.unifiedCompact)
+        // NOTE: no .windowToolbarStyle — Riff never uses the window
+        // toolbar (in-content tabs + back button), and the hidden
+        // unifiedCompact toolbar both fed the NSToolbar duplicate-item
+        // crash and swallowed the traffic-light buttons.
         .commands {
             CommandGroup(after: .appInfo) {
                 AccountCommandItems()

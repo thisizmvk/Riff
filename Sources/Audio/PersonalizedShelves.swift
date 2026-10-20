@@ -85,7 +85,13 @@ enum PersonalizedShelves {
                 thumbnailURL: thumb
             )
         }
-        return Array(tiles.prefix(limit))
+        // Dedupe by display name: YT often serves TWO artist ids for one
+        // act (the auto "topic" channel and the real channel), which
+        // rendered duplicate tiles ("Thaman S" twice in one rail). Keep
+        // the higher-ranked (more-played) one.
+        var seenNames = Set<String>()
+        let unique = tiles.filter { seenNames.insert($0.title.lowercased()).inserted }
+        return Array(unique.prefix(limit))
     }
 
     /// Pull the artist name out of a played-track subtitle. Handles
@@ -130,7 +136,14 @@ enum PersonalizedShelves {
                 .split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .first(where: { !$0.isEmpty })
-            return primary ?? segment
+            let name = primary ?? segment
+            // YT's auto-generated artist channels leak a " - Topic"
+            // suffix ("Anirudh Ravichander - Topic"); never show it.
+            if name.lowercased().hasSuffix(" - topic") {
+                let stripped = String(name.dropLast(8)).trimmingCharacters(in: .whitespaces)
+                return stripped.isEmpty ? name : stripped
+            }
+            return name
         }
         return nil
     }
@@ -172,7 +185,7 @@ enum PersonalizedShelves {
                 byId[id] = TrackAgg(count: 1, lastPlayed: entry.playedAt, item: entry.item)
             }
         }
-        return byId
+        let ranked = byId
             .sorted { lhs, rhs in
                 if lhs.value.count != rhs.value.count { return lhs.value.count > rhs.value.count }
                 return lhs.value.lastPlayed > rhs.value.lastPlayed
@@ -184,8 +197,23 @@ enum PersonalizedShelves {
             // metadata landed) and lack a thumbnailURL — rendering
             // them looks like data corruption.
             .filter { $0.thumbnailURL != nil }
-            .prefix(limit)
-            .map { $0 }
+        return Array(capPerAlbum(ranked).prefix(limit))
+    }
+
+    /// Cap how many tiles ONE album may occupy in a rail. An album binge
+    /// turned "You've been playing" / the time-of-day rotation into N
+    /// copies of the same artwork, which reads as a rendering bug.
+    /// Grouping key: albumId when the row carries one, else the subtitle
+    /// (artist run) so artwork-identical siblings still cluster.
+    static func capPerAlbum(_ items: [MediaItem], maxPerAlbum: Int = 3) -> [MediaItem] {
+        var counts: [String: Int] = [:]
+        return items.filter { item in
+            let key = item.albumId ?? "sub:" + item.subtitle.lowercased()
+            let seen = counts[key, default: 0]
+            guard seen < maxPerAlbum else { return false }
+            counts[key] = seen + 1
+            return true
+        }
     }
 
     // MARK: - Time-of-day shelf ("daylist"-style)
@@ -252,10 +280,11 @@ enum PersonalizedShelves {
         // is nil — not an empty shelf — when the signal can't be shown.
         let renderable = byId.values.filter { $0.item.thumbnailURL != nil }
         guard renderable.count >= minTracks else { return nil }
-        let ranked = renderable
-            .sorted { l, r in l.count != r.count ? l.count > r.count : l.last > r.last }
-            .map(\.item)
-            .prefix(limit)
+        let ranked = capPerAlbum(
+            renderable
+                .sorted { l, r in l.count != r.count ? l.count > r.count : l.last > r.last }
+                .map(\.item)
+        ).prefix(limit)
         guard !ranked.isEmpty else { return nil }
         return TimeOfDayShelf(slot: slot, title: slot.shelfTitle, items: Array(ranked))
     }
