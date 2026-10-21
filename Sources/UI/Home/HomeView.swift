@@ -302,7 +302,8 @@ struct HomeView: View {
         raw.compactMap { sec in
             let kept = sec.items.filter { !env.isBlocked($0) }
             guard !kept.isEmpty else { return nil }
-            return HomeSection(id: sec.id, title: sec.title, items: kept)
+            return HomeSection(id: sec.id, title: sec.title, items: kept,
+                               moreBrowseId: sec.moreBrowseId, moreParams: sec.moreParams)
         }
     }
 }
@@ -371,6 +372,13 @@ struct HomeSection: Identifiable, Hashable, Sendable, Codable {
     let id: String
     let title: String
     let items: [MediaItem]
+    /// Full-catalog browse behind the shelf's "More" button, when YT
+    /// provided one (artist Albums / Singles & EPs shelves carry only
+    /// ~10 items inline; the whole discography lives at an MPAD…
+    /// browseId + params). nil for self-contained shelves. Optional
+    /// with a default so cached pre-field feeds still decode.
+    var moreBrowseId: String? = nil
+    var moreParams: String? = nil
 }
 
 /// Skeleton rows shown while `browseHome()` is in flight. Two carousels'
@@ -441,7 +449,8 @@ struct HomeSectionRow: View {
                         .font(.system(size: 28, weight: .bold))
                         .foregroundStyle(.white)
                     Spacer()
-                    if !renderAsQuickPicks, section.items.count > Self.pageSize {
+                    if !renderAsQuickPicks,
+                       section.items.count > Self.pageSize || section.moreBrowseId != nil {
                         Button {
                             env.navigate(toSection: section)
                         } label: {

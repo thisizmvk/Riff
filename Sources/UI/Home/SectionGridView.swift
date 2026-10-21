@@ -8,17 +8,37 @@ struct SectionGridView: View {
     @Environment(AppEnvironment.self) private var env
     let section: HomeSection
 
+    /// Full catalog fetched from the shelf's "More" browse endpoint
+    /// (artist Albums / Singles ship ~10 inline with the whole
+    /// discography behind MPAD…). nil while loading or when the shelf
+    /// is self-contained — the inline items render meanwhile.
+    @State private var fullItems: [MediaItem]? = nil
+    @State private var loadingFull = false
+
     private let columns = [GridItem(.adaptive(minimum: 180, maximum: 220), spacing: 20)]
 
     var body: some View {
+        let items = fullItems ?? section.items
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 backButton
-                Text(section.title)
-                    .font(.system(size: 30, weight: .bold))
-                    .foregroundStyle(.white)
+                HStack(spacing: 10) {
+                    Text(section.title)
+                        .font(.system(size: 30, weight: .bold))
+                        .foregroundStyle(.white)
+                    if loadingFull {
+                        ProgressView().controlSize(.small)
+                    } else if fullItems != nil {
+                        Text("\(items.count)")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Theme.Text.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Capsule().fill(Color.white.opacity(0.08)))
+                    }
+                }
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 24) {
-                    ForEach(Array(section.items.enumerated()), id: \.offset) { _, item in
+                    ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                         ThumbnailButton(item: item)
                     }
                 }
@@ -26,6 +46,16 @@ struct SectionGridView: View {
             .padding(.horizontal, 24)
             .padding(.top, 24)
             .padding(.bottom, env.player.hasTrack ? 96 : 24)
+        }
+        .task(id: section.moreBrowseId) {
+            guard let moreId = section.moreBrowseId, fullItems == nil else { return }
+            loadingFull = true
+            defer { loadingFull = false }
+            if let fetched = try? await env.innerTube.browseSectionMore(
+                browseId: moreId, params: section.moreParams
+            ), fetched.count > section.items.count {
+                fullItems = fetched.filter { !env.isBlocked($0) }
+            }
         }
         .background(Theme.Bg.base.ignoresSafeArea())
         // CRITICAL — same rule as DetailView: every pushed page must

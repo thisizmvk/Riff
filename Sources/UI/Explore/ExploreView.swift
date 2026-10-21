@@ -120,7 +120,8 @@ struct ExploreView: View {
             sections = ex.compactMap { sec in
                 let kept = sec.items.filter { !env.isBlocked($0) }
                 guard !kept.isEmpty else { return nil }
-                return HomeSection(id: sec.id, title: sec.title, items: kept)
+                return HomeSection(id: sec.id, title: sec.title, items: kept,
+                                   moreBrowseId: sec.moreBrowseId, moreParams: sec.moreParams)
             }
             // Category buttons, not artist tiles — nothing to block.
             moods = mg

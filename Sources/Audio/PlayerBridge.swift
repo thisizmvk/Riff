@@ -1339,7 +1339,8 @@ final class PlayerBridge {
                 self.relatedSections = sections.compactMap { section in
                     let filtered = section.items.filter { !self.shouldBlock($0) }
                     guard !filtered.isEmpty else { return nil }
-                    return HomeSection(id: section.id, title: section.title, items: filtered)
+                    return HomeSection(id: section.id, title: section.title, items: filtered,
+                                       moreBrowseId: section.moreBrowseId, moreParams: section.moreParams)
                 }
                 // Fresh /related pool — re-run the Smart Shuffle merge
                 // so the "+" rows show up in upNext without waiting on

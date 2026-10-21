@@ -310,6 +310,41 @@ final class InnerTubeClient: @unchecked Sendable {
         return shelves
     }
 
+    /// Fetch a shelf's full catalog ("More" on an artist's Albums /
+    /// Singles & EPs) — an MPAD… browse whose response is a single
+    /// gridRenderer of musicTwoRowItemRenderer tiles (verified live
+    /// 2026-10-20: 88 albums in one page). Follows grid continuations
+    /// defensively for very large discographies.
+    func browseSectionMore(browseId: String, params: String?) async throws -> [MediaItem] {
+        var body: [String: Any] = ["browseId": browseId]
+        if let params { body["params"] = params }
+        let resp = try await postRaw(.browse, body: body)
+        let shelves = Parsing.array(resp, "contents",
+            "singleColumnBrowseResultsRenderer", "tabs", "0", "tabRenderer",
+            "content", "sectionListRenderer", "contents") ?? []
+        var items: [MediaItem] = []
+        for shelf in shelves {
+            if let grid = shelf["gridRenderer"] as? [String: Any] {
+                items += (grid["items"] as? [[String: Any]] ?? []).compactMap(Self.parseTwoRowItem)
+            }
+        }
+        var continuation = Self.findContinuationToken(in: resp)
+        var iterations = 0
+        while let token = continuation, iterations < 4 {
+            iterations += 1
+            do {
+                let more = try await postRaw(.browse, body: ["continuation": token])
+                let gridItems = Parsing.array(more, "continuationContents", "gridContinuation", "items")
+                    ?? Parsing.array(more, "continuationContents", "sectionListContinuation", "contents")
+                    ?? []
+                items += gridItems.compactMap(Self.parseTwoRowItem)
+                continuation = Self.findContinuationToken(in: more)
+            } catch { break }
+        }
+        Log.innertube.debug("sectionMore \(browseId, privacy: .public) items=\(items.count)")
+        return items
+    }
+
     /// Fetch one mood/genre category page — standard carousel shelves
     /// of curated playlists, so parseHomeShelf applies unchanged.
     func browseMoodCategory(params: String) async throws -> [HomeSection] {
@@ -1365,7 +1400,12 @@ final class InnerTubeClient: @unchecked Sendable {
             // Drop items that are just the album's own tracks.
             let filtered = section.items.filter { !trackIds.contains($0.id) }
             guard !filtered.isEmpty else { return nil }
-            return HomeSection(id: section.id, title: section.title, items: filtered)
+            // Rebuild-with-filter must CARRY the shelf's "More" browse
+            // endpoint — dropping it here cost artist Albums/Singles
+            // their full-catalog page.
+            return HomeSection(id: section.id, title: section.title, items: filtered,
+                               moreBrowseId: section.moreBrowseId,
+                               moreParams: section.moreParams)
         }
         Log.innertube.debug("detail browseId=\(browseId, privacy: .public) tracks=\(tracks.count) related=\(relatedSections.count) titles=\(relatedSections.map(\.title), privacy: .public)")
 
@@ -1710,13 +1750,31 @@ final class InnerTubeClient: @unchecked Sendable {
     ///   - `gridRenderer`                   — grid of tiles
     /// Falls back to scanForMediaItems for anything else so we never silently
     /// drop a section.
+    /// Full-catalog "More" endpoint from a carousel header. Artist
+    /// Albums / Singles shelves ship ~10 items inline with the whole
+    /// discography behind `moreContentButton` → MPAD… + params. Only
+    /// MPAD ids are returned — other shelves point "More" at playlists
+    /// (VL…), which open as detail pages, not grids.
+    private static func shelfMoreEndpoint(_ r: [String: Any]) -> (String, String?)? {
+        let ep = Parsing.dig(r, ["header", "musicCarouselShelfBasicHeaderRenderer",
+                                 "moreContentButton", "buttonRenderer",
+                                 "navigationEndpoint", "browseEndpoint"]) as? [String: Any]
+        guard let browseId = ep?["browseId"] as? String, browseId.hasPrefix("MPAD") else { return nil }
+        return (browseId, ep?["params"] as? String)
+    }
+
     static func parseHomeShelf(_ shelf: [String: Any]) -> HomeSection? {
         // Carousel of two-row tiles (Listen again, Mixed for you, …)
         if let r = shelf["musicCarouselShelfRenderer"] as? [String: Any] {
             let title = Parsing.runs(r, "header", "musicCarouselShelfBasicHeaderRenderer", "title") ?? ""
             let contents = r["contents"] as? [[String: Any]] ?? []
             let items = contents.compactMap(parseTwoRowItem)
-            return finalize(title: title, items: items)
+            guard var section = finalize(title: title, items: items) else { return nil }
+            if let (moreId, moreParams) = shelfMoreEndpoint(r) {
+                section.moreBrowseId = moreId
+                section.moreParams = moreParams
+            }
+            return section
         }
         // Immersive carousel (New releases hero strip, etc.)
         if let r = shelf["musicImmersiveCarouselShelfRenderer"] as? [String: Any] {

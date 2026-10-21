@@ -823,7 +823,8 @@ struct DetailView: View {
         let cleaned: [HomeSection] = sections.compactMap { section in
             let named = section.items.filter { !env.displayTitle(for: $0).trimmingCharacters(in: .whitespaces).isEmpty }
             guard !named.isEmpty else { return nil }
-            return HomeSection(id: section.id, title: section.title, items: named)
+            return HomeSection(id: section.id, title: section.title, items: named,
+                               moreBrowseId: section.moreBrowseId, moreParams: section.moreParams)
         }
         return VStack(alignment: .leading, spacing: 24) {
             if !cleaned.isEmpty {
