@@ -129,7 +129,7 @@ struct DetailView: View {
                             .padding(.top, 16)
                     }
                 } else if loading {
-                    DetailSkeleton()
+                    DetailSkeleton(twoColumn: item.kind == .album || item.kind == .playlist)
                 } else if let error {
                     ErrorBanner(message: error) {
                         Task { await load() }
@@ -1330,39 +1330,63 @@ private struct TrackRow: View {
 /// pulsing gently. Mirrors HomeSkeleton so a cold navigation reads as
 /// "loading this page" rather than a bare centered spinner on black.
 private struct DetailSkeleton: View {
+    /// Mirror the REAL layout that will replace this ghost: two-column
+    /// for albums/playlists (centered header card left, rows right),
+    /// the classic hero row for artists/podcasts. A mismatched ghost
+    /// makes the loaded page appear to "jump".
+    var twoColumn: Bool = false
     @State private var pulse = false
     private var fill: Color { Color.white.opacity(pulse ? 0.10 : 0.06) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 24) {
-            HStack(alignment: .top, spacing: 24) {
-                RoundedRectangle(cornerRadius: 14)
-                    .fill(fill)
-                    .frame(width: 220, height: 220)
-                VStack(alignment: .leading, spacing: 12) {
-                    RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 80, height: 11)
-                    RoundedRectangle(cornerRadius: 6).fill(fill).frame(width: 260, height: 30)
-                    RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 180, height: 13)
-                    RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 220, height: 11)
-                }
-                .padding(.top, 6)
-                Spacer()
-            }
-            .padding(.horizontal, 32)
-
-            VStack(spacing: 14) {
-                ForEach(0..<7, id: \.self) { _ in
-                    HStack(spacing: 12) {
-                        RoundedRectangle(cornerRadius: Theme.Radius.row).fill(fill).frame(width: 40, height: 40)
-                        VStack(alignment: .leading, spacing: 6) {
-                            RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 200, height: 12)
-                            RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 120, height: 10)
+        Group {
+            if twoColumn {
+                HStack(alignment: .top, spacing: 0) {
+                    VStack(spacing: 14) {
+                        RoundedRectangle(cornerRadius: 12).fill(fill).frame(width: 272, height: 272)
+                        RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 140, height: 12)
+                        RoundedRectangle(cornerRadius: 6).fill(fill).frame(width: 220, height: 26)
+                        RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 110, height: 11)
+                        HStack(spacing: 14) {
+                            Circle().fill(fill).frame(width: 42, height: 42)
+                            Circle().fill(fill).frame(width: 42, height: 42)
+                            Circle().fill(fill).frame(width: 56, height: 56)
+                            Circle().fill(fill).frame(width: 42, height: 42)
+                            Circle().fill(fill).frame(width: 42, height: 42)
                         }
+                        .padding(.top, 10)
+                    }
+                    .frame(width: 340)
+                    .padding(.leading, 24)
+                    VStack(spacing: 14) {
+                        ForEach(0..<9, id: \.self) { _ in skeletonRow }
+                    }
+                    .padding(.horizontal, 32)
+                    .frame(maxWidth: .infinity)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 24) {
+                    HStack(alignment: .top, spacing: 24) {
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(fill)
+                            .frame(width: 220, height: 220)
+                        VStack(alignment: .leading, spacing: 12) {
+                            RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 80, height: 11)
+                            RoundedRectangle(cornerRadius: 6).fill(fill).frame(width: 260, height: 30)
+                            RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 180, height: 13)
+                            RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 220, height: 11)
+                        }
+                        .padding(.top, 6)
                         Spacer()
                     }
+                    .padding(.horizontal, 32)
+
+                    VStack(spacing: 14) {
+                        ForEach(0..<7, id: \.self) { _ in skeletonRow }
+                    }
+                    .padding(.horizontal, 32)
                 }
             }
-            .padding(.horizontal, 32)
         }
         .onAppear {
             withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
@@ -1370,5 +1394,16 @@ private struct DetailSkeleton: View {
             }
         }
         .accessibilityHidden(true)
+    }
+
+    private var skeletonRow: some View {
+        HStack(spacing: 12) {
+            RoundedRectangle(cornerRadius: Theme.Radius.row).fill(fill).frame(width: 40, height: 40)
+            VStack(alignment: .leading, spacing: 6) {
+                RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 200, height: 12)
+                RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 120, height: 10)
+            }
+            Spacer()
+        }
     }
 }
