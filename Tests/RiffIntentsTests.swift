@@ -45,12 +45,15 @@ final class RiffIntentsTests: XCTestCase {
     // Empty inputs are handled (set-overlap denominator is zero) —
     // they must NOT crash and must NOT report similar.
     func testNamesSimilarHandlesEmptyInputs() {
+        // Identical (even identically empty) strings are equal → similar.
         XCTAssertTrue(OpenStationForIntent.namesAreSimilar("", ""))
-        // Empty contained in non-empty trivially → substring rule fires.
-        // We accept this (an empty seed never reaches this helper in
-        // practice — `perform()` rejects whitespace earlier).
-        XCTAssertTrue(OpenStationForIntent.namesAreSimilar("artist", ""))
-        XCTAssertTrue(OpenStationForIntent.namesAreSimilar("", "artist"))
+        // Mixed empty/non-empty is NOT similar: Swift's
+        // `contains("")` is false, so the substring rule does not
+        // fire, and the token-set guard rejects an empty side. (The
+        // earlier expectation of `true` documented a substring
+        // behavior Swift never had.)
+        XCTAssertFalse(OpenStationForIntent.namesAreSimilar("artist", ""))
+        XCTAssertFalse(OpenStationForIntent.namesAreSimilar("", "artist"))
     }
 
     // Single-character non-letter tokens are stripped — punctuation

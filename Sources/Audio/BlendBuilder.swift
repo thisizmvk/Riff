@@ -193,26 +193,63 @@ enum BlendBuilder {
     ) -> [MediaItem] {
         var remaining = items
         var out: [MediaItem] = []
-        var lastArtist = ""
-        var run = 0
+        var keys: [String] = []
+
+        // Length of the same-artist run that would CONTAIN an element
+        // of `artist` inserted at `idx` (neighbors on both sides).
+        func runLength(insertingAt idx: Int, artist: String) -> Int {
+            var len = 1
+            var i = idx - 1
+            while i >= 0, keys[i] == artist { len += 1; i -= 1 }
+            var j = idx
+            while j < keys.count, keys[j] == artist { len += 1; j += 1 }
+            return len
+        }
+
         while !remaining.isEmpty {
-            var pick = 0
-            if run >= maxRun {
-                // Find the first upcoming item from a different artist.
-                if let alt = remaining.firstIndex(where: { $0.1 != lastArtist }) {
-                    pick = alt
+            // Current same-artist run at the tail of the output.
+            var tailRun = 0
+            if let lastKey = keys.last {
+                for k in keys.reversed() {
+                    if k == lastKey { tailRun += 1 } else { break }
                 }
-                // If every remaining item is the same artist, fall through
-                // and accept the clump — nothing else to interleave.
+            }
+            var pick = 0
+            if tailRun >= maxRun, let lastKey = keys.last {
+                if let alt = remaining.firstIndex(where: { $0.1 != lastKey }) {
+                    // Pull forward the nearest different-artist item.
+                    pick = alt
+                } else {
+                    // Everything left is ONE artist. The old greedy pass
+                    // accepted the clump here, which produced illegal
+                    // runs at the tail even when a legal arrangement
+                    // existed (e.g. the shuffle consumed all of artist B
+                    // early, leaving an A,A,A tail). Weave the item
+                    // BACKWARD into the latest slot that keeps every run
+                    // ≤ maxRun; append as a true clump only when no slot
+                    // exists anywhere.
+                    let (item, artist) = remaining.removeFirst()
+                    var idx = keys.count
+                    var inserted = false
+                    while idx >= 0 {
+                        if runLength(insertingAt: idx, artist: artist) <= maxRun {
+                            out.insert(item, at: idx)
+                            keys.insert(artist, at: idx)
+                            inserted = true
+                            break
+                        }
+                        idx -= 1
+                    }
+                    if !inserted {
+                        out.append(item)
+                        keys.append(artist)
+                    }
+                    continue
+                }
             }
             let (item, artist) = remaining.remove(at: pick)
             out.append(item)
-            if artist == lastArtist {
-                run += 1
-            } else {
-                lastArtist = artist
-                run = 1
-            }
+            keys.append(artist)
         }
         return out
     }

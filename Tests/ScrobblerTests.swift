@@ -151,6 +151,31 @@ final class ScrobblerTests: XCTestCase {
         }
     }
 
+    /// Poll until `condition` holds or the timeout passes. The
+    /// coordinator fires service calls inside `Task {}` hops, and
+    /// `Task.yield()` stopped being enough to drain those on the
+    /// Swift 6.2 runtime (Xcode 27 / CI) — wait on the OBSERVABLE
+    /// effect instead of the scheduler's internals.
+    @MainActor
+    private func eventually(
+        timeout: TimeInterval = 2,
+        _ condition: () -> Bool
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return condition()
+    }
+
+    /// Fixed settle window for NEGATIVE expectations ("this call must
+    /// NOT have fired") — long enough for a stray Task to land.
+    @MainActor
+    private func settle() async {
+        try? await Task.sleep(nanoseconds: 100_000_000)
+    }
+
     @MainActor
     func testCoordinatorFiresNowPlayingOnceAndScrobbleOnceAtThreshold() async {
         let stub = StubService()
@@ -165,10 +190,9 @@ final class ScrobblerTests: XCTestCase {
         // First playing tick: now-playing fires, scrobble doesn't.
         coord.observe(track: track, videoId: "v1", elapsed: 1, duration: 200,
                       isPlaying: true, now: t0)
-        // Allow the Task in observe() a beat to run.
-        await Task.yield()
-        await Task.yield()
-        XCTAssertEqual(stub.nowPlayingCalls.count, 1, "now-playing fires on first eligible tick")
+        // Wait for the Task in observe() to land.
+        let ok1 = await eventually { stub.nowPlayingCalls.count == 1 }
+        XCTAssertTrue(ok1, "now-playing fires on first eligible tick")
         XCTAssertEqual(stub.scrobbleCalls.count, 0, "not yet eligible")
 
         // 49 more ticks, 2 s of wall clock apart ⇒ 98 s LISTENED:
@@ -179,21 +203,20 @@ final class ScrobblerTests: XCTestCase {
             coord.observe(track: track, videoId: "v1", elapsed: Double(i) * 2, duration: 200,
                           isPlaying: true, now: t0.addingTimeInterval(Double(i) * 2))
         }
-        await Task.yield()
+        await settle()
         XCTAssertEqual(stub.nowPlayingCalls.count, 1, "now-playing is once-per-track")
         XCTAssertEqual(stub.scrobbleCalls.count, 0, "98 s listened < 100 s threshold")
 
         // The tick that crosses 100 s listened: scrobble fires.
         coord.observe(track: track, videoId: "v1", elapsed: 100, duration: 200,
                       isPlaying: true, now: t0.addingTimeInterval(100))
-        await Task.yield()
-        await Task.yield()
-        XCTAssertEqual(stub.scrobbleCalls.count, 1)
+        let ok2 = await eventually { stub.scrobbleCalls.count == 1 }
+        XCTAssertTrue(ok2)
 
         // Further ticks don't re-scrobble the same track.
         coord.observe(track: track, videoId: "v1", elapsed: 102, duration: 200,
                       isPlaying: true, now: t0.addingTimeInterval(102))
-        await Task.yield()
+        await settle()
         XCTAssertEqual(stub.scrobbleCalls.count, 1, "scrobble is once-per-track")
     }
 
@@ -211,9 +234,9 @@ final class ScrobblerTests: XCTestCase {
                       isPlaying: true, now: t0)
         coord.observe(track: track, videoId: "v1", elapsed: 151, duration: 200,
                       isPlaying: true, now: t0.addingTimeInterval(1))
-        await Task.yield()
-        await Task.yield()
-        XCTAssertEqual(stub.nowPlayingCalls.count, 1)
+        let ok3 = await eventually { stub.nowPlayingCalls.count == 1 }
+        XCTAssertTrue(ok3)
+        await settle()
         XCTAssertEqual(stub.scrobbleCalls.count, 0,
                        "position 150 s but only ~1 s listened — no scrobble")
     }
@@ -245,22 +268,22 @@ final class ScrobblerTests: XCTestCase {
             coord.observe(track: t1, videoId: "v1", elapsed: Double(i) * 2, duration: 200,
                           isPlaying: true, now: t0.addingTimeInterval(Double(i) * 2))
         }
-        await Task.yield(); await Task.yield()
-        XCTAssertEqual(stub.scrobbleCalls.count, 1)
+        let ok4 = await eventually { stub.scrobbleCalls.count == 1 }
+        XCTAssertTrue(ok4)
         // Switch to a new videoId — now-playing and scrobble both
         // become available again, and the listened window restarts
         // from zero.
         let s0 = t0.addingTimeInterval(200)
         coord.observe(track: t2, videoId: "v2", elapsed: 1, duration: 200,
                       isPlaying: true, now: s0)
-        await Task.yield(); await Task.yield()
-        XCTAssertEqual(stub.nowPlayingCalls.count, 2)
+        let ok5 = await eventually { stub.nowPlayingCalls.count == 2 }
+        XCTAssertTrue(ok5)
         for i in 1...50 {
             coord.observe(track: t2, videoId: "v2", elapsed: Double(i) * 2, duration: 200,
                           isPlaying: true, now: s0.addingTimeInterval(Double(i) * 2))
         }
-        await Task.yield(); await Task.yield()
-        XCTAssertEqual(stub.scrobbleCalls.count, 2)
+        let ok6 = await eventually { stub.scrobbleCalls.count == 2 }
+        XCTAssertTrue(ok6)
     }
 
     @MainActor
@@ -288,14 +311,14 @@ final class ScrobblerTests: XCTestCase {
         let coord = ScrobblerCoordinator(services: [stub])
         let track = ScrobbleTrack(artist: "A", title: "T", album: nil, durationSeconds: 200, startedAt: Date())
         coord.observe(track: track, videoId: "v1", elapsed: 5, duration: 200, isPlaying: true)
-        await Task.yield()
-        XCTAssertEqual(stub.nowPlayingCalls.count, 1)
+        let ok7 = await eventually { stub.nowPlayingCalls.count == 1 }
+        XCTAssertTrue(ok7)
         // Reset → same track now becomes "fresh" again, fires
         // now-playing a second time.
         coord.reset()
         coord.observe(track: track, videoId: "v1", elapsed: 5, duration: 200, isPlaying: true)
-        await Task.yield()
-        XCTAssertEqual(stub.nowPlayingCalls.count, 2)
+        let ok8 = await eventually { stub.nowPlayingCalls.count == 2 }
+        XCTAssertTrue(ok8)
     }
 
     // MARK: - Form encoding

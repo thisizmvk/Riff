@@ -59,8 +59,20 @@ final class QueueManagerTests: XCTestCase {
         let q = makeQueue()
         q.replaceQueue([item("a")])
         q.addToEnd(item("b"))
-        q.addToEnd(item("a"))   // duplicate — must be a no-op
-        XCTAssertEqual(q.upNext.map(\.id), ["a", "b"])
+        // Region design (docs/QUEUE-DESIGN.md): user-queued items live
+        // in the USER region, which sits AHEAD of server/radio rows —
+        // so "b" lands before the server-provided "a".
+        XCTAssertEqual(q.upNext.map(\.id), ["b", "a"])
+        // Duplicate of a SERVER row: promoted into the user region
+        // (removed from the server slot, queued at the user-region
+        // end) rather than duplicated.
+        q.addToEnd(item("a"))
+        XCTAssertEqual(q.upNext.map(\.id), ["b", "a"])
+        XCTAssertEqual(q.userQueueCount, 2)
+        // Duplicate of a USER row is a strict no-op.
+        q.addToEnd(item("b"))
+        XCTAssertEqual(q.upNext.map(\.id), ["b", "a"])
+        XCTAssertEqual(q.userQueueCount, 2)
     }
 
     func testRemoveByVideoId() {
