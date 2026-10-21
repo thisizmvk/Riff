@@ -249,7 +249,7 @@ final class LyricsTranslator {
     /// outputs are padded with empty entries, longer outputs are
     /// truncated. This keeps the per-line renderer's index alignment
     /// stable even when the model drops or doubles up a line.
-    static func parse(_ raw: String, expectedCount: Int) throws -> [TranslatedLine] {
+    nonisolated static func parse(_ raw: String, expectedCount: Int) throws -> [TranslatedLine] {
         try parseDetailed(raw, expectedCount: expectedCount).lines
     }
 
@@ -257,7 +257,7 @@ final class LyricsTranslator {
     /// mid-array (output budget hit) keeps every element that finished
     /// before the cut — padded like any short reply — and reports
     /// `complete == false`, instead of failing the whole translation.
-    static func parseDetailed(
+    nonisolated static func parseDetailed(
         _ raw: String,
         expectedCount: Int
     ) throws -> (lines: [TranslatedLine], complete: Bool) {
@@ -319,7 +319,7 @@ final class LyricsTranslator {
     /// language tag). Mirrors the QueueBuilder helper — duplicated
     /// rather than shared so the two AI flows can evolve their
     /// parsing independently.
-    static func stripFences(_ raw: String) -> String {
+    nonisolated static func stripFences(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if s.hasPrefix("```") {
             if let nl = s.firstIndex(of: "\n") {
@@ -336,7 +336,7 @@ final class LyricsTranslator {
 
     /// First balanced top-level JSON array. String-aware so brackets
     /// inside `"..."` don't fool the depth tracker.
-    static func extractJSONArray(_ s: String) -> String? {
+    nonisolated static func extractJSONArray(_ s: String) -> String? {
         guard let startIdx = s.firstIndex(of: "[") else { return nil }
         var depth = 0
         var inString = false
@@ -372,7 +372,7 @@ final class LyricsTranslator {
     /// String-aware like `extractJSONArray`, and counts `{}` as well as
     /// `[]` so only a brace/bracket returning to the array's own level
     /// (or a bare string closing there) marks an element's end.
-    static func salvageTruncatedJSONArray(_ s: String) -> String? {
+    nonisolated static func salvageTruncatedJSONArray(_ s: String) -> String? {
         guard let startIdx = s.firstIndex(of: "[") else { return nil }
         var depth = 0
         var inString = false

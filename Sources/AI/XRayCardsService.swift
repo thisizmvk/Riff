@@ -192,7 +192,7 @@ final class XRayCardsService {
     /// silently coerce malformed rows to safe defaults rather than
     /// throwing on a single bad object, so a partial response still
     /// renders the cards that parsed cleanly.
-    static func parse(_ raw: String) throws -> [Card] {
+    nonisolated static func parse(_ raw: String) throws -> [Card] {
         let stripped = stripFences(raw)
         guard let slice = extractJSONArray(stripped) else {
             throw ParseError.noJSONArray
@@ -224,7 +224,7 @@ final class XRayCardsService {
     /// Strip leading / trailing ``` fences (with or without a `json`
     /// language tag). Duplicated from `LyricsTranslator` rather than
     /// shared so the two AI flows can evolve independently.
-    static func stripFences(_ raw: String) -> String {
+    nonisolated static func stripFences(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if s.hasPrefix("```") {
             if let nl = s.firstIndex(of: "\n") {
@@ -241,7 +241,7 @@ final class XRayCardsService {
 
     /// First balanced top-level JSON array. String-aware so brackets
     /// inside `"..."` don't fool the depth tracker.
-    static func extractJSONArray(_ s: String) -> String? {
+    nonisolated static func extractJSONArray(_ s: String) -> String? {
         guard let startIdx = s.firstIndex(of: "[") else { return nil }
         var depth = 0
         var inString = false

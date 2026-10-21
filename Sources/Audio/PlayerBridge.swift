@@ -2352,7 +2352,7 @@ final class PlayerBridge {
     /// bridge on every change and on every page reload.
     private(set) var crossfadeSeconds: Double = 0
     static let crossfadePresets: [Double] = [0, 2, 4, 6, 8]
-    static func clampCrossfade(_ raw: Double) -> Double {
+    nonisolated static func clampCrossfade(_ raw: Double) -> Double {
         // Snap to nearest supported preset rather than clamp to a
         // continuous range — settings UI only offers the discrete
         // presets, and we never want a corrupted plist to leave us
