@@ -331,7 +331,17 @@ private struct TransportMenuItems: View {
 
         Button("Cycle Repeat") {
             guard let env else { return }
-            Task { await env.player.toggleRepeat() }
+            Task {
+                await env.player.toggleRepeat()
+                // Repeat mode silently persisting across launches made a
+                // looping album read as a queue bug ("the album repeated
+                // again") — say what mode the press landed on.
+                switch env.player.repeatMode {
+                case .off: env.showToast("Repeat off")
+                case .all: env.showToast("Repeat all — the queue loops when it ends")
+                case .one: env.showToast("Repeat one — this song loops")
+                }
+            }
         }
         .keyboardShortcut("R", modifiers: [.command, .shift])
     }

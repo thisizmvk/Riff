@@ -526,7 +526,16 @@ struct NowPlayingView: View {
                 help: env.player.repeatMode == .one ? "Repeat one"
                     : env.player.repeatMode == .all ? "Repeat all" : "Repeat"
             ) {
-                Task { await env.player.toggleRepeat() }
+                Task {
+                    await env.player.toggleRepeat()
+                    // Mode feedback — a silently-persisting Repeat All
+                    // made a looping album read as a queue bug.
+                    switch env.player.repeatMode {
+                    case .off: env.showToast("Repeat off")
+                    case .all: env.showToast("Repeat all — the queue loops when it ends")
+                    case .one: env.showToast("Repeat one — this song loops")
+                    }
+                }
             }
         }
     }
