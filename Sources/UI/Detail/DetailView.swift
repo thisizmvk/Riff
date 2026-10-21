@@ -361,7 +361,11 @@ struct DetailView: View {
             return true
         }
         if kept.isEmpty {
-            if let derived = albumArtistFallback(page: page), !derived.isEmpty {
+            // Guard the fallback with the same rules as the runs above:
+            // a bare year is not an artist (playlist headers whose only
+            // run is "2026" rendered the YEAR as the artist line).
+            if let derived = albumArtistFallback(page: page), !derived.isEmpty,
+               Int(derived.trimmingCharacters(in: .whitespaces)) == nil {
                 Text(derived).foregroundStyle(Theme.Text.secondary)
             }
             // else: render nothing — the title + meta lines carry the page.
@@ -389,9 +393,13 @@ struct DetailView: View {
         }
     }
 
-    /// "Album • 2026" (year only when any track carried one).
+    /// "Album • 2026" — year from any track, else from a bare-year
+    /// header subtitle run (playlists often carry it only there).
     private func kindYearLine(_ page: InnerTubeClient.DetailPage) -> String {
-        if let y = page.tracks.compactMap(\.year).first {
+        let headerYear = page.subtitleRuns
+            .compactMap { Int($0.text.trimmingCharacters(in: .whitespaces)) }
+            .first { (1900...2099).contains($0) }
+        if let y = page.tracks.compactMap(\.year).first ?? headerYear {
             return "\(kindLabel) • \(y)"
         }
         return kindLabel
