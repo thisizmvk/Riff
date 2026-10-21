@@ -331,18 +331,29 @@ final class MiniPlayerPanelController {
 }
 
 extension URL {
-    /// Request a larger square variant of a YouTube / Google artwork URL.
-    /// These hosts carry a size segment after the last `=`
-    /// (e.g. `…=w120-h120-l90-rj`); rewriting it to `size` yields a crisp
-    /// image when the artwork is shown large (the mini-player tile, the
-    /// now-playing hero). URLs without that segment, or from other hosts,
-    /// are returned unchanged.
+    /// Request a larger square variant of a Google-hosted artwork URL.
+    /// googleusercontent/ggpht carry a size segment after the last `=`
+    /// (`…=w120-h120-l90-rj`, `…=s288-…`); rewriting it to `size` yields
+    /// a crisp image when the artwork is shown large. URLs without a
+    /// genuine size segment are returned unchanged.
+    ///
+    /// ytimg is deliberately NOT rewritten: its thumbnails are
+    /// path-based with query params (`hqdefault.jpg?sqp=…&rs=AOn4…`),
+    /// and treating the query's last `=` as a size segment corrupted
+    /// the URL — podcast/episode tiles (mostly ytimg) rendered blank.
     func upscaledArtwork(to size: Int) -> URL {
         let s = absoluteString
         guard s.contains("googleusercontent.com")
-                || s.contains("ggpht.com")
-                || s.contains("ytimg.com") else { return self }
-        guard let eq = s.lastIndex(of: "="), !s[s.index(after: eq)...].contains("/") else { return self }
+                || s.contains("ggpht.com") else { return self }
+        // The `=` must start a real trailing size segment: nothing
+        // after it may be a path separator, nothing before it may be a
+        // query, and it must begin like a size spec (w/h/s + digit).
+        guard let eq = s.lastIndex(of: "="),
+              !s[s.index(after: eq)...].contains("/"),
+              !s[..<eq].contains("?") else { return self }
+        let tail = s[s.index(after: eq)...]
+        guard let first = tail.first, "whs".contains(first),
+              tail.dropFirst().first?.isNumber == true else { return self }
         let base = String(s[..<eq])
         return URL(string: "\(base)=w\(size)-h\(size)-l90-rj") ?? self
     }
