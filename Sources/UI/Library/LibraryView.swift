@@ -6,6 +6,11 @@ struct LibraryView: View {
     @State private var sort: SortOrder = .recentlyAdded
     @State private var filterText: String = ""
     @State private var items: [MediaItem] = []
+    /// The section `items` currently belongs to. On a switch, the old
+    /// section's items must not stay on screen under the new tab's
+    /// label while its fetch is in flight (Podcasts showed Liked songs
+    /// for ~2 s) — they're cleared so the skeleton shows instead.
+    @State private var itemsSection: Section? = nil
     @State private var mixedForYou: [HomeSection] = []
     /// D3 — "New from artists you follow". Bandcamp-inspired
     /// chronological release feed. Only fetched when the user is on
@@ -373,6 +378,10 @@ struct LibraryView: View {
             // menu. Recently-added is always the safe fallback.
             if !availableSorts.contains(sort) {
                 sort = .recentlyAdded
+            }
+            if itemsSection != section {
+                items = []
+                itemsSection = section
             }
             await load()
         }

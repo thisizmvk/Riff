@@ -892,9 +892,23 @@ struct SearchView: View {
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
         var current = UserDefaults.standard.stringArray(forKey: recentSearchesKey) ?? []
-        // Case-insensitive dedupe: drop any prior entry that
-        // matches the incoming query.
-        current.removeAll { $0.lowercased() == trimmed.lowercased() }
+        let needle = trimmed.lowercased()
+        // Case-insensitive dedupe, plus prefix collapse: search runs as
+        // you type, so every debounced pause that returned results was
+        // being remembered — recents filled with fragments ("sai ab"
+        // beside "sai abhyankar", "lenin" beside "lenin ost"). An older
+        // entry that's a prefix of the new query was the user typing
+        // toward it; drop it.
+        current.removeAll { prior in
+            let p = prior.lowercased()
+            return p == needle || needle.hasPrefix(p)
+        }
+        // And the reverse: if the new query is a prefix of the most
+        // recent entry (backspacing out of a finished search), keep the
+        // finished one rather than recording the fragment.
+        if let latest = current.first?.lowercased(), latest.hasPrefix(needle) {
+            return
+        }
         current.insert(trimmed, at: 0)
         if current.count > recentSearchesLimit {
             current.removeLast(current.count - recentSearchesLimit)
@@ -903,7 +917,17 @@ struct SearchView: View {
     }
 
     static func loadRecentSearches() -> [String] {
-        UserDefaults.standard.stringArray(forKey: recentSearchesKey) ?? []
+        let stored = UserDefaults.standard.stringArray(forKey: recentSearchesKey) ?? []
+        // Collapse fragments saved before prefix-collapse existed: an
+        // entry that's a proper prefix of another entry ("sai ab" vs
+        // "sai abhyankar") is a typing artifact, not a search.
+        let lowered = stored.map { $0.lowercased() }
+        return stored.enumerated().filter { idx, _ in
+            let me = lowered[idx]
+            return !lowered.enumerated().contains { other, them in
+                other != idx && them.count > me.count && them.hasPrefix(me)
+            }
+        }.map(\.element)
     }
 
     static func clearRecentSearches() {

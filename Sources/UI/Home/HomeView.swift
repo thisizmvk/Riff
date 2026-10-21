@@ -185,7 +185,10 @@ struct HomeView: View {
         PersonalizedShelves.topArtists(from: env.player.playedEntries).map(\.id).joined(separator: ",")
     }
 
-    private static let portraitCacheKey = "home.artistPortraits"
+    // v2: v1 cached the artist page's wide header BANNER (w2880-h1200),
+    // which cropped into the circle as promo art (Thaman S showed a
+    // "Bollywood Rage Mode" poster). v2 holds square search avatars.
+    private static let portraitCacheKey = "home.artistPortraits.v2"
     private static func loadPortraitCache() -> [String: URL] {
         guard let raw = UserDefaults.standard.dictionary(forKey: portraitCacheKey) as? [String: String] else { return [:] }
         return raw.compactMapValues(URL.init(string:))
@@ -193,13 +196,17 @@ struct HomeView: View {
 
     private func loadPortraits() async {
         let missing = PersonalizedShelves.topArtists(from: env.player.playedEntries)
-            .map(\.id)
-            .filter { portraits[$0] == nil && $0.hasPrefix("UC") }
+            .filter { portraits[$0.id] == nil && $0.id.hasPrefix("UC") }
         guard !missing.isEmpty else { return }
-        for id in missing {
-            guard let page = try? await env.innerTube.detail(forBrowseId: id),
-                  let url = page.artworkURL else { continue }
-            portraits[id] = url
+        for artist in missing {
+            // The square avatar YT uses for artist circles lives on the
+            // artist's SEARCH result, not the artist page (whose header
+            // carries only a wide banner). Match by channel id so a
+            // same-named artist can't donate their face.
+            guard let hits = try? await env.innerTube.search(query: artist.title, filter: .artists),
+                  let match = hits.first(where: { $0.id == artist.id }),
+                  let url = match.thumbnailURL else { continue }
+            portraits[artist.id] = url
         }
         let raw = portraits.mapValues(\.absoluteString)
         UserDefaults.standard.set(raw, forKey: Self.portraitCacheKey)

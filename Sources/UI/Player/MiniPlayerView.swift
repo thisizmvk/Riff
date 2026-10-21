@@ -73,13 +73,18 @@ struct MiniPlayerView: View {
                 // Monospaced so the digits don't jitter as they tick;
                 // elapsed brighter than total so the eye lands on "where
                 // am I" first.
-                if track != nil, env.player.duration > 0 {
+                // Falls back to the track's own duration: after a relaunch
+                // the restored track sits paused and the live `duration`
+                // stays 0 until the page loads it, which hid the readout
+                // entirely ("is anything even loaded?").
+                let total = env.player.duration > 0 ? env.player.duration : (track?.duration ?? 0)
+                if track != nil, total > 0 {
                     HStack(spacing: 4) {
                         Text(Self.clock(env.player.elapsed))
                             .foregroundStyle(Theme.Text.secondary)
                         Text("/")
                             .foregroundStyle(Theme.Text.tertiary)
-                        Text(Self.clock(env.player.duration))
+                        Text(Self.clock(total))
                             .foregroundStyle(Theme.Text.tertiary)
                     }
                     .font(.system(size: 11, design: .monospaced))

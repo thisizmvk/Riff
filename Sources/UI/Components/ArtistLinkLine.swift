@@ -50,22 +50,31 @@ struct ArtistLinkLine: View {
     }
 
     var body: some View {
+        // Layout priority falls left to right: under width pressure the
+        // FIRST names keep their full text and truncation eats the tail.
+        // With equal priorities SwiftUI shrank every name at once
+        // ("Armaa…, Jakes… & Sanare"), which read as garbled data.
         HStack(spacing: 0) {
             ForEach(segments) { seg in
-                if seg.id > 0 { plain(" • ") }
+                let base = Double(1000 - seg.id * 100)
+                if seg.id > 0 { plain(" • ").layoutPriority(base) }
                 if seg.isArtistRun {
                     let names = Self.artistNames(in: seg.text)
                     ForEach(Array(names.enumerated()), id: \.offset) { idx, name in
-                        if idx > 0 { plain(idx == names.count - 1 ? " & " : ", ") }
+                        let p = base - Double(idx * 2)
+                        if idx > 0 {
+                            plain(idx == names.count - 1 ? " & " : ", ").layoutPriority(p)
+                        }
                         ArtistNameLink(
                             name: name,
                             artistId: idx == 0 ? primaryArtistId : nil,
                             fontSize: fontSize,
                             baseOpacity: baseOpacity
                         )
+                        .layoutPriority(p - 1)
                     }
                 } else {
-                    plain(seg.text)
+                    plain(seg.text).layoutPriority(base - 50)
                 }
             }
         }
