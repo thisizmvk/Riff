@@ -242,9 +242,12 @@ final class AppEnvironment {
         didSet {
             UserDefaults.standard.set(trackNotificationsEnabled, forKey: Self.trackNotificationsKey)
             if trackNotificationsEnabled {
-                UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { granted, _ in
+                // weak on the OUTER closure too — a weak-only inner Task
+                // still forced a strong implicit capture at this level
+                // (and a Swift-6 warning about the mismatch).
+                UNUserNotificationCenter.current().requestAuthorization(options: [.alert]) { [weak self] granted, _ in
                     if !granted {
-                        Task { @MainActor [weak self] in
+                        Task { @MainActor in
                             self?.trackNotificationsEnabled = false
                             self?.showToast("Notifications are off in System Settings")
                         }
@@ -997,7 +1000,9 @@ final class AppEnvironment {
             queue: .main
         ) { [player] _ in
             MainActor.assumeIsolated {
-                Task { await player.setBackgrounded(true) }
+                // `_ =` so assumeIsolated's result (the Task) is
+                // explicitly discarded — Swift 6 warns otherwise.
+                _ = Task { await player.setBackgrounded(true) }
             }
         }
         NotificationCenter.default.addObserver(
@@ -1012,7 +1017,7 @@ final class AppEnvironment {
                 // and this flips the UI back to signed-out (showing
                 // the Sign In button) instead of leaving a dead
                 // avatar in the corner.
-                Task { [weak self] in
+                _ = Task { [weak self] in
                     // Re-bridge rotated WebView cookies before judging.
                     await CookieJar.syncFromWebView()
                     self?.refreshSignedInState()
