@@ -50,9 +50,10 @@ What works today:
 
 | | |
 |---|---|
-| ![Home](docs/screenshots/home.png) *Home — personalized rails, mood chips, Riff Blend* | ![Album](docs/screenshots/album.png) *Album pages — YT Music web layout, native SwiftUI* |
-| ![Explore](docs/screenshots/explore.png) *Explore — charts, moods & genres* | ![Mood category](docs/screenshots/mood-category.png) *Mood category pages* |
-| ![Library](docs/screenshots/library.png) *Library — liked songs, playlists, albums* | <img src="docs/screenshots/mini-player.png" width="300" alt="Mini Player"> *Floating Mini Player — stays on top, even over full-screen apps* |
+| ![Home](docs/screenshots/home.png) *Home — personalized rails, mood chips, Riff Blend* | ![Now Playing](docs/screenshots/now-playing.png) *Now Playing — queue, lyrics, related, Autoplay* |
+| ![Album](docs/screenshots/album.png) *Album pages — native SwiftUI, global play counts* | ![Explore](docs/screenshots/explore.png) *Explore — charts, moods & genres* |
+| ![Mood category](docs/screenshots/mood-category.png) *Mood category pages* | ![Library](docs/screenshots/library.png) *Library — liked songs, playlists, albums* |
+| <img src="docs/screenshots/mini-player.png" width="300" alt="Mini Player"> *Floating Mini Player — stays on top, even over full-screen apps* | |
 
 *Screenshots are captured by the maintainer from a signed-in build (they contain a personal library, so they're not generated in CI).*
 
