@@ -1005,7 +1005,12 @@ struct DetailView: View {
             artistId: track.artistId,
             setVideoId: track.setVideoId,
             durationSeconds: track.durationSeconds,
-            year: track.year
+            year: track.year,
+            // Album rows ALWAYS take this path (YT omits per-track
+            // artwork on album pages), so forgetting a field here
+            // erases it from every album row — playsText vanished
+            // exactly this way. Carry everything through.
+            playsText: track.playsText
         )
     }
 
