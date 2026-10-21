@@ -1,22 +1,17 @@
 import SwiftUI
 import AppKit
 
-/// User-facing OAuth credential setup. Shown when:
-/// 1. The user explicitly opens it from the menu bar / account menu, or
-/// 2. They tap a Library section while signed in with default credentials
-///    (which can't reach Data API v3).
+/// App settings: account (sign-in / sign-out / cookie import),
+/// playback, scrobbling, interface, AI backends, diagnostics.
 ///
-/// The default `client_id` we ship is the public YouTube TV one, which
-/// works for sign-in but its GCP project doesn't have Data API v3
-/// enabled — so Library calls 403. Pasting their own credentials here
-/// fixes that.
+/// The old "Library access (advanced)" custom-OAuth-client section was
+/// removed: it had no Device-Flow entry point left to use the
+/// credentials, stored the client secret in cleartext UserDefaults and
+/// echoed it back into the field, and its "Save & sign out" discarded
+/// the working cookie session.
 struct SettingsView: View {
     @Environment(AppEnvironment.self) private var env
     @Environment(\.dismiss) private var dismiss
-
-    @State private var clientId: String = ""
-    @State private var clientSecret: String = ""
-    @State private var saved = false
 
     // MARK: - AI features state
     /// Buffer for the Anthropic API key. We load whatever is in
@@ -28,6 +23,13 @@ struct SettingsView: View {
     @State private var aiSaveStatus: String? = nil
     @State private var aiTestResult: TestResult? = nil
     @State private var aiTestInFlight: Bool = false
+
+    // Groq + Ollama buffers. Loaded on appear; cleared after Save.
+    @State private var activeProvider: LLMProviderKind = .anthropic
+    @State private var groqAPIKey: String = ""
+    @State private var groqModel: String = GroqProvider.defaultModel
+    @State private var ollamaBaseURL: String = OllamaProvider.defaultBaseURL.absoluteString
+    @State private var ollamaModel: String = OllamaProvider.defaultModel
 
     /// Buffer for the lyrics-translation language picker. The picker
     /// selection lives on `env.translationLanguage` (persisted); this
@@ -52,12 +54,38 @@ struct SettingsView: View {
     @State private var lastFmSessionKeyBuffer: String = ""
     @State private var lastFmEnabled: Bool = false
     @State private var lastFmStatus: String? = nil
+    /// In-app connect flow (fetchToken → browser approve →
+    /// fetchSession). The pending token survives the browser round
+    /// trip; "Done — I approved it" shows only while it is non-nil.
+    @State private var lastFmPendingToken: String? = nil
+    @State private var lastFmConnectInFlight: Bool = false
+    /// Discloses the manual username + session-key paste fallback.
+    @State private var lastFmShowAdvanced: Bool = false
+    /// Display-only username shown next to the section title once
+    /// credentials exist (mirrors the ListenBrainz "• name" pattern).
+    @State private var lastFmConnectedUsername: String? = nil
 
     @State private var listenBrainzTokenBuffer: String = ""
     @State private var listenBrainzEnabled: Bool = false
     @State private var listenBrainzUsername: String? = nil
     @State private var listenBrainzStatus: String? = nil
     @State private var listenBrainzTestInFlight: Bool = false
+
+    @State private var diagnosticsExporting: Bool = false
+    @State private var diagnosticsStatus: String? = nil
+
+    /// Confirmation shown after "Clear caches" runs. Cleared each time
+    /// Settings reopens (it's `@State`), so it never goes stale.
+    @State private var clearCachesStatus: String? = nil
+
+    /// Confirms "Clear all overrides" — action is destructive and
+    /// affects every locally-edited track title/artist/album.
+    @State private var confirmClearOverrides: Bool = false
+
+    // Cookie-import (advanced sign-in) state.
+    @State private var showCookieImport: Bool = false
+    @State private var cookiePasteBuffer: String = ""
+    @State private var cookieImportStatus: String? = nil
 
     enum TestResult: Equatable {
         case success
@@ -67,6 +95,11 @@ struct SettingsView: View {
     /// (Device-Flow path only — see UserInfoService for the rationale).
     /// Nil while loading or for cookie-based sessions.
     @State private var accountEmail: String? = nil
+    /// Account name + handle from InnerTube account_menu — the source
+    /// that works for cookie-import sessions (accountEmail only
+    /// populates for OAuth Device-Flow sign-ins).
+    @State private var accountName: String? = nil
+    @State private var accountHandle: String? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -94,8 +127,6 @@ struct SettingsView: View {
                     Divider().background(Theme.divider)
                     interfaceSection
                     Divider().background(Theme.divider)
-                    libraryAccessSection
-                    Divider().background(Theme.divider)
                     aiFeaturesSection
                     if !env.blockedArtistIds.isEmpty {
                         Divider().background(Theme.divider)
@@ -106,6 +137,10 @@ struct SettingsView: View {
                         trackOverridesSection
                     }
                     Divider().background(Theme.divider)
+                    storageSection
+                    Divider().background(Theme.divider)
+                    diagnosticsSection
+                    Divider().background(Theme.divider)
                     aboutSection
                 }
                 .padding(28)
@@ -113,11 +148,6 @@ struct SettingsView: View {
         }
         .frame(minWidth: 540, minHeight: 620)
         .onAppear {
-            let config = OAuthClientConfig.load()
-            if config.isCustom {
-                clientId = config.clientId
-                clientSecret = config.clientSecret
-            }
             // Load AI features state from Keychain. Show a masked
             // placeholder if a key is already saved — never echo the
             // raw key back into the SecureField, even though SwiftUI
@@ -126,6 +156,13 @@ struct SettingsView: View {
                 anthropicAPIKey = "" // empty buffer; placeholder hints "already saved"
             }
             anthropicModel = AnthropicProvider.storedModel()
+            // AI backend + per-provider settings — mirror stored
+            // state into the on-screen buffers. Secrets stay empty
+            // (never echo a saved key back into the SecureField).
+            activeProvider = LLMProviderKind.active
+            groqModel = GroqProvider.storedModel()
+            ollamaBaseURL = OllamaProvider.storedBaseURL().absoluteString
+            ollamaModel = OllamaProvider.storedModel()
             // Scrobbling: load enabled toggles + cached usernames so
             // the section renders the user's existing state. Secrets
             // stay in Keychain; buffers stay empty (we never echo a
@@ -133,6 +170,7 @@ struct SettingsView: View {
             lastFmEnabled = UserDefaults.standard.bool(forKey: ScrobblerDefaults.lastFmEnabled)
             if let stored = LastFmScrobbler.storedCredentials() {
                 lastFmUsernameBuffer = stored.username
+                lastFmConnectedUsername = stored.username
             }
             listenBrainzEnabled = UserDefaults.standard.bool(forKey: ScrobblerDefaults.listenBrainzEnabled)
             listenBrainzUsername = UserDefaults.standard.string(forKey: ScrobblerDefaults.listenBrainzUsername)
@@ -143,6 +181,15 @@ struct SettingsView: View {
             // userinfo with). Cached so reopening Settings doesn't
             // re-hit the network.
             if env.isSignedIn {
+                // account_menu (works for cookie sessions) first;
+                // OAuth email as a supplement for Device-Flow.
+                let info = await env.innerTube.fetchAccountInfo()
+                accountName = info?.name
+                accountHandle = info?.handle
+                // No account header while "signed in" is the dead-session
+                // fingerprint — let the liveness probe flip the state
+                // rather than showing a generic "Signed in" line.
+                if info == nil { env.probeSessionLiveness(force: true) }
                 accountEmail = await UserInfoService.emailIfAvailable()
             }
         }
@@ -155,7 +202,7 @@ struct SettingsView: View {
             sectionTitle("Account")
             HStack(spacing: 14) {
                 Circle()
-                    .fill(env.isSignedIn ? Theme.red : Color.white.opacity(0.1))
+                    .fill(env.isSignedIn ? Theme.red : Theme.Fill.medium)
                     .frame(width: 36, height: 36)
                     .overlay(
                         Image(systemName: env.isSignedIn ? "person.fill" : "person")
@@ -163,22 +210,24 @@ struct SettingsView: View {
                             .foregroundStyle(.white)
                     )
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(env.isSignedIn ? "Signed in to YouTube Music" : "Not signed in")
+                    // Prefer the real account display name (works for
+                    // cookie sessions via account_menu); fall back to
+                    // the generic line.
+                    Text(env.isSignedIn ? (accountName ?? "Signed in to YouTube Music") : "Not signed in")
                         .font(.system(size: 13, weight: .semibold))
-                    if let email = accountEmail, env.isSignedIn {
-                        // Real account email — only available when the
-                        // user came in via OAuth Device Flow. Cookie
-                        // sessions skip this.
-                        Text(email)
+                    if env.isSignedIn, let handle = accountHandle ?? accountEmail {
+                        // Channel handle (@name) from account_menu, or
+                        // the OAuth email when that path was used.
+                        Text(handle)
                             .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.85))
+                            .foregroundStyle(Theme.Text.secondary)
                             .textSelection(.enabled)
                     }
                     Text(env.isSignedIn
                          ? "Library + personalized recommendations are available."
                          : "Anonymous browse + click-to-play work; sign in for Library access.")
                         .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.65))
+                        .foregroundStyle(Theme.Text.secondary)
                 }
                 Spacer()
                 if env.isSignedIn {
@@ -197,6 +246,99 @@ struct SettingsView: View {
                     .tint(Theme.red)
                 }
             }
+
+            // Cookie import — the free-account / passkey-friendly
+            // path. Only offered when signed out (no point pasting a
+            // session over a live one). See CookieJar.importPastedCookies.
+            if !env.isSignedIn {
+                cookieImportBlock
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var cookieImportBlock: some View {
+        DisclosureGroup(isExpanded: $showCookieImport) {
+            VStack(alignment: .leading, spacing: 10) {
+                stepRow(n: 1, title: "Sign in to music.youtube.com in your normal browser (Safari/Chrome). Passkeys, password managers, and 2FA all work there.") { EmptyView() }
+                stepRow(n: 2, title: "Open developer tools (⌥⌘I) on that tab, go to the Console, and run this one-liner:") {
+                    HStack(spacing: 8) {
+                        Text("document.cookie")
+                            .font(.system(size: 11, design: .monospaced))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.black.opacity(0.4))
+                            .clipShape(RoundedRectangle(cornerRadius: 4))
+                            .textSelection(.enabled)
+                        Button {
+                            let pb = NSPasteboard.general
+                            pb.clearContents()
+                            pb.setString("document.cookie", forType: .string)
+                            cookieImportStatus = "Copied — paste into the browser console."
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(Theme.red)
+                        .help("Copy the console command")
+                    }
+                }
+                stepRow(n: 3, title: "Copy the whole NAME=VALUE; … line it prints, paste it below, and hit Import. (SAPISID is included — that's the one that matters.)") { EmptyView() }
+
+                TextEditor(text: $cookiePasteBuffer)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(height: 72)
+                    .overlay(RoundedRectangle(cornerRadius: Theme.Radius.thumb).strokeBorder(Theme.Fill.strong))
+
+                HStack {
+                    Button("Import cookies") { importCookies() }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Theme.red)
+                        .disabled(cookiePasteBuffer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Spacer()
+                    if let status = cookieImportStatus {
+                        Text(status)
+                            .font(.system(size: 12))
+                            .foregroundStyle(status.hasPrefix("Imported") ? .green : .orange)
+                            .lineLimit(2)
+                    }
+                }
+                Text("Riff never sees your password — only the resulting session cookies, kept in Riff's private, sandboxed cookie store on this Mac (not the Keychain) and deleted when you sign out. This is the recommended path if passkey / 2FA won't complete in the in-app window.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Text.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 6)
+        } label: {
+            Text("Sign in by pasting browser cookies (advanced)")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Theme.Text.secondary)
+        }
+    }
+
+    private func importCookies() {
+        let raw = cookiePasteBuffer
+        Task {
+            let result = await CookieJar.importPastedCookies(raw)
+            await MainActor.run {
+                switch result {
+                case .success(let count):
+                    env.refreshSignedInState()
+                    cookiePasteBuffer = ""
+                    if env.isSignedIn {
+                        cookieImportStatus = "Imported \(count) cookies — signed in."
+                        env.showToast("Signed in via cookie import.")
+                        dismiss()
+                    } else {
+                        cookieImportStatus = "Imported, but session didn't validate. Re-copy from a fresh login."
+                    }
+                case .missingAuthCookie:
+                    cookieImportStatus = "No SAPISID cookie found — make sure you copied it."
+                case .empty:
+                    cookieImportStatus = "Couldn't parse any cookies from that text."
+                }
+            }
         }
     }
 
@@ -213,8 +355,12 @@ struct SettingsView: View {
             shortcutRow("Toggle like",     keys: "⌘ L")
             shortcutRow("Toggle shuffle",  keys: "⇧ ⌘ S")
             shortcutRow("Cycle repeat",    keys: "⇧ ⌘ R")
-            shortcutRow("Switch tabs",     keys: "⌘ 1 / 2 / 3")
+            shortcutRow("Switch tabs",     keys: "⌘ 1 / 2 / 3 / 4")
+            shortcutRow("Command palette", keys: "⌘ K")
+            shortcutRow("Focus search",    keys: "⌘ F")
             shortcutRow("Mini Player",     keys: "⌥ ⌘ M")
+            shortcutRow("Open Stats",      keys: "⇧ ⌘ Y")
+            shortcutRow("Sign in",         keys: "⇧ ⌘ L")
             shortcutRow("Settings",        keys: "⌘ ,")
             shortcutRow("Close player",    keys: "⎋")
             shortcutRow("Quit",            keys: "⌘ Q")
@@ -226,12 +372,48 @@ struct SettingsView: View {
             sectionTitle("Playback")
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
+                    Text("Autoplay")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                    Text("Keep playing similar music when your queue ends. Turn off to stop at the end of the current queue or album.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 16)
+                Toggle("", isOn: Binding(
+                    get: { env.player.autoplayEnabled },
+                    set: { env.player.setAutoplayEnabled($0) }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+            }
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Track change notifications")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                    Text("Show a Notification Center banner with the new track when Riff is in the background.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 16)
+                Toggle("", isOn: Binding(
+                    get: { env.trackNotificationsEnabled },
+                    set: { env.trackNotificationsEnabled = $0 }
+                ))
+                .toggleStyle(.switch)
+                .labelsHidden()
+            }
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Volume normalization")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white)
                     Text("Smooths loudness between tracks by measuring each new track and adjusting gain toward a fixed target. Approximate — measured in-browser, not LUFS-accurate.")
                         .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -251,7 +433,7 @@ struct SettingsView: View {
                         .foregroundStyle(.white)
                     Text("Fades the end of each track into the beginning of the next over the chosen duration. Volume-only — YouTube Music's audio source can't overlap two tracks, so beat-matched mixing isn't possible.")
                         .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -285,7 +467,7 @@ struct SettingsView: View {
                         .foregroundStyle(.white)
                     Text("Show a compact playback popover next to the system clock. Click the music-note icon for transport controls and a quick way to open the floating Mini Player window.")
                         .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(Theme.Text.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 16)
@@ -310,7 +492,7 @@ struct SettingsView: View {
             sectionTitle("Scrobbling")
             Text("Send what you listen to to your last.fm or ListenBrainz profile. Both are opt-in, both stay off until you paste credentials. A track is scrobbled once you've played at least half of it, or 4 minutes — whichever comes first.")
                 .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.65))
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
             // last.fm
@@ -319,6 +501,11 @@ struct SettingsView: View {
                     Text("last.fm")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(.white)
+                    if let name = lastFmConnectedUsername, !name.isEmpty {
+                        Text("• \(name)")
+                            .font(.system(size: 12))
+                            .foregroundStyle(Theme.Text.secondary)
+                    }
                     Spacer()
                     Toggle("", isOn: Binding(
                         get: { lastFmEnabled },
@@ -331,50 +518,24 @@ struct SettingsView: View {
                     .labelsHidden()
                     .disabled(LastFmScrobbler.storedCredentials() == nil)
                 }
-                Text("Register an API account at last.fm/api/account/create, then run the one-off Approve flow below to grant Riff scrobble permission.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.65))
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Group {
-                    labeledField("Username", text: $lastFmUsernameBuffer, placeholder: "your-lastfm-name")
-                    labeledSecureField("API key", text: $lastFmAPIKeyBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste API key" : "•••• saved — paste to replace")
-                    labeledSecureField("Shared secret", text: $lastFmAPISecretBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste shared secret" : "•••• saved — paste to replace")
-                    labeledSecureField("Session key", text: $lastFmSessionKeyBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste session key" : "•••• saved — paste to replace")
-                }
-
-                Text("Get a session key by running last.fm's desktop-app auth flow once: visit last.fm/api/auth/?api_key=YOUR_KEY in a browser, click Approve, then exchange the resulting token for a session key via auth.getSession. The session key never expires.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.55))
-                    .fixedSize(horizontal: false, vertical: true)
-
-                HStack {
-                    Button("Save credentials") { saveLastFmCredentials() }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Theme.red)
-                        .disabled(!canSaveLastFm)
-                    if LastFmScrobbler.storedCredentials() != nil {
-                        Button("Clear") {
-                            LastFmScrobbler.clearCredentials()
-                            lastFmUsernameBuffer = ""
-                            lastFmAPIKeyBuffer = ""
-                            lastFmAPISecretBuffer = ""
-                            lastFmSessionKeyBuffer = ""
-                            lastFmEnabled = false
-                            UserDefaults.standard.set(false, forKey: ScrobblerDefaults.lastFmEnabled)
-                            lastFmStatus = "Removed."
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    Spacer()
-                    if let status = lastFmStatus {
-                        Text(status).font(.system(size: 12)).foregroundStyle(.green)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Register an API account (link below), paste the key + shared secret, then click Connect — Riff opens last.fm in your browser so you can approve access.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let url = URL(string: "https://www.last.fm/api/account/create") {
+                        Link("last.fm/api/account/create", destination: url)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.red.opacity(0.85))
+                            .underline()
                     }
                 }
+
+                lastFmConnectFlow
             }
             .padding(12)
-            .background(Color.white.opacity(0.04))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .background(Theme.Fill.faint)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.row))
 
             // ListenBrainz
             VStack(alignment: .leading, spacing: 10) {
@@ -385,7 +546,7 @@ struct SettingsView: View {
                     if let name = listenBrainzUsername, !name.isEmpty {
                         Text("• \(name)")
                             .font(.system(size: 12))
-                            .foregroundStyle(.white.opacity(0.65))
+                            .foregroundStyle(Theme.Text.secondary)
                     }
                     Spacer()
                     Toggle("", isOn: Binding(
@@ -399,10 +560,18 @@ struct SettingsView: View {
                     .labelsHidden()
                     .disabled(ListenBrainzScrobbler.storedToken() == nil)
                 }
-                Text("Grab your user-token from listenbrainz.org/profile and paste it below. No additional setup needed.")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.65))
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Grab your user-token from your ListenBrainz profile and paste it below. No additional setup needed.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let url = URL(string: "https://listenbrainz.org/profile") {
+                        Link("listenbrainz.org/profile", destination: url)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.red.opacity(0.85))
+                            .underline()
+                    }
+                }
 
                 labeledSecureField(
                     "User token",
@@ -446,9 +615,196 @@ struct SettingsView: View {
                 }
             }
             .padding(12)
-            .background(Color.white.opacity(0.04))
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .background(Theme.Fill.faint)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.row))
         }
+    }
+
+    /// last.fm credential block: key + secret fields, the in-app
+    /// Connect dance (fetchToken → browser approve → fetchSession),
+    /// and an advanced disclosure for pasting a hand-obtained
+    /// session key. Kept out of `scrobblingSection`'s body so the
+    /// long section stays readable.
+    private var lastFmConnectFlow: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            labeledSecureField("API key", text: $lastFmAPIKeyBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste API key" : "•••• saved — paste to replace")
+            labeledSecureField("Shared secret", text: $lastFmAPISecretBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste shared secret" : "•••• saved — paste to replace")
+
+            HStack {
+                Button {
+                    connectLastFm()
+                } label: {
+                    if lastFmConnectInFlight {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(lastFmPendingToken == nil ? "Connect" : "Restart connect")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.red)
+                .disabled(lastFmConnectInFlight || !canConnectLastFm)
+                if lastFmPendingToken != nil {
+                    Button("Done — I approved it") { finishLastFmConnect() }
+                        .buttonStyle(.bordered)
+                        .disabled(lastFmConnectInFlight)
+                }
+                if LastFmScrobbler.storedCredentials() != nil {
+                    Button("Clear") { clearLastFmCredentials() }
+                        .buttonStyle(.bordered)
+                }
+                Spacer()
+                if let status = lastFmStatus {
+                    Text(status).font(.system(size: 12)).foregroundStyle(.green)
+                }
+            }
+
+            Text("Connect fetches a request token, opens last.fm in your browser for the one-off Approve, then exchanges the token for a session key when you click Done. The session key never expires.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.Text.tertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            DisclosureGroup(isExpanded: $lastFmShowAdvanced) {
+                VStack(alignment: .leading, spacing: 8) {
+                    labeledField("Username", text: $lastFmUsernameBuffer, placeholder: "your-lastfm-name")
+                    labeledSecureField("Session key", text: $lastFmSessionKeyBuffer, placeholder: LastFmScrobbler.storedCredentials() == nil ? "Paste session key" : "•••• saved — paste to replace")
+                    Text("Already ran auth.getSession yourself? Paste your username and the resulting session key here — the API key and shared secret fields above are still required.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Text.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("Save credentials") { saveLastFmCredentials() }
+                        .buttonStyle(.bordered)
+                        .disabled(!canSaveLastFm)
+                }
+                .padding(.top, 6)
+            } label: {
+                Text("Advanced: paste a session key")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.Text.secondary)
+            }
+        }
+    }
+
+    /// Connect needs a key + secret: fresh ones from the on-screen
+    /// buffers, or — for a re-auth after e.g. a revoked session
+    /// (error 9) — the stored pair. `storedCredentials()` is nil
+    /// until all four items exist, so a first-time connect must
+    /// come from the buffers.
+    private var canConnectLastFm: Bool {
+        let k = lastFmAPIKeyBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let s = lastFmAPISecretBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !k.isEmpty && !s.isEmpty { return true }
+        return LastFmScrobbler.storedCredentials() != nil
+    }
+
+    /// The (apiKey, apiSecret) pair the connect flow should sign
+    /// with. Buffer values win field-by-field; stored values fill
+    /// the gaps (partial rotation, or a plain re-auth).
+    private func connectLastFmKeyPair() -> (apiKey: String, apiSecret: String)? {
+        let k = lastFmAPIKeyBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        let s = lastFmAPISecretBuffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !k.isEmpty && !s.isEmpty { return (apiKey: k, apiSecret: s) }
+        guard let stored = LastFmScrobbler.storedCredentials() else { return nil }
+        let key: String = k.isEmpty ? stored.apiKey : k
+        let secret: String = s.isEmpty ? stored.apiSecret : s
+        return (apiKey: key, apiSecret: secret)
+    }
+
+    /// Step 1 + 2: fetch a request token (which also validates the
+    /// key/secret, since auth.getToken is signed) and open the
+    /// approve page in the default browser. The token is kept in
+    /// `lastFmPendingToken` across the browser round trip.
+    private func connectLastFm() {
+        guard let pair = connectLastFmKeyPair() else { return }
+        lastFmConnectInFlight = true
+        lastFmPendingToken = nil
+        lastFmStatus = nil
+        Task {
+            do {
+                let token = try await LastFmScrobbler.fetchToken(apiKey: pair.apiKey, apiSecret: pair.apiSecret)
+                let approveURL = LastFmScrobbler.authorizationURL(apiKey: pair.apiKey, token: token)
+                await MainActor.run {
+                    lastFmConnectInFlight = false
+                    lastFmPendingToken = token
+                    lastFmStatus = "Approve Riff in the browser, then click Done."
+                    NSWorkspace.shared.open(approveURL)
+                }
+            } catch {
+                let message = LastFmScrobbler.connectFailureMessage(for: error)
+                await MainActor.run {
+                    lastFmConnectInFlight = false
+                    lastFmStatus = message
+                }
+            }
+        }
+    }
+
+    /// Step 3: exchange the approved token for (username, session
+    /// key) and persist all four credentials. On "not yet
+    /// authorized" (error 14) the pending token is kept so the user
+    /// can approve and click Done again; an expired token (15)
+    /// needs a fresh Connect.
+    private func finishLastFmConnect() {
+        guard let token = lastFmPendingToken else { return }
+        guard let pair = connectLastFmKeyPair() else {
+            // Buffers were emptied mid-flow and nothing is stored —
+            // the exchange can't be signed any more.
+            lastFmStatus = "API key and shared secret are required — paste them and Connect again."
+            lastFmPendingToken = nil
+            return
+        }
+        lastFmConnectInFlight = true
+        lastFmStatus = nil
+        Task {
+            do {
+                let result = try await LastFmScrobbler.fetchSession(token: token, apiKey: pair.apiKey, apiSecret: pair.apiSecret)
+                await MainActor.run {
+                    lastFmConnectInFlight = false
+                    do {
+                        try LastFmScrobbler.saveCredentials(
+                            username: result.username,
+                            apiKey: pair.apiKey,
+                            apiSecret: pair.apiSecret,
+                            sessionKey: result.sessionKey
+                        )
+                        lastFmPendingToken = nil
+                        // Clear the secret buffers so they don't
+                        // linger in memory (same as manual save).
+                        lastFmAPIKeyBuffer = ""
+                        lastFmAPISecretBuffer = ""
+                        lastFmSessionKeyBuffer = ""
+                        lastFmUsernameBuffer = result.username
+                        lastFmConnectedUsername = result.username
+                        lastFmStatus = "Connected — \(result.username)."
+                    } catch {
+                        lastFmStatus = "Couldn't save to Keychain."
+                    }
+                }
+            } catch {
+                let message = LastFmScrobbler.connectFailureMessage(for: error)
+                await MainActor.run {
+                    lastFmConnectInFlight = false
+                    if let apiError = error as? LastFmScrobbler.APIError, apiError.code != 14 {
+                        // Anything but "approve first" invalidates
+                        // the pending token.
+                        lastFmPendingToken = nil
+                    }
+                    lastFmStatus = message
+                }
+            }
+        }
+    }
+
+    private func clearLastFmCredentials() {
+        LastFmScrobbler.clearCredentials()
+        lastFmUsernameBuffer = ""
+        lastFmAPIKeyBuffer = ""
+        lastFmAPISecretBuffer = ""
+        lastFmSessionKeyBuffer = ""
+        lastFmPendingToken = nil
+        lastFmConnectedUsername = nil
+        lastFmEnabled = false
+        UserDefaults.standard.set(false, forKey: ScrobblerDefaults.lastFmEnabled)
+        lastFmStatus = "Removed."
     }
 
     private var canSaveLastFm: Bool {
@@ -490,6 +846,7 @@ struct SettingsView: View {
             lastFmAPIKeyBuffer = ""
             lastFmAPISecretBuffer = ""
             lastFmSessionKeyBuffer = ""
+            lastFmConnectedUsername = finalUsername
             lastFmStatus = "Saved."
         } catch {
             lastFmStatus = "Couldn't save to Keychain."
@@ -536,7 +893,7 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(Theme.Text.secondary)
             TextField(placeholder, text: text)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12, design: .monospaced))
@@ -547,29 +904,10 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(label)
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(Theme.Text.secondary)
             SecureField(placeholder, text: text)
                 .textFieldStyle(.roundedBorder)
                 .font(.system(size: 12, design: .monospaced))
-        }
-    }
-
-    private var libraryAccessSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            sectionTitle("Library access (advanced)")
-            Text("Riff signs you in via Google's WebView flow which gives you full Library access through the YouTube Music cookie session — no setup required. The OAuth Device Flow path below is only useful if you want to access the YouTube Data API directly. Most users can ignore this.")
-                .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.65))
-                .fixedSize(horizontal: false, vertical: true)
-            DisclosureGroup("Configure custom OAuth credentials") {
-                VStack(alignment: .leading, spacing: 16) {
-                    setupSteps
-                    credentialsBlock
-                }
-                .padding(.top, 12)
-            }
-            .font(.system(size: 12, weight: .semibold))
-            .tint(.white)
         }
     }
 
@@ -581,83 +919,60 @@ struct SettingsView: View {
     private var aiFeaturesSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("AI features")
-            Text("Bring your own Anthropic API key to unlock the Queue Builder — describe a vibe (\u{201C}rainy Sunday morning, mellow indie folk\u{201D}) and Riff turns it into a real queue. The key is stored in macOS Keychain and used directly from your Mac to api.anthropic.com — Riff never sees it.")
+            Text("Pick a model backend — paid (Anthropic), free hosted (Groq), or fully local (Ollama). Whichever you pick powers the Queue Builder, lyrics translation, and X-Ray context cards. Keys live in Keychain and requests go straight from your Mac to the provider — Riff never proxies.")
                 .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.65))
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // Backend picker. Segmented so all three options are
+            // visible at a glance; the tagline below reads out of
+            // whichever is currently selected.
             VStack(alignment: .leading, spacing: 6) {
-                Text("Anthropic API key")
+                Text("Backend")
                     .font(.system(size: 12, weight: .semibold))
-                SecureField(
-                    AnthropicProvider.storedAPIKey() == nil
-                        ? "sk-ant-…"
-                        : "•••• saved — paste a new key to replace",
-                    text: $anthropicAPIKey
-                )
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 12, design: .monospaced))
-                .onSubmit(saveAnthropicKey)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Model")
-                    .font(.system(size: 12, weight: .semibold))
-                Picker("", selection: $anthropicModel) {
-                    ForEach(AnthropicProvider.availableModels, id: \.self) { id in
-                        Text(modelDisplayName(id)).tag(id)
+                Picker("", selection: $activeProvider) {
+                    ForEach(LLMProviderKind.allCases) { kind in
+                        Text(kind.displayName).tag(kind)
                     }
                 }
-                .pickerStyle(.menu)
+                .pickerStyle(.segmented)
                 .labelsHidden()
-                .onChange(of: anthropicModel) { _, new in
-                    AnthropicProvider.setModel(new)
+                .onChange(of: activeProvider) { _, new in
+                    LLMProviderKind.active = new
+                    // Any provider swap invalidates translations /
+                    // X-Ray cards produced under the old backend —
+                    // different model = different output, better to
+                    // regenerate than to serve stale mixed-source
+                    // content.
+                    env.lyricsTranslator.clearCache()
+                    env.xrayCardsService.clearCache()
+                    aiTestResult = nil
                 }
+                Text(activeProvider.tagline)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Text.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
-            // Translation language picker (B3). The toggle that
-            // actually flips translation on/off lives on the Now
-            // Playing lyrics tab — this picker just sets the *target*
-            // so the user's choice persists across tracks.
+            // Only the selected backend's credential/model block is
+            // rendered — reduces cognitive load and keeps the
+            // Save/Test/Clear buttons in one place.
+            switch activeProvider {
+            case .anthropic: anthropicCredentialBlock
+            case .groq:      groqCredentialBlock
+            case .ollama:    ollamaCredentialBlock
+            }
+
             translationLanguagePicker
 
             HStack {
-                Button("Save key") { saveAnthropicKey() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(Theme.red)
-                    .disabled(anthropicAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-
-                Button {
-                    testAnthropicConnection()
-                } label: {
-                    if aiTestInFlight {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Text("Test connection")
-                    }
-                }
-                .buttonStyle(.bordered)
-                .disabled(aiTestInFlight || AnthropicProvider.storedAPIKey() == nil)
-
-                if AnthropicProvider.storedAPIKey() != nil {
-                    Button("Clear") {
-                        AnthropicProvider.clearAPIKey()
-                        // Dropping the key also invalidates any
-                        // translations made under it — a fresh key may
-                        // be a different account / model, and we don't
-                        // want stale cached output bleeding into the
-                        // new session.
-                        env.lyricsTranslator.clearCache()
-                        env.xrayCardsService.clearCache()
-                        anthropicAPIKey = ""
-                        aiSaveStatus = "Key removed."
-                        aiTestResult = nil
-                    }
+                Button("Test connection") { testActiveProvider() }
                     .buttonStyle(.bordered)
+                    .disabled(aiTestInFlight || !activeProvider.isConfigured())
+                if aiTestInFlight {
+                    ProgressView().controlSize(.small)
                 }
-
                 Spacer()
-
                 Group {
                     if case .success = aiTestResult {
                         HStack(spacing: 4) {
@@ -670,12 +985,133 @@ struct SettingsView: View {
                             Text(msg).font(.system(size: 12)).foregroundStyle(.red).lineLimit(2)
                         }
                     } else if let status = aiSaveStatus {
-                        Text(status)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.green)
+                        Text(status).font(.system(size: 12)).foregroundStyle(.green)
                     }
                 }
             }
+        }
+    }
+
+    // MARK: - Per-provider credential blocks
+
+    @ViewBuilder
+    private var anthropicCredentialBlock: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Anthropic API key").font(.system(size: 12, weight: .semibold))
+            SecureField(
+                AnthropicProvider.storedAPIKey() == nil ? "sk-ant-…" : "•••• saved — paste to replace",
+                text: $anthropicAPIKey
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 12, design: .monospaced))
+            .onSubmit(saveAnthropicKey)
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Model").font(.system(size: 12, weight: .semibold))
+            Picker("", selection: $anthropicModel) {
+                ForEach(AnthropicProvider.availableModels, id: \.self) { id in
+                    Text(modelDisplayName(id)).tag(id)
+                }
+            }
+            .pickerStyle(.menu).labelsHidden()
+            .onChange(of: anthropicModel) { _, new in AnthropicProvider.setModel(new) }
+        }
+        HStack {
+            Button("Save key") { saveAnthropicKey() }
+                .buttonStyle(.borderedProminent).tint(Theme.red)
+                .disabled(anthropicAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if AnthropicProvider.storedAPIKey() != nil {
+                Button("Clear") {
+                    AnthropicProvider.clearAPIKey()
+                    env.lyricsTranslator.clearCache()
+                    env.xrayCardsService.clearCache()
+                    anthropicAPIKey = ""
+                    aiSaveStatus = "Anthropic key removed."
+                    aiTestResult = nil
+                }
+                .buttonStyle(.bordered)
+            }
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private var groqCredentialBlock: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Groq API key").font(.system(size: 12, weight: .semibold))
+            SecureField(
+                GroqProvider.storedAPIKey() == nil ? "gsk_…" : "•••• saved — paste to replace",
+                text: $groqAPIKey
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 12, design: .monospaced))
+            .onSubmit(saveGroqKey)
+            Text("Free key at the Groq console — API Keys page. No credit card needed.")
+                .font(.system(size: 11)).foregroundStyle(Theme.Text.tertiary)
+            if let url = URL(string: "https://console.groq.com/keys") {
+                Link("console.groq.com/keys", destination: url)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.red.opacity(0.85))
+                    .underline()
+            }
+        }
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Model").font(.system(size: 12, weight: .semibold))
+            Picker("", selection: $groqModel) {
+                ForEach(GroqProvider.availableModels, id: \.self) { id in Text(id).tag(id) }
+            }
+            .pickerStyle(.menu).labelsHidden()
+            .onChange(of: groqModel) { _, new in GroqProvider.setModel(new) }
+        }
+        HStack {
+            Button("Save key") { saveGroqKey() }
+                .buttonStyle(.borderedProminent).tint(Theme.red)
+                .disabled(groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if GroqProvider.storedAPIKey() != nil {
+                Button("Clear") {
+                    GroqProvider.clearAPIKey()
+                    env.lyricsTranslator.clearCache()
+                    env.xrayCardsService.clearCache()
+                    groqAPIKey = ""
+                    aiSaveStatus = "Groq key removed."
+                    aiTestResult = nil
+                }
+                .buttonStyle(.bordered)
+            }
+            Spacer()
+        }
+    }
+
+    @ViewBuilder
+    private var ollamaCredentialBlock: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Ollama host").font(.system(size: 12, weight: .semibold))
+            TextField("Default host", text: $ollamaBaseURL)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+                .onSubmit(saveOllamaSettings)
+            Text("Start the Ollama daemon on this Mac and paste its base URL. Default works for a stock install.")
+                .font(.system(size: 11)).foregroundStyle(Theme.Text.tertiary)
+            if let url = URL(string: "https://ollama.com/download") {
+                Link("ollama.com/download", destination: url)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.red.opacity(0.85))
+                    .underline()
+            }
+        }
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Model").font(.system(size: 12, weight: .semibold))
+            TextField(OllamaProvider.defaultModel, text: $ollamaModel)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+                .onSubmit(saveOllamaSettings)
+            Text("Any model you've pulled locally. Small + capable picks: qwen2.5:3b, gemma2:2b, llama3.2:3b.")
+                .font(.system(size: 11)).foregroundStyle(Theme.Text.tertiary)
+        }
+        HStack {
+            Button("Save") { saveOllamaSettings() }
+                .buttonStyle(.borderedProminent).tint(Theme.red)
+            Spacer()
         }
     }
 
@@ -742,7 +1178,7 @@ struct SettingsView: View {
 
             Text("Used when you turn on translation on the Now Playing lyrics tab. Translations are cached per song and language for the current session.")
                 .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.6))
+                .foregroundStyle(Theme.Text.tertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -781,17 +1217,21 @@ struct SettingsView: View {
         }
     }
 
-    private func testAnthropicConnection() {
+    private func testAnthropicConnection() { testActiveProvider() }
+
+    /// Round-trips a one-word prompt against whichever backend is
+    /// currently selected. Cheap smoke-test — all three providers
+    /// return in <500ms on a healthy setup and cost effectively
+    /// nothing (Anthropic: <5 output tokens; Groq/Ollama: free).
+    private func testActiveProvider() {
         aiTestInFlight = true
         aiTestResult = nil
         aiSaveStatus = nil
-        let provider = AnthropicProvider()
-        let model = AnthropicProvider.storedModel()
+        let kind = activeProvider
+        let provider = kind.makeProvider()
+        let model = kind.currentModel()
         Task {
             do {
-                // Tiny prompt — we just want to confirm the key works.
-                // Anthropic charges by token; this round-trips in
-                // <50 input + <5 output tokens.
                 _ = try await provider.chat([.user("Reply with the single word: ok")], model: model)
                 await MainActor.run {
                     aiTestResult = .success
@@ -799,16 +1239,65 @@ struct SettingsView: View {
                 }
             } catch let err as LLMError {
                 await MainActor.run {
-                    aiTestResult = .failure(err.errorDescription ?? "Couldn't reach Anthropic.")
+                    aiTestResult = .failure(err.errorDescription ?? "Couldn't reach \(kind.displayName).")
                     aiTestInFlight = false
                 }
             } catch {
                 await MainActor.run {
-                    aiTestResult = .failure("Couldn't reach Anthropic.")
+                    aiTestResult = .failure("Couldn't reach \(kind.displayName).")
                     aiTestInFlight = false
                 }
             }
         }
+    }
+
+    private func saveGroqKey() {
+        let trimmed = groqAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        do {
+            try GroqProvider.setAPIKey(trimmed)
+            groqAPIKey = ""
+            aiSaveStatus = "Groq key saved to Keychain."
+            aiTestResult = nil
+        } catch {
+            aiSaveStatus = "Couldn't save Groq key."
+        }
+    }
+
+    private func exportDiagnostics() {
+        diagnosticsExporting = true
+        diagnosticsStatus = nil
+        Task {
+            let result = await DiagnosticsExporter.exportDiagnostics()
+            await MainActor.run {
+                diagnosticsExporting = false
+                switch result {
+                case .success(let url):
+                    diagnosticsStatus = "Saved to \(url.lastPathComponent) — revealed in Finder."
+                case .failure(let msg):
+                    diagnosticsStatus = msg
+                }
+            }
+        }
+    }
+
+    private func saveOllamaSettings() {
+        // setBaseURL validates (scheme, no /v1 suffix, parseable URL)
+        // and returns false on a rejected value — saying "saved" for
+        // an input that was thrown away sent users to a misleading
+        // connection error later.
+        guard OllamaProvider.setBaseURL(ollamaBaseURL) else {
+            aiSaveStatus = "That Ollama URL doesn't look right — use e.g. http://localhost:11434 (no /v1)."
+            aiTestResult = nil
+            return
+        }
+        OllamaProvider.setModel(ollamaModel)
+        // Re-hydrate the buffers from the store so the user sees the
+        // normalized values (trimmed / defaulted) rather than raw input.
+        ollamaBaseURL = OllamaProvider.storedBaseURL().absoluteString
+        ollamaModel = OllamaProvider.storedModel()
+        aiSaveStatus = "Ollama settings saved."
+        aiTestResult = nil
     }
 
     /// "Blocked artists" — manage the list the user built via the
@@ -819,7 +1308,7 @@ struct SettingsView: View {
             sectionTitle("Blocked artists")
             Text("Tracks by these artists are hidden from Home, Search, and the radio queue. Note: when a track ends naturally, YouTube Music's autoplay can still pick a blocked artist — we filter what we show, not what YT plays.")
                 .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.65))
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             // Display the captured artist name (falls back to id only
             // for legacy entries migrated from the old Set<String>
@@ -832,7 +1321,7 @@ struct SettingsView: View {
                             .foregroundStyle(.white)
                         Text(id)
                             .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.45))
+                            .foregroundStyle(Theme.Text.tertiary)
                             .textSelection(.enabled)
                     }
                     Spacer()
@@ -856,7 +1345,7 @@ struct SettingsView: View {
             sectionTitle("Track metadata overrides")
             Text("Title / artist / album corrections you've applied to individual tracks. Local-only — nothing is sent to YouTube. To re-edit, right-click a track row anywhere in the app.")
                 .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.65))
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(env.trackOverrides.sortedVideoIds, id: \.self) { videoId in
                 if let override = env.trackOverrides.override(for: videoId) {
@@ -871,16 +1360,16 @@ struct SettingsView: View {
                             if let a = override.artist, override.title != nil {
                                 Text(a)
                                     .font(.system(size: 11))
-                                    .foregroundStyle(.white.opacity(0.75))
+                                    .foregroundStyle(Theme.Text.secondary)
                             }
                             if let a = override.album {
                                 Text(a)
                                     .font(.system(size: 11))
-                                    .foregroundStyle(.white.opacity(0.65))
+                                    .foregroundStyle(Theme.Text.secondary)
                             }
                             Text(videoId)
                                 .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.45))
+                                .foregroundStyle(Theme.Text.tertiary)
                                 .textSelection(.enabled)
                         }
                         Spacer()
@@ -896,12 +1385,103 @@ struct SettingsView: View {
             HStack {
                 Spacer()
                 Button("Clear all overrides", role: .destructive) {
-                    env.trackOverrides.clearAll()
+                    confirmClearOverrides = true
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .confirmationDialog(
+                    "Clear all track overrides?",
+                    isPresented: $confirmClearOverrides,
+                    titleVisibility: .visible
+                ) {
+                    Button("Clear all overrides", role: .destructive) {
+                        env.trackOverrides.clearAll()
+                        env.showToast("All track overrides cleared.")
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This removes every locally-edited title, artist, and album name. This action can't be undone.")
+                }
             }
             .padding(.top, 4)
+        }
+    }
+
+    /// Storage: user-facing "Clear caches" for the two disk caches that
+    /// otherwise have no in-app reclaim path — the Home feed snapshot
+    /// (`~/Library/Caches/dev.riff.app/homeFeed.json`) and the shared
+    /// URL cache (artwork/images; configured up to 512 MB on disk).
+    /// Deliberately scoped to exactly those two: library, played
+    /// history, settings, and AI caches are untouched, matching the
+    /// `HomeFeedCache.clear()` doc comment.
+    private var storageSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Storage")
+            Text("Clear the cached Home feed and downloaded artwork images. Your library, played history, and settings are not affected — caches rebuild as you browse.")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.Text.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button {
+                    clearCaches()
+                } label: {
+                    Label("Clear caches", systemImage: "trash")
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+                if let msg = clearCachesStatus {
+                    Text(msg)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.green)
+                        .lineLimit(1)
+                }
+            }
+        }
+    }
+
+    private func clearCaches() {
+        HomeFeedCache.clear()
+        URLCache.shared.removeAllCachedResponses()
+        clearCachesStatus = "Caches cleared."
+    }
+
+    /// "Export diagnostics" — writes a folder to ~/Downloads with
+    /// this process's recent os_log entries + the played-history
+    /// journal + a small manifest (app + macOS version). No API
+    /// keys, no cookies, no OAuth tokens. Reveals the folder in
+    /// Finder so the user can attach it to a bug report in one
+    /// gesture.
+    private var diagnosticsSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            sectionTitle("Diagnostics")
+            Text("Export a folder to ~/Downloads with recent Riff logs, the playback audit journal (track ids only, no titles), your played-history journal, and version info. Useful when filing a bug report. Contains no API keys, cookies, or account identifiers.")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.Text.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Button {
+                    exportDiagnostics()
+                } label: {
+                    if diagnosticsExporting {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Exporting…")
+                        }
+                    } else {
+                        Label("Export diagnostics", systemImage: "square.and.arrow.up")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(Theme.red)
+                .disabled(diagnosticsExporting)
+                Spacer()
+                if let msg = diagnosticsStatus {
+                    Text(msg)
+                        .font(.system(size: 12))
+                        .foregroundStyle(msg.hasPrefix("Saved") ? .green : .red)
+                        .lineLimit(2)
+                }
+            }
         }
     }
 
@@ -914,12 +1494,12 @@ struct SettingsView: View {
                         .font(.system(size: 14, weight: .semibold))
                     Text("Native macOS YouTube Music client • AGPL-3.0")
                         .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(Theme.Text.secondary)
                 }
                 Spacer()
                 Text("v0.1.0")
                     .font(.system(size: 12, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(Theme.Text.secondary)
             }
         }
     }
@@ -929,59 +1509,22 @@ struct SettingsView: View {
             .font(.system(size: 11, weight: .semibold))
             .textCase(.uppercase)
             .tracking(1.2)
-            .foregroundStyle(.white.opacity(0.75))
+            .foregroundStyle(Theme.Text.secondary)
     }
 
     private func shortcutRow(_ label: String, keys: String) -> some View {
         HStack {
             Text(label)
                 .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.85))
+                .foregroundStyle(Theme.Text.secondary)
             Spacer()
             Text(keys)
                 .font(.system(size: 12, design: .monospaced))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
-                .background(Color.white.opacity(0.08))
+                .background(Theme.Fill.medium)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
-        }
-    }
-
-    private var intro: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Library access")
-                .font(.system(size: 22, weight: .bold))
-            Text("Riff signs you in via Google's Device Flow using a public YouTube TV OAuth client. That works for sign-in, but the underlying Google Cloud project doesn't expose the YouTube Data API — which is what we need to read your liked songs and playlists.")
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.75))
-                .fixedSize(horizontal: false, vertical: true)
-            Text("To unlock the Library tab, register your own OAuth Limited-Input client in Google Cloud (free, ~5 min) and paste the credentials below.")
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.75))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private var setupSteps: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Setup")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.75))
-                .textCase(.uppercase)
-                .tracking(1.2)
-
-            stepRow(n: 1, title: "Open Google Cloud Console") {
-                Button {
-                    NSWorkspace.shared.open(URL(string: "https://console.cloud.google.com/apis/library/youtube.googleapis.com")!)
-                } label: {
-                    Label("Open Cloud Console", systemImage: "arrow.up.right.square")
-                }
-                .buttonStyle(.bordered)
-            }
-            stepRow(n: 2, title: "Enable the YouTube Data API v3 on a new or existing project.") { EmptyView() }
-            stepRow(n: 3, title: "Go to Credentials → Create Credentials → OAuth client ID. Pick \u{201C}TVs and Limited Input devices\u{201D} as the application type.") { EmptyView() }
-            stepRow(n: 4, title: "Copy the client ID and client secret into the fields below and click Save.") { EmptyView() }
         }
     }
 
@@ -991,68 +1534,15 @@ struct SettingsView: View {
                 .font(.system(size: 13, weight: .bold, design: .monospaced))
                 .foregroundStyle(Theme.red)
                 .frame(width: 22, height: 22)
-                .background(Color.white.opacity(0.06))
+                .background(Theme.Fill.soft)
                 .clipShape(Circle())
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
                     .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.85))
+                    .foregroundStyle(Theme.Text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 content()
             }
-        }
-    }
-
-    private var credentialsBlock: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("OAuth credentials")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.75))
-                .textCase(.uppercase)
-                .tracking(1.2)
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Client ID")
-                    .font(.system(size: 12, weight: .semibold))
-                TextField("xxxxxxxxx-xxxxxxxx.apps.googleusercontent.com", text: $clientId)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Client secret")
-                    .font(.system(size: 12, weight: .semibold))
-                SecureField("GOCSPX-…", text: $clientSecret)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-            }
-            HStack {
-                Button("Save & sign out") {
-                    let config = OAuthClientConfig(
-                        clientId: clientId.trimmingCharacters(in: .whitespacesAndNewlines),
-                        clientSecret: clientSecret.trimmingCharacters(in: .whitespacesAndNewlines)
-                    )
-                    config.save()
-                    env.signOut()
-                    saved = true
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.red)
-                .disabled(clientId.isEmpty || clientSecret.isEmpty)
-
-                Button("Reset to defaults") {
-                    OAuthClientConfig.reset()
-                    clientId = ""
-                    clientSecret = ""
-                    env.signOut()
-                }
-                .buttonStyle(.bordered)
-
-                if saved {
-                    Text("Saved. Sign in again to use the new credentials.")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.green)
-                }
-            }
-            .padding(.top, 4)
         }
     }
 }

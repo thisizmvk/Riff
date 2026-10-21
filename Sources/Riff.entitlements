@@ -4,23 +4,11 @@
 <dict>
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
+	<key>com.apple.security.files.downloads.read-write</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
 	<key>com.apple.security.network.client</key>
 	<true/>
-	<!--
-	  App Groups (needed by the Notification Center widget to read the
-	  shared NowPlayingSnapshot) require a PAID Apple Developer Program
-	  seat. Free personal-team builds cannot provision App Groups, so
-	  Xcode fails to generate a profile when this entitlement is set.
-
-	  Re-enable for paid accounts by adding back:
-
-	      <key>com.apple.security.application-groups</key>
-	      <array>
-	          <string>group.dev.riff.app</string>
-	      </array>
-
-	  Without App Groups, the widget still builds but cannot read live
-	  state from the main app — it falls back to its empty placeholder.
-	-->
 </dict>
 </plist>

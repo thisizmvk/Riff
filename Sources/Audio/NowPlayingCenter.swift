@@ -25,17 +25,78 @@ final class NowPlayingCenter {
 
     private func registerCommands() {
         let cc = MPRemoteCommandCenter.shared()
-        cc.playCommand.addTarget   { [weak self] _ in Task { await self?.player.togglePlay() }; return .success }
-        cc.pauseCommand.addTarget  { [weak self] _ in Task { await self?.player.togglePlay() }; return .success }
-        cc.nextTrackCommand.addTarget     { [weak self] _ in Task { await self?.player.next() };     return .success }
-        cc.previousTrackCommand.addTarget { [weak self] _ in Task { await self?.player.previous() }; return .success }
+        // Idempotent play/pause: the previous code called `togglePlay`
+        // from both handlers, which inverted state whenever the OS
+        // dispatched the "wrong" command (e.g. Now Playing widget
+        // showing stale state, or a Bluetooth remote sending an
+        // unconditional Play). Guarding on `isPlaying` makes each
+        // command a no-op when we're already in the target state.
+        cc.playCommand.isEnabled = true
+        cc.pauseCommand.isEnabled = true
+        cc.togglePlayPauseCommand.isEnabled = true
+        cc.nextTrackCommand.isEnabled = true
+        cc.previousTrackCommand.isEnabled = true
+        cc.changePlaybackPositionCommand.isEnabled = true
+        // Every handler reads MainActor-isolated state (isPlaying /
+        // currentTrack). MPRemoteCommand fires targets on the main
+        // queue, so `MainActor.assumeIsolated { ... }` is safe and
+        // satisfies Swift 6 strict-concurrency (the addTarget
+        // closure itself has no actor isolation). Same pattern
+        // used in AppEnvironment for its NotificationCenter blocks.
+        cc.playCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return .commandFailed }
+                if !self.player.isPlaying { Task { await self.player.togglePlay() } }
+                return .success
+            }
+        }
+        cc.pauseCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return .commandFailed }
+                if self.player.isPlaying { Task { await self.player.togglePlay() } }
+                return .success
+            }
+        }
+        // macOS media keys often route through togglePlayPauseCommand
+        // rather than the discrete play/pause pair (some kernels
+        // dispatch F8 as toggle). Without a handler here, the F8 key
+        // silently no-ops even though play/pause are wired.
+        cc.togglePlayPauseCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return .commandFailed }
+                Task { await self.player.togglePlay() }
+                return .success
+            }
+        }
+        cc.nextTrackCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return .commandFailed }
+                Task { await self.player.next() }
+                return .success
+            }
+        }
+        cc.previousTrackCommand.addTarget { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return .commandFailed }
+                Task { await self.player.previous() }
+                return .success
+            }
+        }
+        // Scrub against the LIVE duration — the same value update()
+        // publishes to the OS. `Track.duration` is 0 for most tracks
+        // (only backfilled by a late same-id re-emit), which made every
+        // Control Center scrub fail even with a visible 3:42 scrubber.
         cc.changePlaybackPositionCommand.addTarget { [weak self] event in
-            guard let event = event as? MPChangePlaybackPositionCommandEvent,
-                  let self = self,
-                  let track = self.player.currentTrack,
-                  track.duration > 0 else { return .commandFailed }
-            Task { await self.player.seek(to: event.positionTime / track.duration) }
-            return .success
+            MainActor.assumeIsolated {
+                guard let event = event as? MPChangePlaybackPositionCommandEvent,
+                      let self = self,
+                      self.player.currentTrack != nil else { return .commandFailed }
+                let d: Double = self.player.duration
+                guard d.isFinite, d > 0 else { return .commandFailed }
+                let fraction: Double = min(max(event.positionTime / d, 0), 1)
+                Task { await self.player.seek(to: fraction) }
+                return .success
+            }
         }
     }
 
@@ -46,12 +107,23 @@ final class NowPlayingCenter {
             MPMediaItemPropertyArtist: artist,
             MPMediaItemPropertyPlaybackDuration: duration,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
-            MPNowPlayingInfoPropertyPlaybackRate: player.isPlaying ? 1.0 : 0.0,
+            // Real rate, not hardcoded 1.0 — with progress-only updates
+            // now skipped, the system extrapolates elapsed from this, and
+            // a podcast at 1.5× would drift visibly at the wrong rate.
+            MPNowPlayingInfoPropertyPlaybackRate: player.isPlaying ? player.playbackRate : 0.0,
+            MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
         ]
         if let artwork, let cached = artworkCache[artwork.absoluteString] {
             info[MPMediaItemPropertyArtwork] = cached
         }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        // macOS-only: set the explicit playback state. Without this
+        // the OS treats the info as advisory metadata and doesn't
+        // route media keys / Now Playing widget commands to us —
+        // that's why F8, headphone play/pause, and the Control
+        // Center widget felt unresponsive. Update on every call so
+        // pause/resume transitions flip the OS-visible state.
+        MPNowPlayingInfoCenter.default().playbackState = player.isPlaying ? .playing : .paused
 
         // Async artwork fetch on miss. We don't block the metadata write —
         // the lock screen / Control Center will refresh once the image

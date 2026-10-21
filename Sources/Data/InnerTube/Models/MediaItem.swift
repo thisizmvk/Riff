@@ -36,4 +36,11 @@ struct MediaItem: Identifiable, Hashable, Sendable, Codable {
     /// "you played 47 tracks from 2019 this year" stat.
     /// nil for tiles without a year run (artist tiles, most playlists).
     var year: Int? = nil
+    /// GLOBAL play/view count label exactly as YT renders it
+    /// ("347M plays" / "1.2M views"). Album tracklists carry it in a
+    /// flex column; some search/video rows carry "views" in the
+    /// byline. Kept as the display string — we never need to sort by
+    /// it, and YT's own rounding ("1.2M") is the look we want.
+    /// nil when the source row had no such run.
+    var playsText: String? = nil
 }

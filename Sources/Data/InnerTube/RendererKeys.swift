@@ -12,6 +12,9 @@ import Foundation
 /// that isn't here yet, add it here first.
 ///
 /// Last verified working: 2026-05 (clientVersion `1.20260501.00.00`).
+/// Since the pageInfo handshake, the constant is a FALLBACK: live
+/// requests prefer the page's own version via
+/// `InnerTubeClient.effectiveClientVersion`.
 enum RendererKeys {
     // MARK: Shelves (containers of items)
 
@@ -71,7 +74,9 @@ enum RendererKeys {
     /// `["contents", singleColumnBrowse, "tabs", "0", tabRenderer,
     ///   "content", sectionList, "contents"]` — used by browseHome,
     /// library, detail page tracklists.
-    static let homeShelvesPath: [Any] = [
+    // nonisolated(unsafe): an immutable path constant ([Any] can't be
+    // Sendable, but this is never mutated after init).
+    nonisolated(unsafe) static let homeShelvesPath: [Any] = [
         "contents", singleColumnBrowse, "tabs", "0", tabRenderer,
         "content", sectionList, "contents"
     ]

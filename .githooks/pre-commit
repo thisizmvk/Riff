@@ -1,0 +1,16 @@
+#!/bin/bash
+# Runs the queue behavior harness when the queue core is touched.
+# Enable once per clone:   git config core.hooksPath .githooks
+changed="$(git diff --cached --name-only)"
+if echo "$changed" | grep -qE "^(Sources/Audio/|Resources/player-bridge\.js|tools/harness/)"; then
+  echo "pre-commit: queue core touched — running tools/harness/run.sh"
+  ./tools/harness/run.sh || { echo "pre-commit: harness failed; commit blocked (see docs/QUEUE-DESIGN.md)"; exit 1; }
+elif echo "$changed" | grep -qE "^Sources/"; then
+  # Not the queue core, but guard.sh alone (<1s) still catches break
+  # classes `swiftc -parse` can't — duplicate type declarations and an
+  # attribute split from its declaration — both of which have broken
+  # the real build in Sources/UI before. run.sh already calls guard.sh
+  # on the branch above, so this never runs the guards twice.
+  echo "pre-commit: Sources touched — running tools/harness/guard.sh"
+  ./tools/harness/guard.sh || { echo "pre-commit: static guards failed; commit blocked"; exit 1; }
+fi

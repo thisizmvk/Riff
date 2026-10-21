@@ -179,3 +179,51 @@ struct NowPlayingWidgetView: View {
         return FileManager.default.fileExists(atPath: path.path) ? path : nil
     }
 }
+
+// MARK: - Previews
+
+// Xcode Canvas previews — render the widget at both supported families
+// with a populated snapshot AND the empty placeholder, so design changes
+// can be verified without launching WidgetKit Simulator (which trips on
+// AppIntents/App-Group widgets) or installing into Notification Center.
+#Preview("Small — playing", as: .systemSmall) {
+    NowPlayingWidget()
+} timeline: {
+    NowPlayingEntry(
+        date: .now,
+        snapshot: NowPlayingSnapshot(
+            videoId: "preview",
+            title: "Karuppu",
+            subtitle: "Sai Abhyankkar",
+            thumbnailURLString: nil,
+            isPlaying: true,
+            updatedAt: .now,
+            elapsed: 42,
+            duration: 213
+        )
+    )
+}
+
+#Preview("Medium — playing", as: .systemMedium) {
+    NowPlayingWidget()
+} timeline: {
+    NowPlayingEntry(
+        date: .now,
+        snapshot: NowPlayingSnapshot(
+            videoId: "preview",
+            title: "Rama Rama Krishna Krishna",
+            subtitle: "M.M. Keeravani",
+            thumbnailURLString: nil,
+            isPlaying: false,
+            updatedAt: .now,
+            elapsed: 108,
+            duration: 244
+        )
+    )
+}
+
+#Preview("Small — placeholder", as: .systemSmall) {
+    NowPlayingWidget()
+} timeline: {
+    NowPlayingEntry(date: .now, snapshot: nil)
+}

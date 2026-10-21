@@ -4,6 +4,13 @@ import SwiftUI
 /// four use the same InnerTube /browse response shape (header + tracklist),
 /// they just style slightly differently. Pushed onto the active tab's
 /// NavigationStack when the user taps a non-song tile.
+/// A tracklist row with a per-ENTRY identity (see `tracklist`).
+private struct IndexedTrack: Identifiable {
+    let id: String
+    let index: Int
+    let track: MediaItem
+}
+
 struct DetailView: View {
     @Environment(AppEnvironment.self) private var env
     let item: MediaItem
@@ -18,6 +25,12 @@ struct DetailView: View {
     /// playlist remembers the user's choice without leaking it across
     /// other pages.
     @State private var trackSort: LibrarySorting.TrackSortOrder = .original
+
+    /// Dominant color of the page artwork, driving the top-anchored
+    /// accent wash behind the header (Apple Music / YT Music signature).
+    /// nil until extracted, and on failure, so the page falls back to the
+    /// plain base background. See `.background` below and `backdropArtURL`.
+    @State private var backdropColor: Color? = nil
 
     /// True when the open detail page represents a playlist owned by
     /// the signed-in user — checked by id against env.userPlaylists.
@@ -89,31 +102,24 @@ struct DetailView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
+                // In-content back button. The window toolbar (which would
+                // otherwise carry NavigationStack's back button) is hidden
+                // app-wide to dodge the NSToolbar duplicate-identifier
+                // crash, so detail pages provide their own.
+                backButton
+                    .padding(.horizontal, 24)
                 if let page {
-                    header(page)
-                    Divider().background(Theme.divider)
-                    if page.tracks.isEmpty {
-                        Text("No tracks")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.white.opacity(0.75))
-                            .padding(.horizontal, 32)
+                    // Album + playlist pages use YT Music web's two-column
+                    // layout: a fixed header column (centered artwork /
+                    // artist / title / meta / circular actions) on the
+                    // left, the tracklist on the right. Artist + podcast
+                    // pages keep the horizontal hero header.
+                    if item.kind == .album || item.kind == .playlist {
+                        albumLayout(page)
                     } else {
-                        if showsTrackSortMenu {
-                            // Sort menu above the tracklist. Right-aligned
-                            // so it doesn't shove the section heading
-                            // around as the user toggles between orders.
-                            HStack {
-                                Spacer()
-                                TrackSortMenu(
-                                    selection: $trackSort,
-                                    surface: trackSortSurface,
-                                    persistenceKey: trackSortPersistenceKey,
-                                    orders: availableTrackSorts
-                                )
-                            }
-                            .padding(.horizontal, 32)
-                        }
-                        tracklist(sortedTracks(page.tracks), fallbackArtwork: page.artworkURL ?? item.thumbnailURL)
+                        header(page)
+                        Divider().background(Theme.divider)
+                        trackSection(page)
                     }
                     // "More from <Artist>" / "You might also like" /
                     // "Other versions" — YT Music's at-the-bottom carousels.
@@ -123,7 +129,7 @@ struct DetailView: View {
                             .padding(.top, 16)
                     }
                 } else if loading {
-                    ProgressView().frame(maxWidth: .infinity, minHeight: 240)
+                    DetailSkeleton()
                 } else if let error {
                     ErrorBanner(message: error) {
                         Task { await load() }
@@ -131,9 +137,38 @@ struct DetailView: View {
                     .padding(.horizontal, 32)
                 }
             }
-            .padding(.vertical, 24)
+            .padding(.top, 24)
+            // Clear the mini-player bar (~72pt) when one is showing so the
+            // last related rail's tile TITLES are not clipped by it — they
+            // were rendering below the fold ("relevant albums don't show
+            // names"). Plain 24 when nothing is playing.
+            .padding(.bottom, env.player.hasTrack ? 96 : 24)
         }
-        .background(Color.black.ignoresSafeArea())
+        .background {
+            // Backdrops live in a background stack — entirely behind the
+            // ScrollView, so their sizes never feed back into its layout
+            // (the fullscreen-ZStack inflation trap). A top-anchored wash
+            // of the artwork's dominant color tints the header region and
+            // fades to the flat base well before the tracklist, keeping
+            // row text on the familiar dark ground.
+            ZStack(alignment: .top) {
+                Theme.Bg.base
+                if let backdropColor {
+                    LinearGradient(
+                        stops: [
+                            .init(color: backdropColor.opacity(0.34), location: 0.0),
+                            .init(color: backdropColor.opacity(0.16), location: 0.14),
+                            .init(color: backdropColor.opacity(0.04), location: 0.34),
+                            .init(color: .clear, location: 0.52),
+                        ],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .transition(.opacity)
+                }
+            }
+            .ignoresSafeArea()
+            .animation(.easeInOut(duration: 0.5), value: backdropColor)
+        }
         .task(id: item.id) {
             await load()
             // Make sure userPlaylists is populated so the
@@ -141,14 +176,348 @@ struct DetailView: View {
             // first navigation. Cheap when already loaded.
             env.loadUserPlaylistsIfNeeded()
         }
+        .task(id: backdropArtURL) {
+            // Pull the accent color off the artwork once it's known. Reads
+            // the shared URLCache the header AsyncImage warms, so it's
+            // usually instant. A cancelled fetch (fast back-navigation)
+            // must not land late and clear the next page's color.
+            guard let url = backdropArtURL else {
+                backdropColor = nil
+                return
+            }
+            let color = await DominantColor.extract(from: url)
+            guard !Task.isCancelled else { return }
+            backdropColor = color
+        }
+        // Edit-playlist sheet. Attached at page level (not inside a
+        // header builder) because BOTH layouts — the two-column album
+        // page's ⋯ menu and the classic hero header — can present it.
+        .sheet(isPresented: $editSheetPresented) {
+            EditPlaylistSheet(
+                playlistId: item.id,
+                initialTitle: resolvedTitle,
+                onDeleted: {
+                    // Pop back to the previous nav stack frame so
+                    // the user isn't stranded on a deleted playlist.
+                    // Falls back to no-op if the user was at root.
+                    goBack()
+                }
+            )
+        }
+        // CRITICAL — do not remove: suppresses NavigationStack's automatic
+        // back-button toolbar item AT THE SOURCE. With four tab panes
+        // mounted, pushed pages in two stacks registered duplicate toolbar
+        // item identifiers and NSToolbar throws (macOS 27 crashes on it).
+        // Hiding the toolbar did NOT stop the registration — field crashes
+        // 2026-10-09 and 2026-10-20 both died in
+        // NSToolbar _insertNewItemWithItemIdentifier. Riff's back
+        // affordance is the in-content `backButton` above.
+        .navigationBarBackButtonHidden(true)
+    }
+
+    /// The artwork URL the accent wash is sampled from: the resolved
+    /// page artwork once loaded, else the tile thumbnail the user tapped
+    /// in from, so the wash appears immediately rather than after /browse.
+    private var backdropArtURL: URL? {
+        page?.artworkURL ?? item.thumbnailURL
+    }
+
+    /// Pops the active tab's navigation stack by one. Mirrors the
+    /// per-tab path switch used elsewhere; no-ops at the root.
+    private func goBack() {
+        switch env.activeTab {
+        case .home:    if !env.homeNavPath.isEmpty    { env.homeNavPath.removeLast() }
+        case .explore: if !env.exploreNavPath.isEmpty { env.exploreNavPath.removeLast() }
+        case .search:  if !env.searchNavPath.isEmpty  { env.searchNavPath.removeLast() }
+        case .library: if !env.libraryNavPath.isEmpty { env.libraryNavPath.removeLast() }
+        }
+    }
+
+    /// Back affordance for detail pages (the macOS toolbar back button is
+    /// unavailable — the window toolbar is hidden app-wide). ⌘[ also pops.
+    private var backButton: some View {
+        Button(action: goBack) {
+            HStack(spacing: 5) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("Back")
+                    .font(.system(size: 13, weight: .medium))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Color.white.opacity(0.10)))
+            .overlay(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .keyboardShortcut("[", modifiers: .command)
+        .help("Back")
+        .accessibilityLabel("Back")
+    }
+
+    /// Page title with the /browse result preferred over the (possibly
+    /// stale) tile the user tapped in from.
+    private var resolvedTitle: String {
+        if let t = page?.title, !t.isEmpty { return t }
+        return item.title
+    }
+
+    // MARK: - Album / playlist two-column layout (YT Music web)
+
+    private func albumLayout(_ page: InnerTubeClient.DetailPage) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            albumHeaderColumn(page)
+                .frame(width: 340)
+                .padding(.leading, 24)
+            VStack(alignment: .leading, spacing: 0) {
+                trackSection(page)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// Sort menu + tracklist (or the empty placeholder). Shared by the
+    /// two-column album layout and the classic hero layout.
+    @ViewBuilder
+    private func trackSection(_ page: InnerTubeClient.DetailPage) -> some View {
+        if page.tracks.isEmpty {
+            Text("No tracks")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.Text.secondary)
+                .padding(.horizontal, 32)
+        } else {
+            if showsTrackSortMenu {
+                // Sort menu above the tracklist. Right-aligned so it
+                // doesn't shove the rows around as the user toggles
+                // between orders.
+                HStack {
+                    Spacer()
+                    TrackSortMenu(
+                        selection: $trackSort,
+                        surface: trackSortSurface,
+                        persistenceKey: trackSortPersistenceKey,
+                        orders: availableTrackSorts
+                    )
+                }
+                .padding(.horizontal, 32)
+            }
+            tracklist(sortedTracks(page.tracks), fallbackArtwork: page.artworkURL ?? item.thumbnailURL)
+        }
+    }
+
+    /// Centered header column: HD artwork, artist line ABOVE the big
+    /// title (YT web's order), "Album • 2026", "12 songs • 35 minutes",
+    /// then the circular action cluster with the red Play at its center.
+    private func albumHeaderColumn(_ page: InnerTubeClient.DetailPage) -> some View {
+        VStack(spacing: 6) {
+            AsyncImage(url: (page.artworkURL ?? item.thumbnailURL)?.upscaledArtwork(to: 600)) { phase in
+                switch phase {
+                case .success(let img): img.resizable().aspectRatio(contentMode: .fill)
+                default: Theme.Fill.soft
+                }
+            }
+            .frame(width: 272, height: 272)
+            .clipShape(RoundedRectangle(cornerRadius: 12))
+            .shadow(color: .black.opacity(0.45), radius: 18, y: 8)
+            .padding(.bottom, 16)
+
+            artistLine(page)
+                .font(.system(size: 13, weight: .medium))
+
+            Text(resolvedTitle)
+                .font(.system(size: 26, weight: .bold))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.center)
+                .lineLimit(3)
+
+            Text(kindYearLine(page))
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.Text.secondary)
+            if let counts = songsRuntimeLine(page) {
+                Text(counts)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.Text.secondary)
+            }
+
+            actionCluster(page)
+                .padding(.top, 16)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 8)
+    }
+
+    /// Just the artist for the centered column — the header subtitle's
+    /// kind label ("Album"), year, and "•" separators are dropped
+    /// because the column renders kind + year on its own meta line.
+    /// Linked runs stay tappable.
+    @ViewBuilder
+    private func artistLine(_ page: InnerTubeClient.DetailPage) -> some View {
+        let kept = page.subtitleRuns.filter { run in
+            let t = run.text.trimmingCharacters(in: .whitespaces)
+            guard !t.isEmpty, t != "•", t != "·" else { return false }
+            if ["album", "playlist", "ep", "single", "podcast"].contains(t.lowercased()) { return false }
+            if let y = Int(t), (1900...2099).contains(y) { return false }
+            return true
+        }
+        if kept.isEmpty {
+            // Guard the fallback with the same rules as the runs above:
+            // a bare year is not an artist (playlist headers whose only
+            // run is "2026" rendered the YEAR as the artist line).
+            if let derived = albumArtistFallback(page: page), !derived.isEmpty,
+               Int(derived.trimmingCharacters(in: .whitespaces)) == nil {
+                Text(derived).foregroundStyle(Theme.Text.secondary)
+            }
+            // else: render nothing — the title + meta lines carry the page.
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: 0) {
+                ForEach(Array(kept.enumerated()), id: \.offset) { idx, run in
+                    if idx > 0 {
+                        Text(" • ").foregroundStyle(Theme.Text.secondary)
+                    }
+                    if let id = run.browseId, let kind = run.kind, kind == .artist || kind == .album {
+                        Button {
+                            env.navigateToBrowseId(id, kind: kind)
+                        } label: {
+                            Text(run.text)
+                                .foregroundStyle(.white)
+                                .underline(true, color: Theme.Text.tertiary)
+                        }
+                        .buttonStyle(.plain)
+                    } else {
+                        Text(run.text).foregroundStyle(Theme.Text.secondary)
+                    }
+                }
+            }
+            .lineLimit(1)
+        }
+    }
+
+    /// "Album • 2026" — year from any track, else from a bare-year
+    /// header subtitle run (playlists often carry it only there).
+    private func kindYearLine(_ page: InnerTubeClient.DetailPage) -> String {
+        let headerYear = page.subtitleRuns
+            .compactMap { Int($0.text.trimmingCharacters(in: .whitespaces)) }
+            .first { (1900...2099).contains($0) }
+        if let y = page.tracks.compactMap(\.year).first ?? headerYear {
+            return "\(kindLabel) • \(y)"
+        }
+        return kindLabel
+    }
+
+    /// "12 songs • 35 minutes" — YT web spells minutes out here.
+    private func songsRuntimeLine(_ page: InnerTubeClient.DetailPage) -> String? {
+        guard !page.tracks.isEmpty else { return nil }
+        var pieces = [page.tracks.count == 1 ? "1 song" : "\(page.tracks.count) songs"]
+        let secs = page.tracks.compactMap(\.durationSeconds).reduce(0, +)
+        if secs > 0 {
+            let m = secs / 60
+            if m < 60 {
+                pieces.append(m == 1 ? "1 minute" : "\(m) minutes")
+            } else {
+                let h = m / 60, r = m % 60
+                pieces.append(r == 0 ? "\(h) hour\(h == 1 ? "" : "s")" : "\(h) hr \(r) min")
+            }
+        }
+        return pieces.joined(separator: " • ")
+    }
+
+    /// Circular icon actions — shuffle · save · PLAY · share · ⋯ —
+    /// with the oversized red play as the center of gravity.
+    private func actionCluster(_ page: InnerTubeClient.DetailPage) -> some View {
+        HStack(spacing: 14) {
+            circleButton("shuffle", help: "Shuffle") {
+                Task { await shuffle(page) }
+            }
+
+            if !isUserOwnedPlaylist,
+               let saveId = page.playablePlaylistId, !saveId.isEmpty {
+                let saved = env.isSavedToLibrary(saveId)
+                circleButton(saved ? "checkmark" : "plus",
+                             help: saved ? "Remove from your library" : "Save to your library",
+                             tint: saved ? Theme.red : nil) {
+                    env.toggleSavedToLibrary(playlistId: saveId, title: resolvedTitle)
+                }
+            }
+
+            Button {
+                Task { await playAll(page) }
+            } label: {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 56, height: 56)
+                    .background(Circle().fill(Theme.red))
+                    .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Play")
+            .accessibilityLabel("Play \(resolvedTitle)")
+
+            circleButton("square.and.arrow.up", help: "Copy share link") {
+                copyShareLink(page)
+            }
+
+            Menu {
+                if isUserOwnedPlaylist {
+                    Button("Edit Playlist…") { editSheetPresented = true }
+                }
+                Button("Copy share link") { copyShareLink(page) }
+            } label: {
+                circleLabel("ellipsis")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+        }
+    }
+
+    private func circleButton(_ systemImage: String, help: String,
+                              tint: Color? = nil,
+                              action: @escaping () -> Void) -> some View {
+        Button(action: action) { circleLabel(systemImage, tint: tint) }
+            .buttonStyle(.plain)
+            .help(help)
+            .accessibilityLabel(help)
+    }
+
+    private func circleLabel(_ systemImage: String, tint: Color? = nil) -> some View {
+        Image(systemName: systemImage)
+            .font(.system(size: 15, weight: .semibold))
+            .foregroundStyle(tint ?? .white)
+            .frame(width: 42, height: 42)
+            .background(Circle().fill(Color.white.opacity(0.08)))
+            .overlay(Circle().strokeBorder(Color.white.opacity(0.10), lineWidth: 1))
+            .contentShape(Circle())
+    }
+
+    /// Copies the canonical music.youtube.com URL for this page. Albums
+    /// use the browseId; playlists use the bare list id (VL prefix
+    /// stripped — the VL form is browse-only and 404s as a share link).
+    private func copyShareLink(_ page: InnerTubeClient.DetailPage) {
+        let url: String
+        if item.kind == .album {
+            url = "https://music.youtube.com/browse/\(item.id)"
+        } else {
+            let pid = page.playablePlaylistId ?? item.id
+            let bare = pid.hasPrefix("VL") ? String(pid.dropFirst(2)) : pid
+            url = "https://music.youtube.com/playlist?list=\(bare)"
+        }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(url, forType: .string)
+        env.showToast("Link copied")
     }
 
     private func header(_ page: InnerTubeClient.DetailPage) -> some View {
         HStack(alignment: .top, spacing: 24) {
-            AsyncImage(url: page.artworkURL ?? item.thumbnailURL) { phase in
+            // Artwork upscaled via the =wN-hN host rewrite — the raw
+            // thumbnail YT attaches to browse rows is often 226px, which
+            // is soft at 220pt on Retina.
+            AsyncImage(url: (page.artworkURL ?? item.thumbnailURL)?.upscaledArtwork(to: 600)) { phase in
                 switch phase {
                 case .success(let img): img.resizable().aspectRatio(contentMode: .fill)
-                default: Color.white.opacity(0.06)
+                default: Theme.Fill.soft
                 }
             }
             .frame(width: 220, height: 220)
@@ -160,7 +529,7 @@ struct DetailView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .textCase(.uppercase)
                     .tracking(1.2)
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(Theme.Text.secondary)
                 Text(page.title.isEmpty ? item.title : page.title)
                     .font(.system(size: 32, weight: .bold))
                     .foregroundStyle(.white)
@@ -176,7 +545,7 @@ struct DetailView: View {
                 if let meta = metadataLine(for: page) {
                     Text(meta)
                         .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(Theme.Text.secondary)
                 }
                 Spacer(minLength: 8)
                 HStack(spacing: 10) {
@@ -200,6 +569,30 @@ struct DetailView: View {
                             .padding(.vertical, 10)
                     }
                     .buttonStyle(.bordered)
+
+                    // Save to Library — albums and playlists the user
+                    // doesn't already own. Keyed by the playable
+                    // playlist id (album → OLAK5uy…, playlist → its own
+                    // id). Hidden for artists (use Follow) and for
+                    // playlists the user owns (already in their library).
+                    if (item.kind == .album || item.kind == .playlist),
+                       !isUserOwnedPlaylist,
+                       let saveId = page.playablePlaylistId, !saveId.isEmpty {
+                        let saved = env.isSavedToLibrary(saveId)
+                        Button {
+                            env.toggleSavedToLibrary(playlistId: saveId,
+                                                     title: page.title.isEmpty ? item.title : page.title)
+                        } label: {
+                            Label(saved ? "Saved" : "Save",
+                                  systemImage: saved ? "checkmark" : "plus")
+                                .font(.system(size: 13, weight: .semibold))
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(saved ? Theme.red : nil)
+                        .help(saved ? "Remove from your library" : "Save to your library")
+                    }
 
                     // Edit menu — visible only on user-owned
                     // playlists. The endpoints we expose
@@ -231,6 +624,9 @@ struct DetailView: View {
                     // album/playlist pages already get block via
                     // the per-track context menu.
                     if item.kind == .artist {
+                        if env.isSignedIn {
+                            followArtistButton(page: page)
+                        }
                         blockArtistButton(page: page)
                     }
                 }
@@ -238,23 +634,6 @@ struct DetailView: View {
             Spacer()
         }
         .padding(.horizontal, 32)
-        .sheet(isPresented: $editSheetPresented) {
-            EditPlaylistSheet(
-                playlistId: item.id,
-                initialTitle: page.title.isEmpty ? item.title : page.title,
-                onDeleted: {
-                    // Pop back to the previous nav stack frame so
-                    // the user isn't stranded on a deleted playlist.
-                    // Falls back to no-op if the user was at root.
-                    switch env.activeTab {
-                    case .home:    if !env.homeNavPath.isEmpty    { env.homeNavPath.removeLast()    }
-                    case .explore: if !env.exploreNavPath.isEmpty { env.exploreNavPath.removeLast() }
-                    case .search:  if !env.searchNavPath.isEmpty  { env.searchNavPath.removeLast()  }
-                    case .library: if !env.libraryNavPath.isEmpty { env.libraryNavPath.removeLast() }
-                    }
-                }
-            )
-        }
     }
 
     /// Inline "Don't recommend this artist" / "Recommend this artist
@@ -270,6 +649,26 @@ struct DetailView: View {
     /// the human-readable name because `item.title` can be stale
     /// (e.g. arriving via "Go to artist" from a song row where the
     /// artist name was a subtitle split that lost the full name).
+    /// Follow / Following toggle on Artist pages — the library already
+    /// has a "New from artists you follow" rail, but there was no way to
+    /// follow anyone without leaving the app.
+    private func followArtistButton(page: InnerTubeClient.DetailPage) -> some View {
+        let following = env.isFollowing(artistId: item.id)
+        return Button {
+            let name = page.title.isEmpty ? item.title : page.title
+            env.toggleFollow(artistId: item.id, name: name)
+        } label: {
+            Label(following ? "Following" : "Follow",
+                  systemImage: following ? "checkmark" : "plus")
+                .font(.system(size: 13, weight: .semibold))
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+        }
+        .buttonStyle(.bordered)
+        .tint(following ? Theme.red : nil)
+        .help(following ? "Stop following this artist" : "Follow this artist on YouTube Music")
+    }
+
     @ViewBuilder
     private func blockArtistButton(page: InnerTubeClient.DetailPage) -> some View {
         let blocked = env.isBlocked(artistId: item.id)
@@ -300,27 +699,52 @@ struct DetailView: View {
     /// album responses where YT omits per-track artwork because every
     /// track shares the album cover.
     private func tracklist(_ tracks: [MediaItem], fallbackArtwork: URL?) -> some View {
-        LazyVStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(tracks.enumerated()), id: \.element.id) { index, track in
-                // Backfill missing track artwork with the album/playlist
-                // cover so the now-playing strip and lock screen show
-                // *something* rather than a black square.
-                let resolved = MediaItem(
-                    id: track.id,
-                    kind: track.kind,
-                    title: track.title,
-                    subtitle: track.subtitle,
-                    thumbnailURL: track.thumbnailURL ?? fallbackArtwork,
-                    albumId: track.albumId,
-                    artistId: track.artistId,
-                    setVideoId: track.setVideoId
-                )
+        // Use the same backfill as the play/shuffle paths so the row
+        // display, the mini-player, the lock-screen widget, and the
+        // scrobbler payload all agree on artwork + artist. The `page`
+        // handoff is safe here because tracklist(...) is only ever
+        // called from inside signedInBody where `page` is non-nil.
+        let backfilled: [MediaItem] = page.map { p in tracks.map { backfillMetadata($0, page: p) } } ?? tracks
+        // Local play counts (YT exposes no per-song counts) — computed
+        // once for the whole list and handed to each row.
+        let counts = LibrarySorting.playCounts(from: env.player.playedEntries)
+        return LazyVStack(alignment: .leading, spacing: 0) {
+            // Row identity: a playlist may legally hold the same song
+            // twice (that is what `setVideoId` is for). Keying by videoId
+            // alone made SwiftUI diffing undefined — double highlights,
+            // the wrong row animating out. setVideoId is unique per
+            // entry; otherwise id + position.
+            let rows: [IndexedTrack] = backfilled.enumerated().map { pair in
+                IndexedTrack(id: pair.element.setVideoId.map { "s:" + $0 } ?? "\(pair.element.id)#\(pair.offset)",
+                             index: pair.offset, track: pair.element)
+            }
+            ForEach(rows) { row in
+                let index = row.index
+                let track = row.track
                 TrackRow(
                     index: index,
-                    item: resolved,
+                    item: track,
+                    playCount: counts[track.id] ?? 0,
                     isUserOwnedPlaylist: isUserOwnedPlaylist,
+                    onPlay: {
+                        // "Play from here": tapping track N of an
+                        // album / playlist / podcast plays the list
+                        // FROM N (N+1… queued), matching Spotify /
+                        // Apple Music / YT Music. Artist top-songs keep
+                        // single-play with auto-radio. Reuses the
+                        // existing playTracks call site — no new
+                        // navigate / play(item:) site, QueuePolicy
+                        // untouched.
+                        switch item.kind {
+                        case .album, .playlist, .podcast:
+                            let rest = Array(backfilled[index...])
+                            await env.player.playTracks(rest, playlistId: page?.playablePlaylistId, sourceTitle: resolvedTitle)
+                        default:
+                            await env.player.play(item: track)
+                        }
+                    },
                     onRemoveFromPlaylist: isUserOwnedPlaylist
-                        ? { setId in await removeFromCurrentPlaylist(track: resolved, setVideoId: setId) }
+                        ? { setId in await removeFromCurrentPlaylist(track: track, setVideoId: setId) }
                         : nil
                 )
             }
@@ -343,7 +767,7 @@ struct DetailView: View {
     /// subtitles fit on one line anyway, and `Spacer` + `lineLimit(1)`
     /// gracefully truncates with an ellipsis.
     @ViewBuilder
-    private func annotatedSubtitle(_ page: InnerTubeClient.DetailPage) -> some View {
+    private func annotatedSubtitle(_ page: InnerTubeClient.DetailPage, centered: Bool = false) -> some View {
         let runs: [InnerTubeClient.AnnotatedRun] = page.subtitleRuns.isEmpty
             ? [InnerTubeClient.AnnotatedRun(
                 text: page.subtitle.isEmpty ? item.subtitle : page.subtitle,
@@ -353,13 +777,19 @@ struct DetailView: View {
         let visible = runs.filter { !$0.text.isEmpty }
 
         if visible.isEmpty {
-            // OST and various-artists albums often come back with an
+            // OST and single-song albums often come back with an
             // empty subtitle — YT has no single "album artist" to
-            // surface. Leaving the header blank reads as broken;
-            // fall back to the kind label so the user gets at least
-            // "Album" / "Playlist" / etc.
-            Text(kindLabel)
-                .foregroundStyle(.white.opacity(0.7))
+            // surface. Try the same fallback the tracklist uses
+            // (first track's own artist) before dropping down to
+            // the kind label; showing "Album" alone reads like the
+            // data is broken.
+            if let derived = albumArtistFallback(page: page), !derived.isEmpty {
+                Text(derived)
+                    .foregroundStyle(Theme.Text.secondary)
+            } else {
+                Text(kindLabel)
+                    .foregroundStyle(Theme.Text.secondary)
+            }
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 0) {
                 ForEach(Array(visible.enumerated()), id: \.offset) { _, run in
@@ -369,15 +799,15 @@ struct DetailView: View {
                         } label: {
                             Text(run.text)
                                 .foregroundStyle(.white)
-                                .underline(true, color: .white.opacity(0.5))
+                                .underline(true, color: Theme.Text.tertiary)
                         }
                         .buttonStyle(.plain)
                     } else {
                         Text(run.text)
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(Theme.Text.secondary)
                     }
                 }
-                Spacer(minLength: 0)
+                if !centered { Spacer(minLength: 0) }
             }
         }
     }
@@ -386,11 +816,22 @@ struct DetailView: View {
     /// Uses `HomeSectionRow` so the visual treatment matches the Home
     /// tab's carousels — a familiar pattern keeps the page coherent.
     private func relatedSections(_ sections: [HomeSection]) -> some View {
-        VStack(alignment: .leading, spacing: 24) {
-            Divider().background(Theme.divider)
-            ForEach(sections) { section in
-                HomeSectionRow(section: section)
-                    .padding(.horizontal, 32)
+        // Drop tiles YT returned with no title: they render as a
+        // nameless artwork square ("Releases for you" showed anonymous
+        // covers). A section left empty after filtering is dropped too,
+        // so no bare header sits over nothing.
+        let cleaned: [HomeSection] = sections.compactMap { section in
+            let named = section.items.filter { !env.displayTitle(for: $0).trimmingCharacters(in: .whitespaces).isEmpty }
+            guard !named.isEmpty else { return nil }
+            return HomeSection(id: section.id, title: section.title, items: named)
+        }
+        return VStack(alignment: .leading, spacing: 24) {
+            if !cleaned.isEmpty {
+                Divider().background(Theme.divider)
+                ForEach(cleaned) { section in
+                    HomeSectionRow(section: section)
+                        .padding(.horizontal, 32)
+                }
             }
         }
     }
@@ -458,6 +899,7 @@ struct DetailView: View {
             page = detail
             error = nil
         } catch {
+            if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
             self.error = LoadErrorPresenter.message(for: error, env: env)
         }
     }
@@ -478,7 +920,9 @@ struct DetailView: View {
         if !page.tracks.isEmpty {
             let ordered = sortedTracks(page.tracks)
             let backfilled = ordered.map { backfillArtwork($0, page: page) }
-            await env.player.playTracks(backfilled)
+            // Thread the album/playlist ID so /next auto-extension
+            // stays in-context when the user region drains. (C5)
+            await env.player.playTracks(backfilled, playlistId: page.playablePlaylistId, sourceTitle: resolvedTitle)
         } else if let plid = page.playablePlaylistId {
             // Empty tracklist — fall back to YT's playlist endpoint.
             // Reaches here only for entities where we couldn't parse
@@ -503,7 +947,7 @@ struct DetailView: View {
         // removal immediately. We don't refetch here because that
         // would scroll the user back to the top; the next time the
         // page loads it'll be authoritative.
-        if var current = page {
+        if let current = page {
             let pruned = current.tracks.filter { $0.id != track.id || $0.setVideoId != setVideoId }
             page = InnerTubeClient.DetailPage(
                 title: current.title,
@@ -525,7 +969,7 @@ struct DetailView: View {
         // playTracks so the entire shuffle chains via the queue.
         guard !page.tracks.isEmpty else { return }
         let shuffled = page.tracks.shuffled().map { backfillArtwork($0, page: page) }
-        await env.player.playTracks(shuffled)
+        await env.player.playTracks(shuffled, playlistId: page.playablePlaylistId, preservesListOrder: false, sourceTitle: resolvedTitle)
     }
 
     /// Returns `track` with its missing thumbnail filled from the
@@ -534,16 +978,72 @@ struct DetailView: View {
     /// from showing a black square for tracks that didn't carry their
     /// own artwork in the InnerTube response.
     private func backfillArtwork(_ track: MediaItem, page: InnerTubeClient.DetailPage) -> MediaItem {
-        guard track.thumbnailURL == nil else { return track }
+        backfillMetadata(track, page: page)
+    }
+
+    /// Fill in missing artwork AND missing artist subtitle from the
+    /// album/playlist page header. YT's album detail response often
+    /// leaves the per-track `subtitle` (flexColumn[1]) empty for OST
+    /// / single-song / various-artists releases — the web app derives
+    /// the artist from the page header instead. Doing the same here
+    /// keeps track rows, the mini-player, the lock screen, and the
+    /// scrobbler payload all showing a real artist name instead of a
+    /// blank line.
+    private func backfillMetadata(_ track: MediaItem, page: InnerTubeClient.DetailPage) -> MediaItem {
+        let needsArtwork = track.thumbnailURL == nil
+        let needsSubtitle = track.subtitle.isEmpty
+        guard needsArtwork || needsSubtitle else { return track }
+        let filledSubtitle = needsSubtitle ? (albumArtistFallback(page: page) ?? track.subtitle) : track.subtitle
+        let filledThumb = track.thumbnailURL ?? page.artworkURL ?? item.thumbnailURL
         return MediaItem(
             id: track.id,
             kind: track.kind,
             title: track.title,
-            subtitle: track.subtitle,
-            thumbnailURL: page.artworkURL ?? item.thumbnailURL,
+            subtitle: filledSubtitle,
+            thumbnailURL: filledThumb,
             albumId: track.albumId,
-            artistId: track.artistId
+            artistId: track.artistId,
+            setVideoId: track.setVideoId,
+            durationSeconds: track.durationSeconds,
+            year: track.year
         )
+    }
+
+    /// The best guess at an "album artist" for backfilling per-track
+    /// subtitles. Prefers, in order:
+    ///
+    ///   1. The first `.artist`-kind run of the header's subtitleRuns
+    ///      — that's YT's canonical album artist.
+    ///   2. The first non-empty plain run from the header subtitle,
+    ///      dropped if it's just the kind label ("Album") — some
+    ///      responses ship a single un-annotated artist text run.
+    ///   3. Any track in the same page that has a non-empty subtitle
+    ///      of its own — for various-artists albums where the header
+    ///      really has no artist to name, at least one track usually
+    ///      does, and that's better than showing blanks everywhere.
+    ///
+    /// Returns nil when nothing usable is found. The caller then
+    /// leaves the row's subtitle empty rather than substituting
+    /// "Album" (which reads as data corruption to the user).
+    private func albumArtistFallback(page: InnerTubeClient.DetailPage) -> String? {
+        if let artistRun = page.subtitleRuns.first(where: { $0.kind == .artist && !$0.text.isEmpty }) {
+            return artistRun.text
+        }
+        // First non-empty run that isn't a separator. YT uses " • "
+        // and " · " between runs; those show up as their own runs.
+        let separators: Set<String> = [" • ", " · ", " - "]
+        if let firstText = page.subtitleRuns.first(where: {
+            !$0.text.isEmpty && !separators.contains($0.text) && $0.text != kindLabel
+        }) {
+            return firstText.text
+        }
+        // Fall through to any track's own subtitle. Uses the first
+        // non-empty entry, not a majority vote — an album where one
+        // track happens to carry its artist is enough of a signal.
+        if let hint = page.tracks.first(where: { !$0.subtitle.isEmpty })?.subtitle {
+            return hint
+        }
+        return nil
     }
 }
 
@@ -566,7 +1066,13 @@ private struct TrackRow: View {
     @Environment(AppEnvironment.self) private var env
     let index: Int
     let item: MediaItem
+    /// Local play count for this track (0 when never played in Riff).
+    var playCount: Int = 0
     let isUserOwnedPlaylist: Bool
+    /// "Play from here" — plays the tracklist from this row (albums /
+    /// playlists / podcasts) or single-plays (artist top songs). The
+    /// row owner builds the right action; the row just invokes it.
+    var onPlay: (() async -> Void)? = nil
     /// Callback for "Remove from this playlist" — when nil the menu
     /// entry is hidden. Provided by DetailView with the right
     /// closure context (it needs `self.item` for the playlistId).
@@ -583,7 +1089,9 @@ private struct TrackRow: View {
     /// playing row we ignore this and drive directly from
     /// `env.player.liked`, which IS canonical (PlayerBridge syncs it
     /// against /next on every track change).
-    @State private var likedOptimistic: Bool = false
+    /// Per-row optimistic override. nil = show the app-wide resting
+    /// truth (env.isLiked); set on tap so the heart flips instantly.
+    @State private var likedOverride: Bool? = nil
 
     private var isCurrent: Bool {
         env.player.currentTrack?.videoId == item.id
@@ -593,20 +1101,24 @@ private struct TrackRow: View {
     /// the PlayerBridge; other rows fall back to the row-local
     /// optimistic flag.
     private var isLiked: Bool {
-        isCurrent ? env.player.liked : likedOptimistic
+        if isCurrent { return env.player.liked }
+        return likedOverride ?? env.isLiked(item.id)
     }
 
     var body: some View {
         Button {
-            Task { await env.player.play(item: item) }
+            Task {
+                if let onPlay { await onPlay() }
+                else { await env.player.play(item: item) }
+            }
         } label: {
             HStack(spacing: 14) {
                 leadingColumn
-                AsyncImage(url: item.thumbnailURL) { phase in
+                AsyncImage(url: item.thumbnailURL?.upscaledArtwork(to: 120)) { phase in
                     if case .success(let img) = phase {
                         img.resizable().aspectRatio(contentMode: .fill)
                     } else {
-                        Color.white.opacity(0.06)
+                        Theme.Fill.soft
                     }
                 }
                 .frame(width: 44, height: 44)
@@ -614,14 +1126,42 @@ private struct TrackRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(item.title)
                         .font(.system(size: 14, weight: isCurrent ? .semibold : .medium))
-                        .foregroundStyle(isCurrent ? Theme.red : .white)
+                        .foregroundStyle(isCurrent ? Theme.red : Color.white)
                         .lineLimit(2)
-                    Text(item.subtitle)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(isCurrent ? 0.75 : 0.55))
-                        .lineLimit(1)
+                    // Clickable artist(s) + YT's GLOBAL play count in the
+                    // byline ("Thaman S • 347M plays"), matching YT Music
+                    // web's tracklist. The artist names stay individual
+                    // links; the plays run is plain text.
+                    if !item.subtitle.isEmpty || item.playsText != nil {
+                        HStack(spacing: 0) {
+                            if !item.subtitle.isEmpty {
+                                ArtistLinkLine(
+                                    subtitle: item.subtitle,
+                                    primaryArtistId: item.artistId,
+                                    fontSize: 12,
+                                    baseOpacity: isCurrent ? 0.75 : 0.55
+                                )
+                            }
+                            if let plays = item.playsText {
+                                Text(item.subtitle.isEmpty ? plays : " • \(plays)")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.white.opacity(isCurrent ? 0.75 : 0.55))
+                                    .lineLimit(1)
+                            }
+                        }
+                    }
                 }
                 Spacer()
+                // Local play-count badge — only when YT gave us no global
+                // count for the row (playlists often omit it). Global
+                // stats live in the byline above.
+                if item.playsText == nil, playCount >= 1 {
+                    Text("\(playCount)×")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundStyle(Theme.Text.tertiary)
+                        .help("\(playCount) play\(playCount == 1 ? "" : "s") in Riff")
+                        .accessibilityLabel("\(playCount) plays")
+                }
                 // Hover-revealed action cluster: like + overflow menu.
                 // Sits between the title block and the duration, fading
                 // in on hover. Duration stays put — on narrow rows the
@@ -649,7 +1189,7 @@ private struct TrackRow: View {
                 if isCurrent {
                     Theme.red.opacity(0.08)
                 } else if hovering {
-                    Color.white.opacity(0.05)
+                    Theme.Fill.soft
                 } else {
                     Color.clear
                 }
@@ -691,8 +1231,9 @@ private struct TrackRow: View {
                     // re-render with truth the moment it becomes the
                     // current track), and a stuck optimistic state
                     // for a non-playing row is benign.
-                    let willLike = !likedOptimistic
-                    likedOptimistic = willLike
+                    let willLike = !(likedOverride ?? env.isLiked(item.id))
+                    likedOverride = willLike
+                    env.likedSongs.set(item.id, liked: willLike)
                     let videoId = item.id
                     Task {
                         do {
@@ -710,7 +1251,7 @@ private struct TrackRow: View {
             } label: {
                 Image(systemName: isLiked ? "heart.fill" : "heart")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(isLiked ? Theme.red : .white.opacity(0.7))
+                    .foregroundStyle(isLiked ? Theme.red : Theme.Text.secondary)
                     .frame(width: 20, height: 20)
                     .contentShape(Rectangle())
             }
@@ -727,7 +1268,7 @@ private struct TrackRow: View {
             } label: {
                 Image(systemName: "ellipsis")
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(Theme.Text.secondary)
                     .frame(width: 20, height: 20)
                     .contentShape(Rectangle())
             }
@@ -748,7 +1289,7 @@ private struct TrackRow: View {
             // playing (replaced by equalizer icon).
             Text("\(index + 1)")
                 .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.45))
+                .foregroundStyle(Theme.Text.tertiary)
                 .opacity(hovering || isCurrent ? 0 : 1)
             // Currently-playing equalizer indicator. YT Music has an
             // animated wave here; `speaker.wave.2.fill` is the
@@ -776,5 +1317,53 @@ private struct TrackRow: View {
             return String(format: "%d:%02d:%02d", h, m, s)
         }
         return String(format: "%d:%02d", m, s)
+    }
+}
+
+/// Loading placeholder for a detail page — a ghost of the header
+/// (artwork + title/subtitle bars) and a handful of tracklist rows,
+/// pulsing gently. Mirrors HomeSkeleton so a cold navigation reads as
+/// "loading this page" rather than a bare centered spinner on black.
+private struct DetailSkeleton: View {
+    @State private var pulse = false
+    private var fill: Color { Color.white.opacity(pulse ? 0.10 : 0.06) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            HStack(alignment: .top, spacing: 24) {
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(fill)
+                    .frame(width: 220, height: 220)
+                VStack(alignment: .leading, spacing: 12) {
+                    RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 80, height: 11)
+                    RoundedRectangle(cornerRadius: 6).fill(fill).frame(width: 260, height: 30)
+                    RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 180, height: 13)
+                    RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 220, height: 11)
+                }
+                .padding(.top, 6)
+                Spacer()
+            }
+            .padding(.horizontal, 32)
+
+            VStack(spacing: 14) {
+                ForEach(0..<7, id: \.self) { _ in
+                    HStack(spacing: 12) {
+                        RoundedRectangle(cornerRadius: Theme.Radius.row).fill(fill).frame(width: 40, height: 40)
+                        VStack(alignment: .leading, spacing: 6) {
+                            RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 200, height: 12)
+                            RoundedRectangle(cornerRadius: 4).fill(fill).frame(width: 120, height: 10)
+                        }
+                        Spacer()
+                    }
+                }
+            }
+            .padding(.horizontal, 32)
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 1.0).repeatForever(autoreverses: true)) {
+                pulse = true
+            }
+        }
+        .accessibilityHidden(true)
     }
 }

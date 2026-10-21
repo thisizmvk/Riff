@@ -1,6 +1,24 @@
 import Foundation
 import os
 
+/// A chat reply plus whether the provider stopped because the reply hit
+/// the output-token budget. `truncated == true` means `text` is cut off
+/// mid-output (a JSON reply is missing its closing bracket).
+struct LLMReply: Sendable, Hashable {
+    let text: String
+    let truncated: Bool
+}
+
+/// Opt-in capability for providers that let the caller size the output
+/// budget per call and report when the reply hit it. `chat(_:model:)`
+/// keeps its fixed default budget for the short workloads (queue
+/// builder, X-Ray); long-output callers such as `LyricsTranslator`
+/// probe with `as? any BudgetedLLMProvider` and fall back to
+/// `chat(_:model:)` for providers that don't adopt it.
+protocol BudgetedLLMProvider: LLMProvider {
+    func chatReply(_ messages: [LLMMessage], model: String, maxTokens: Int) async throws -> LLMReply
+}
+
 /// Anthropic Messages API client. Reads the user's API key from
 /// Keychain (item account `riff.llm.anthropic`, service `riff` — the
 /// existing `Keychain` enum's per-app service is `dev.riff.app`; we
@@ -12,7 +30,7 @@ import os
 /// friendly: the provider has no mutable state, is `Sendable`, and
 /// every network call goes through the actor-agnostic async URLSession
 /// API.
-struct AnthropicProvider: LLMProvider {
+struct AnthropicProvider: LLMProvider, BudgetedLLMProvider {
     /// Keychain account used to store the user's API key. Distinct
     /// from `keychainModelAccount` so the user can rotate one without
     /// touching the other.
@@ -39,6 +57,11 @@ struct AnthropicProvider: LLMProvider {
     /// API version header — required by Anthropic. Bumped only when
     /// we adopt a new version intentionally.
     static let apiVersion = "2023-06-01"
+
+    /// Output budget for `chat(_:model:)` — plenty for the short JSON
+    /// lists the queue builder and X-Ray ask for. Callers with output
+    /// that grows with the input use `chatReply(_:model:maxTokens:)`.
+    static let defaultMaxTokens = 1024
 
     private static let endpoint = URL(string: "https://api.anthropic.com/v1/messages")!
     private static let log = Logger(subsystem: "dev.riff.app", category: "llm")
@@ -91,6 +114,12 @@ struct AnthropicProvider: LLMProvider {
     // MARK: - Chat
 
     func chat(_ messages: [LLMMessage], model: String) async throws -> String {
+        // Unchanged contract for fixed-budget callers: a reply cut off
+        // at the budget is returned as-is and their parsers report it.
+        try await chatReply(messages, model: model, maxTokens: Self.defaultMaxTokens).text
+    }
+
+    func chatReply(_ messages: [LLMMessage], model: String, maxTokens: Int) async throws -> LLMReply {
         guard let apiKey = Self.storedAPIKey(), !apiKey.isEmpty else {
             throw LLMError.unauthorized
         }
@@ -109,7 +138,7 @@ struct AnthropicProvider: LLMProvider {
 
         var body: [String: Any] = [
             "model": model,
-            "max_tokens": 1024,
+            "max_tokens": max(1, maxTokens),
             "messages": chatMessages,
         ]
         if !systemPrompt.isEmpty {
@@ -118,6 +147,12 @@ struct AnthropicProvider: LLMProvider {
 
         var req = URLRequest(url: Self.endpoint)
         req.httpMethod = "POST"
+        // Non-streaming: no bytes arrive until the whole reply has been
+        // generated, so a large budget needs more than URLSession's 60s
+        // idle timeout or a long-but-healthy reply times out instead.
+        if maxTokens > Self.defaultMaxTokens {
+            req.timeoutInterval = Self.requestTimeout(forMaxTokens: maxTokens)
+        }
         req.setValue(apiKey, forHTTPHeaderField: "x-api-key")
         req.setValue(Self.apiVersion, forHTTPHeaderField: "anthropic-version")
         req.setValue("application/json", forHTTPHeaderField: "content-type")
@@ -127,6 +162,10 @@ struct AnthropicProvider: LLMProvider {
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: req)
+        } catch let e as URLError where e.code == .cancelled {
+            // A superseded request (track change, clearCache) must not
+            // surface as a red "Couldn't reach the model" banner.
+            throw CancellationError()
         } catch {
             // Note: `error.localizedDescription` from URLSession
             // doesn't contain the API key (it's not part of the
@@ -165,7 +204,21 @@ struct AnthropicProvider: LLMProvider {
         else {
             throw LLMError.empty
         }
-        return text
+        // `stop_reason == "max_tokens"`: the reply hit the budget and
+        // `text` stops mid-output. Reported, not thrown, so a caller can
+        // still use whatever arrived whole.
+        let truncated = (json["stop_reason"] as? String) == "max_tokens"
+        if truncated {
+            Self.log.error("anthropic reply hit max_tokens=\(maxTokens, privacy: .public)")
+        }
+        return LLMReply(text: text, truncated: truncated)
+    }
+
+    /// Request timeout for a budget above the default: 60s floor plus a
+    /// second per 50 output tokens (covers Sonnet's slower generation),
+    /// capped at 5 minutes.
+    static func requestTimeout(forMaxTokens maxTokens: Int) -> TimeInterval {
+        min(300, 60 + TimeInterval(max(0, maxTokens)) / 50)
     }
 
     /// Extract Anthropic's `error.type` from a non-2xx body so we can

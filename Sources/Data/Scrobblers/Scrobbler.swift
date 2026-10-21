@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 /// D1 — last.fm + ListenBrainz scrobbling.
 ///
@@ -84,6 +85,47 @@ protocol ScrobblerService: Sendable {
     func scrobble(_ track: ScrobbleTrack) async
 }
 
+// MARK: - Health
+
+/// Per-service scrobble health, for Settings to render. Scrobble POSTs
+/// are fire-and-forget, so without this a bad secret or a revoked
+/// session key fails silently forever — the toggle stays on and the
+/// user believes they are scrobbling. Services report each POST's
+/// outcome here (hopping to the MainActor from their own executor);
+/// Settings observes it and shows the last failure next to each toggle.
+@MainActor
+final class ScrobbleHealth: ObservableObject {
+    static let shared = ScrobbleHealth()
+
+    enum Outcome: Equatable {
+        case success(at: Date)
+        case failure(code: Int?, message: String, at: Date)
+    }
+
+    /// Last POST outcome, keyed by the service's `displayName`.
+    @Published private(set) var lastOutcome: [String: Outcome] = [:]
+    /// Services whose stored auth is known-bad (e.g. last.fm error 9,
+    /// invalid session key). Permanent — retrying won't help, so
+    /// Settings should render "Reconnect" until the user re-auths.
+    @Published private(set) var needsReauth: Set<String> = []
+
+    func recordSuccess(service: String) {
+        lastOutcome[service] = .success(at: Date())
+        needsReauth.remove(service)
+    }
+
+    func recordFailure(service: String, code: Int?, message: String, permanent: Bool) {
+        lastOutcome[service] = .failure(code: code, message: message, at: Date())
+        if permanent { needsReauth.insert(service) }
+    }
+
+    /// Called when the user saves fresh credentials or clears them.
+    func clear(service: String) {
+        lastOutcome[service] = nil
+        needsReauth.remove(service)
+    }
+}
+
 // MARK: - Coordinator
 
 /// Owns the lifecycle of eligibility tracking and dispatches to every
@@ -119,6 +161,22 @@ final class ScrobblerCoordinator {
         /// Suppresses duplicate scrobbles when elapsed keeps advancing
         /// past the threshold.
         var scrobbled: Bool = false
+        /// Wall-clock moment of the first *playing* tick for this
+        /// window. Overrides `track.startedAt` in outgoing payloads so
+        /// a restored-then-resumed session (or a Repeat-One replay)
+        /// carries the real listen start, not app launch / first play.
+        var startedAt: Date? = nil
+        /// Wall-clock seconds actually listened, accumulated across
+        /// playing ticks. Used for eligibility instead of the raw
+        /// player position, so a seek to 90% doesn't scrobble a track
+        /// the user heard for two seconds.
+        var listened: Double = 0
+        /// Time of the previous playing tick; nil while paused. Gaps
+        /// are capped so sleep/App Nap can't inflate `listened`.
+        var lastTickAt: Date? = nil
+        /// Player position at the previous tick — for detecting a
+        /// Repeat-One loop wrap (end → 0 with no track-change event).
+        var lastElapsed: Double = 0
     }
     private var pending: Pending?
 
@@ -136,14 +194,19 @@ final class ScrobblerCoordinator {
     ///   that's intentional behavior.
     /// - On the first call for a new track, fire `updateNowPlaying` to
     ///   every ready service.
-    /// - When `elapsed` first exceeds the eligibility threshold, fire
+    /// - When wall-clock *listened* time (accumulated across playing
+    ///   ticks — NOT the raw player position, which a restore or a seek
+    ///   can teleport) first exceeds the eligibility threshold, fire
     ///   `scrobble` once.
+    ///
+    /// `now` is injectable for tests; production callers use the default.
     func observe(
         track: ScrobbleTrack?,
         videoId: String?,
         elapsed: Double,
         duration: Double,
-        isPlaying: Bool
+        isPlaying: Bool,
+        now: Date = Date()
     ) {
         guard let track, let videoId, !videoId.isEmpty else {
             pending = nil
@@ -153,22 +216,60 @@ final class ScrobblerCoordinator {
         // scrobbled" flag across tracks.
         if pending?.videoId != videoId {
             pending = Pending(videoId: videoId, track: track)
-        } else {
-            // Same track, update the duration field if it landed late
-            // (JS bridge often reports duration ~500ms after the title
-            // event). Both services accept a missing duration; we
-            // upgrade in-place so the actual scrobble carries the real
-            // value.
-            if let cur = pending, cur.track.durationSeconds == nil, track.durationSeconds != nil {
+        } else if let cur = pending {
+            // Repeat-One loop wrap: `<video>.loop` restarts the same
+            // videoId without an ended/trackChanged event, so pending
+            // would otherwise stay `scrobbled` forever and every replay
+            // is lost. Detect the wrap narrowly — previous tick within
+            // a few seconds of the end AND this tick back near zero —
+            // so a mid-track backward scrub (200s → 150s) never
+            // matches and can't double-scrobble one listen.
+            let wrapped = isPlaying
+                && duration > 0
+                && cur.lastElapsed >= duration - 3.0
+                && elapsed < 3.0
+                && elapsed < cur.lastElapsed
+            if wrapped {
+                // Fresh play: new eligibility window, new startedAt
+                // (stamped below on this playing tick), and a fresh
+                // now-playing ping.
+                pending = Pending(videoId: videoId, track: track)
+            } else if cur.track.durationSeconds == nil, track.durationSeconds != nil {
+                // Same track, update the duration field if it landed
+                // late (JS bridge often reports duration ~500ms after
+                // the title event). Both services accept a missing
+                // duration; we upgrade in-place — preserving all
+                // bookkeeping, including the stamped startedAt — so
+                // the actual scrobble carries the real value.
                 pending = Pending(
                     videoId: cur.videoId,
                     track: track,
                     nowPlayingSent: cur.nowPlayingSent,
-                    scrobbled: cur.scrobbled
+                    scrobbled: cur.scrobbled,
+                    startedAt: cur.startedAt,
+                    listened: cur.listened,
+                    lastTickAt: cur.lastTickAt,
+                    lastElapsed: cur.lastElapsed
                 )
             }
         }
         guard var cur = pending else { return }
+
+        // Accumulate wall-clock listened time on playing ticks. Each
+        // gap is capped at 2s so sleep, wake and App Nap can't inflate
+        // the total (ticks normally arrive every ~0.5s). Paused ticks
+        // clear the anchor so the pause itself never counts.
+        if isPlaying {
+            if cur.startedAt == nil { cur.startedAt = now }
+            if let last = cur.lastTickAt {
+                cur.listened += min(max(now.timeIntervalSince(last), 0), 2.0)
+            }
+            cur.lastTickAt = now
+        } else {
+            cur.lastTickAt = nil
+        }
+        cur.lastElapsed = elapsed
+        pending = cur
 
         // Fire now-playing once per track. We require `isPlaying` so an
         // accidental scrub on a paused track doesn't advertise the
@@ -176,24 +277,44 @@ final class ScrobblerCoordinator {
         if !cur.nowPlayingSent && isPlaying {
             cur.nowPlayingSent = true
             pending = cur
-            let snapshot = cur.track
+            let snapshot = outgoingTrack(cur)
             for service in services where service.isReady {
                 Task { await service.updateNowPlaying(snapshot) }
             }
         }
 
-        // Fire scrobble once when the threshold is hit. Use the duration
-        // from the live tick so a late-landing duration doesn't block
-        // the scrobble — we compute against whatever the player is
-        // currently reporting.
-        if !cur.scrobbled, ScrobbleEligibility.isEligible(elapsed: elapsed, duration: duration) {
+        // Fire scrobble once when the threshold is hit. Gated on
+        // `isPlaying` and on *listened* time (not position) so a
+        // restored session that comes back past 50%, or a seek to 90%,
+        // can't scrobble a track that was never actually heard. Use
+        // the duration from the live tick so a late-landing duration
+        // doesn't block the scrobble — we compute against whatever the
+        // player is currently reporting.
+        if !cur.scrobbled, isPlaying,
+           ScrobbleEligibility.isEligible(elapsed: cur.listened, duration: duration) {
             cur.scrobbled = true
             pending = cur
-            let snapshot = cur.track
+            let snapshot = outgoingTrack(cur)
             for service in services where service.isReady {
                 Task { await service.scrobble(snapshot) }
             }
         }
+    }
+
+    /// Payload for the services: the caller's track, with `startedAt`
+    /// replaced by the coordinator's own stamp (the first playing tick
+    /// of this window) when available. The caller pins its startedAt on
+    /// videoId change, which is wrong for a restored-then-resumed
+    /// session (stamp = launch time) and for Repeat-One replays (stamp
+    /// = first play).
+    private func outgoingTrack(_ cur: Pending) -> ScrobbleTrack {
+        ScrobbleTrack(
+            artist: cur.track.artist,
+            title: cur.track.title,
+            album: cur.track.album,
+            durationSeconds: cur.track.durationSeconds,
+            startedAt: cur.startedAt ?? cur.track.startedAt
+        )
     }
 
     /// Stop tracking. Called when the user signs out / disables all

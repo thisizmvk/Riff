@@ -64,8 +64,18 @@ fileprivate func formatDurationLabel(_ totalSeconds: Int) -> String {
 struct SearchResultRow: View {
     @Environment(AppEnvironment.self) private var env
     let item: MediaItem
+    /// Optional focus binding from the parent list. When non-nil,
+    /// the row registers itself under `item.id` so ↑/↓ / ↵ / ⌘↵
+    /// keyboard handlers in SearchView can drive it.
+    var focusBinding: FocusState<String?>.Binding? = nil
 
     @State private var hovering = false
+    @State private var isFocused = false
+
+    /// Local play count — tracks only (containers don't accumulate one).
+    private var playCount: Int {
+        (item.kind == .song || item.kind == .episode) ? env.localPlayCount(item.id) : 0
+    }
 
     var body: some View {
         Group {
@@ -81,20 +91,29 @@ struct SearchResultRow: View {
                         if item.kind != .episode {
                             Button("Start radio") { Task { await play() } }
                         }
+                        // Albums / playlists / podcasts queue their whole
+                        // tracklist, resolved from the container id via
+                        // playNextResolved / addToQueueEndResolved — the
+                        // same path the tile hover menu uses. Search rows
+                        // only offered Play / Radio, so an album found via
+                        // search had no way to be queued.
+                        SearchContainerQueueActions(item: item)
                     }
             }
         }
         .onHover { hovering = $0 }
+        .modifier(OptionalFocusModifier(binding: focusBinding, itemId: item.id, isFocused: $isFocused))
     }
 
     private var rowContent: some View {
         HStack(spacing: 14) {
             ZStack {
-                AsyncImage(url: item.thumbnailURL) { phase in
+                // 48pt = 96px on Retina; YT's list-row thumb is often 60px.
+                AsyncImage(url: item.thumbnailURL?.upscaledArtwork(to: 120)) { phase in
                     if case .success(let img) = phase {
                         img.resizable().aspectRatio(contentMode: .fill)
                     } else {
-                        Color.white.opacity(0.06)
+                        Theme.Fill.soft
                     }
                 }
                 .frame(width: 48, height: 48)
@@ -121,23 +140,60 @@ struct SearchResultRow: View {
                     if env.hasMetadataOverride(item) {
                         Image(systemName: "pencil")
                             .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(Theme.Text.secondary)
                             .help("Metadata edited locally")
                             .accessibilityLabel("Metadata edited")
                     }
                 }
-                Text(formattedSubtitle)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .lineLimit(1)
+                // Songs/episodes: clickable artist(s). Containers keep a
+                // plain subtitle (their subtitle isn't an artist credit).
+                if item.kind == .song || item.kind == .episode {
+                    ArtistLinkLine(
+                        subtitle: formattedSubtitle,
+                        primaryArtistId: item.artistId,
+                        fontSize: 12,
+                        baseOpacity: 0.7
+                    )
+                } else {
+                    Text(formattedSubtitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.Text.secondary)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 12)
+            // Stats: YT's GLOBAL count when the row carried one
+            // ("1.2M views"); the local in-Riff badge only as fallback.
+            if let plays = item.playsText {
+                Text(plays)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.Text.tertiary)
+                    .lineLimit(1)
+            } else if playCount >= 1 {
+                Text("\(playCount)×")
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(Theme.Text.tertiary)
+                    .help("\(playCount) play\(playCount == 1 ? "" : "s") in Riff")
+                    .accessibilityLabel("\(playCount) plays")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(hovering ? Color.white.opacity(0.04) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .background(rowBackground)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.row))
         .contentShape(Rectangle())
+    }
+
+    private var rowBackground: some View {
+        Group {
+            if isFocused {
+                Theme.red.opacity(0.18)
+            } else if hovering {
+                Theme.Fill.faint
+            } else {
+                Color.clear
+            }
+        }
     }
 
     /// Artists get a circular thumbnail; everything else stays squared
@@ -146,7 +202,7 @@ struct SearchResultRow: View {
         if item.kind == .artist {
             return AnyShape(Circle())
         }
-        return AnyShape(RoundedRectangle(cornerRadius: 6))
+        return AnyShape(RoundedRectangle(cornerRadius: Theme.Radius.thumb))
     }
 
     private var hoverIcon: String {
@@ -222,7 +278,13 @@ struct TopResultCard: View {
                     .buttonStyle(.plain)
                     .contextMenu {
                         Button("Play") { Task { await play() } }
-                        Button("Start radio") { Task { await play() } }
+                        if item.kind != .artist {
+                            Button("Start radio") { Task { await play() } }
+                        }
+                        // Same container queue actions as the list rows —
+                        // the top-result card is often an album/playlist
+                        // and offered no way to queue it.
+                        SearchContainerQueueActions(item: item)
                     }
             }
         }
@@ -231,15 +293,15 @@ struct TopResultCard: View {
 
     private var cardContent: some View {
         HStack(spacing: 16) {
-            AsyncImage(url: item.thumbnailURL) { phase in
+            AsyncImage(url: item.thumbnailURL?.upscaledArtwork(to: 240)) { phase in
                 if case .success(let img) = phase {
                     img.resizable().aspectRatio(contentMode: .fill)
                 } else {
-                    Color.white.opacity(0.06)
+                    Theme.Fill.soft
                 }
             }
             .frame(width: 100, height: 100)
-            .clipShape(item.kind == .artist ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: 10)))
+            .clipShape(item.kind == .artist ? AnyShape(Circle()) : AnyShape(RoundedRectangle(cornerRadius: Theme.Radius.card)))
 
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -250,15 +312,33 @@ struct TopResultCard: View {
                     if env.hasMetadataOverride(item) {
                         Image(systemName: "pencil")
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(Theme.Text.secondary)
                             .help("Metadata edited locally")
                             .accessibilityLabel("Metadata edited")
                     }
                 }
-                Text(formattedSubtitle)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .lineLimit(1)
+                if item.kind == .song || item.kind == .episode {
+                    ArtistLinkLine(
+                        subtitle: formattedSubtitle,
+                        primaryArtistId: item.artistId,
+                        fontSize: 12,
+                        baseOpacity: 0.7
+                    )
+                    if let plays = item.playsText {
+                        Text(plays)
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.Text.tertiary)
+                    } else if env.localPlayCount(item.id) >= 1 {
+                        Text("\(env.localPlayCount(item.id))× in Riff")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(Theme.Text.tertiary)
+                    }
+                } else {
+                    Text(formattedSubtitle)
+                        .font(.system(size: 12))
+                        .foregroundStyle(Theme.Text.secondary)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 4)
                 HStack(spacing: 8) {
                     // Play pill — primary action, always visible. Stops
@@ -286,8 +366,8 @@ struct TopResultCard: View {
             Spacer(minLength: 8)
         }
         .padding(16)
-        .background(hovering ? Color.white.opacity(0.07) : Color.white.opacity(0.04))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .background(hovering ? Theme.Fill.medium : Theme.Fill.faint)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
         .contentShape(Rectangle())
     }
 
@@ -320,6 +400,58 @@ struct TopResultCard: View {
         case .playlist:       await env.player.playPlaylist(id: item.id)
         case .artist:         await env.player.playArtistRadio(id: item.id)
         case .podcast:        await env.player.playPodcast(id: item.id)
+        }
+    }
+}
+
+/// Wires an optional `FocusState<String?>.Binding` onto a row and
+/// mirrors its focused state into a local `Bool` so the row can
+/// paint its focused-highlight without every caller having to
+/// duplicate the boolean bookkeeping. When `binding` is nil (row
+/// used outside a keyboard-navigable container) it's a zero-cost
+/// no-op.
+struct OptionalFocusModifier: ViewModifier {
+    let binding: FocusState<String?>.Binding?
+    let itemId: String
+    @Binding var isFocused: Bool
+
+    func body(content: Content) -> some View {
+        if let binding {
+            content
+                .focused(binding, equals: itemId)
+                .onChange(of: binding.wrappedValue) { _, new in
+                    isFocused = new == itemId
+                }
+        } else {
+            content
+        }
+    }
+}
+
+/// Play-next / add-to-queue menu entries for a container (album /
+/// playlist / podcast) search result. Resolves the whole tracklist via
+/// `playNextResolved` / `addToQueueEndResolved`. Empty for songs,
+/// episodes and artists so the one definition serves every search row
+/// (list rows AND the top-result card) and can never drift apart again.
+private struct SearchContainerQueueActions: View {
+    @Environment(AppEnvironment.self) private var env
+    let item: MediaItem
+
+    var body: some View {
+        if item.kind == .album || item.kind == .playlist || item.kind == .podcast {
+            Divider()
+            Button("Play next") {
+                Task {
+                    let n = await env.player.playNextResolved(item)
+                    env.showToast(n > 0 ? "Added \(n) to play next" : "Nothing to queue")
+                }
+            }
+            Button("Add to queue") {
+                Task {
+                    let n = await env.player.addToQueueEndResolved(item)
+                    env.showToast(n > 0 ? "Added \(n) to queue" : "Nothing to queue")
+                }
+            }
         }
     }
 }

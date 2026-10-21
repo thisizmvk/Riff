@@ -37,16 +37,34 @@ struct TrackContextMenu: View {
                 Task { await env.player.play(item: item) }
             }
         }
-        Button("Start radio") {
+        Button(item.kind == .song || item.kind == .episode ? "Start song radio" : "Start radio") {
             Task { await env.player.startRadio(for: item) }
+        }
+        // "Blend from here" — the offline counterpart to radio: a
+        // personal mix from local history leaning into this artist.
+        // Shown only once there's enough history to blend (else it would
+        // produce an empty or generic queue).
+        if BlendBuilder.seedArtistId(for: item) != nil,
+           BlendBuilder.isAvailable(from: env.player.playedEntries) {
+            Button("Blend from here") {
+                let mix = BlendBuilder.seeded(by: item, from: env.player.playedEntries)
+                guard !mix.isEmpty else {
+                    env.showToast("Not enough history to blend yet.")
+                    return
+                }
+                Task { await env.player.playTracks(mix) }
+                env.showToast("Blending around \(item.title) — \(mix.count) songs")
+            }
         }
         Divider()
         Button("Play next") {
             env.player.playNext(item: item)
+            env.showToast("Playing next: \(item.title)")
         }
         .disabled(!env.player.hasTrack)
         Button("Add to queue") {
             env.player.addToQueueEnd(item: item)
+            env.showToast("Added to queue: \(item.title)")
         }
         .disabled(!env.player.hasTrack)
         if item.albumId != nil || item.artistId != nil {
@@ -84,12 +102,34 @@ struct TrackContextMenu: View {
                         nameGuess = firstSegment
                     }
                     env.blockArtist(id: artistId, name: nameGuess)
+                    // Undo toast — blocking is easy to trigger by
+                    // accident and hard to reverse (Settings → Blocked
+                    // artists is buried); a one-tap undo keeps the
+                    // action safe. (U2)
+                    env.showToast("Blocked \(nameGuess)") {
+                        env.unblockArtist(id: artistId)
+                        env.showToast("Unblocked \(nameGuess)")
+                    }
                 }
             }
         }
         if env.isSignedIn {
             Divider()
             addToPlaylistMenu
+            // Thumbs-down — the server-side steering signal local
+            // artist-blocking can't send: YT's radio stops suggesting
+            // the track account-wide. Songs/episodes only.
+            if item.kind == .song || item.kind == .episode {
+                Button("Not for me (dislike)") {
+                    Task {
+                        if await env.player.dislike(videoId: item.id) {
+                            env.showToast("Disliked — YT Music will suggest this less")
+                        } else {
+                            env.showToast("Couldn't dislike \(item.title)")
+                        }
+                    }
+                }
+            }
         }
         // "Copy share link" — the music.youtube.com URL for this
         // track. Bottom of the menu so it doesn't bump the common
@@ -98,6 +138,18 @@ struct TrackContextMenu: View {
         // isn't really a thing).
         if item.kind == .song || item.kind == .episode {
             Divider()
+            // "Watch music video" — replaces the in-app audio↔video
+            // toggle that kept re-leaking the WKWebView into the main
+            // window (violating CLAUDE.md's load-bearing rule). YT
+            // Music renders the video correctly in a normal browser
+            // tab, so we hand the URL off to the system default
+            // browser instead of hosting the WebView ourselves. Same
+            // videoId, same experience, zero WKWebView surfacing.
+            Button("Watch music video") {
+                if let url = URL(string: "https://music.youtube.com/watch?v=\(item.id)") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
             Button("Copy share link") {
                 let url = "https://music.youtube.com/watch?v=\(item.id)"
                 let pb = NSPasteboard.general
@@ -127,15 +179,12 @@ struct TrackContextMenu: View {
     private var addToPlaylistMenu: some View {
         Menu("Add to playlist") {
             Button("New Playlist…") {
-                // The new-playlist sheet currently captures the *currently
-                // playing* track. Make this row the current track first,
-                // then prompt — keeps the existing flow intact without
-                // duplicating sheet plumbing.
-                Task {
-                    await env.player.play(item: item)
-                    env.newPlaylistSource = .currentTrack
-                    env.isNewPlaylistSheetPresented = true
-                }
+                // .item source: file THIS row into the new playlist
+                // without touching playback. (The old workaround played
+                // the row first to reuse .currentTrack — interrupting
+                // the current song because the user filed a track away.)
+                env.newPlaylistSource = .item(item)
+                env.isNewPlaylistSheetPresented = true
             }
             if env.userPlaylistsLoading {
                 Text("Loading…")
@@ -146,10 +195,18 @@ struct TrackContextMenu: View {
                 ForEach(env.userPlaylists) { pl in
                     Button(pl.title) {
                         Task {
-                            try? await env.innerTube.addToPlaylist(
-                                videoId: item.id,
-                                playlistId: pl.id
-                            )
+                            // Toast both outcomes — Play next / Add to
+                            // queue toast, so a silent add here read as
+                            // "did that even work?"
+                            do {
+                                try await env.innerTube.addToPlaylist(
+                                    videoId: item.id,
+                                    playlistId: pl.id
+                                )
+                                env.showToast("Added to \(pl.title)")
+                            } catch {
+                                env.showToast("Couldn't add to \(pl.title)")
+                            }
                         }
                     }
                 }

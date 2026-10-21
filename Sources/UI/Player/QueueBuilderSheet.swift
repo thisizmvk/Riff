@@ -19,6 +19,10 @@ struct QueueBuilderSheet: View {
     @State private var phase: Phase = .idle
     @State private var resolved: [MediaItem] = []
     @State private var errorMessage: String?
+    /// The in-flight build, so closing the sheet cancels the LLM call
+    /// and the up-to-20 sequential /search resolves instead of letting
+    /// them run to completion against a dismissed view.
+    @State private var buildTask: Task<Void, Never>?
 
     enum Phase: Equatable {
         case idle
@@ -35,7 +39,7 @@ struct QueueBuilderSheet: View {
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if AnthropicProvider.storedAPIKey() == nil {
+                    if !env.hasLLMAPIKey {
                         notConfiguredHint
                     } else {
                         promptField
@@ -54,6 +58,7 @@ struct QueueBuilderSheet: View {
             }
         }
         .frame(width: 560, height: 600)
+        .onDisappear { buildTask?.cancel() }
     }
 
     // MARK: - Subviews
@@ -81,7 +86,7 @@ struct QueueBuilderSheet: View {
                 .font(.system(size: 14, weight: .semibold))
             Text("Add an Anthropic API key in Settings → AI features and Riff can turn a vibe into a queue.")
                 .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.65))
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Button("Open Settings") {
                 dismiss()
@@ -98,7 +103,7 @@ struct QueueBuilderSheet: View {
                 .font(.system(size: 11, weight: .semibold))
                 .textCase(.uppercase)
                 .tracking(1.2)
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(Theme.Text.secondary)
             TextField("e.g. rainy Sunday morning, mellow indie folk", text: $prompt)
                 .textFieldStyle(.roundedBorder)
                 .onSubmit(build)
@@ -124,7 +129,7 @@ struct QueueBuilderSheet: View {
             ProgressView().controlSize(.small)
             Text(phase == .generating ? "Asking the model…" : "Finding tracks on YouTube Music…")
                 .font(.system(size: 12))
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(Theme.Text.secondary)
         }
     }
 
@@ -142,12 +147,12 @@ struct QueueBuilderSheet: View {
                     .font(.system(size: 11, weight: .semibold))
                     .textCase(.uppercase)
                     .tracking(1.2)
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(Theme.Text.secondary)
                 Spacer()
                 Button {
                     Task {
                         let tracks = resolved
-                        await env.player.playTracks(tracks)
+                        await env.player.playTracks(tracks, sourceTitle: "Queue Builder")
                         dismiss()
                     }
                 } label: {
@@ -171,20 +176,20 @@ struct QueueBuilderSheet: View {
             if resolved.isEmpty {
                 Text("None of the suggestions matched a track on YouTube Music. Try a more specific vibe.")
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.65))
+                    .foregroundStyle(Theme.Text.secondary)
             } else {
                 ForEach(resolved) { item in
                     HStack(spacing: 10) {
                         Image(systemName: "music.note")
                             .frame(width: 18)
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(Theme.Text.secondary)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(item.title)
                                 .font(.system(size: 13, weight: .medium))
                                 .lineLimit(1)
                             Text(item.subtitle)
                                 .font(.system(size: 11))
-                                .foregroundStyle(.white.opacity(0.65))
+                                .foregroundStyle(Theme.Text.secondary)
                                 .lineLimit(1)
                         }
                         Spacer()
@@ -204,37 +209,51 @@ struct QueueBuilderSheet: View {
         resolved = []
         phase = .generating
 
-        let provider = AnthropicProvider()
-        let model = AnthropicProvider.storedModel()
+        // Whichever backend the user picked in Settings — Anthropic,
+        // Groq (free hosted), or Ollama (local). Both `provider` and
+        // `model` come off `env` so a mid-session switch takes effect
+        // immediately.
+        let provider = env.llmProvider
+        let model = env.llmModel
         let messages: [LLMMessage] = [
             .system(QueueBuilder.systemPrompt),
             .user(trimmed),
         ]
 
-        Task {
+        // A rebuild supersedes any still-running flow; the cancellation
+        // guards below keep the stale task from overwriting this run's
+        // state (or painting a "cancelled" error).
+        buildTask?.cancel()
+        buildTask = Task {
             do {
                 let raw = try await provider.chat(messages, model: model)
+                guard !Task.isCancelled else { return }
                 let suggestions = try QueueBuilder.parseSuggestions(from: raw)
                 await MainActor.run { phase = .resolving }
                 let items = await QueueBuilder.resolve(
                     suggestions: suggestions,
                     using: env.innerTube
                 )
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     resolved = items
                     phase = .done
                 }
             } catch let err as LLMError {
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     errorMessage = err.errorDescription ?? "Couldn't build a queue."
                     phase = .idle
                 }
             } catch QueueBuilder.ParseError.noJSONArray {
+                guard !Task.isCancelled else { return }
                 await MainActor.run {
                     errorMessage = "The model didn't return a recognizable list. Try rephrasing."
                     phase = .idle
                 }
             } catch {
+                if Task.isCancelled || error is CancellationError
+                    || (error as? URLError)?.code == .cancelled { return }
                 await MainActor.run {
                     errorMessage = "Couldn't build a queue: \(error.localizedDescription)"
                     phase = .idle
@@ -360,6 +379,10 @@ enum QueueBuilder {
     static func resolve(suggestions: [Suggestion], using client: InnerTubeClient) async -> [MediaItem] {
         var out: [MediaItem] = []
         for s in suggestions {
+            // Cooperative cancellation: the sheet cancels its build
+            // task on dismiss, and without this check the loop would
+            // fan out every remaining /search with no consumer.
+            if Task.isCancelled { break }
             let query = "\(s.title) \(s.artist)"
             do {
                 let hits = try await client.search(query: query, filter: .songs)
@@ -371,6 +394,10 @@ enum QueueBuilder {
                     }
                 }
             } catch {
+                // A cancelled search must stop the batch, not slide
+                // into the per-suggestion "silent skip" below.
+                if Task.isCancelled || error is CancellationError
+                    || (error as? URLError)?.code == .cancelled { break }
                 // Silent skip — one bad search shouldn't poison the batch.
                 continue
             }

@@ -3,12 +3,44 @@ import SwiftUI
 struct SearchView: View {
     @Environment(AppEnvironment.self) private var env
     @State private var query: String = ""
+    /// Live completions for the current query (YT Music's own
+    /// suggestions endpoint). Cleared when empty/picked.
+    @State private var suggestions: [String] = []
+    /// The query string a just-picked suggestion set — suppresses
+    /// re-suggesting for the exact text the user just committed.
+    @State private var suppressSuggestionsFor: String? = nil
     @State private var filter: SearchFilter = .all
+    @FocusState private var searchFieldFocused: Bool
+    /// Focused videoId in the result list, or nil when no row is
+    /// focused. Enables keyboard traversal: ↑/↓ move, ↵ plays, ⌘↵
+    /// adds to queue. Bound onto each SearchResultRow via
+    /// `.focused($focusedResultId, equals: item.id)`.
+    @FocusState private var focusedResultId: String?
     @State private var yearFilter: YearFilter = .any
     @State private var durationFilter: DurationFilter = .any
     @State private var results: [MediaItem] = []
     @State private var searching: Bool = false
     @State private var errorMessage: String?
+    /// The input whose search last landed — `results` and
+    /// `nextPageToken` belong to it. Nil before the first search and
+    /// whenever `results` is cleared (empty query, failed search).
+    /// Lets `debouncedRunSearch` skip the re-fetch SwiftUI fires when
+    /// this stack root re-appears (Back from a pushed DetailView), and
+    /// keeps "No results for …" hidden until a search has actually
+    /// answered the current input.
+    @State private var completedInput: SearchInput? = nil
+    /// Bumped by the error banner's Retry. Part of `SearchInput`, so a
+    /// same-input retry still changes the `.task(id:)` identity and
+    /// that task stays the single owner of every search (a keystroke
+    /// cancels an in-flight retry instead of racing it).
+    @State private var retryToken: Int = 0
+    /// Bumped when the recent-searches list is cleared. The list lives
+    /// in UserDefaults, which SwiftUI can't observe; `recentSearches`
+    /// reads this so Clear re-renders the chip row.
+    @State private var recentsRevision: Int = 0
+    /// Trimmed text the current `suggestions` were fetched for. Skips
+    /// the re-fetch the query-keyed `.task` fires on re-appearance.
+    @State private var suggestionsFetchedFor: String? = nil
     /// Token for the next page of search results when YT included one.
     /// Nil before the first search, nil when the result set is
     /// exhausted, and nil under the `.all` filter (heterogeneous
@@ -122,6 +154,27 @@ struct SearchView: View {
         yearFilter != .any || durationFilter != .any
     }
 
+    /// The (query, filter, retry) identity that drives the search task.
+    private var currentInput: SearchInput {
+        SearchInput(query: query, filter: filter, retry: retryToken)
+    }
+
+    /// True from an input change until its search lands — the 300 ms
+    /// debounce plus the request. Keeps the pane on "Searching…"
+    /// instead of flashing "No results for …" before any request has
+    /// been made. False under an error: the banner speaks for itself.
+    private var awaitingResults: Bool {
+        !query.isEmpty && errorMessage == nil && completedInput != currentInput
+    }
+
+    /// Persisted recent-search terms. Reading `recentsRevision` gives
+    /// the pre-search branch a state dependency, so Clear (a
+    /// UserDefaults-only write) re-renders the row.
+    private var recentSearches: [String] {
+        _ = recentsRevision
+        return SearchView.loadRecentSearches()
+    }
+
     /// Whether the sort menu should appear for the current filter.
     /// Hidden under `.all` (heterogeneous results — sort math doesn't
     /// apply uniformly) and when the result set is empty (no rows to
@@ -164,6 +217,86 @@ struct SearchView: View {
                 .textFieldStyle(.roundedBorder)
                 .padding(.horizontal, 24)
                 .padding(.top, 8)
+                .focused($searchFieldFocused)
+                // A pasted music.youtube.com / youtu.be URL opens directly
+                // instead of being searched as text.
+                .onChange(of: query) { _, newValue in
+                    let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard trimmed.hasPrefix("http"), let url = URL(string: trimmed) else { return }
+                    if env.openYouTubeMusicLink(url) { query = "" }
+                }
+                .onAppear { searchFieldFocused = true }
+                .onChange(of: env.focusSearchToken) { _, _ in
+                    // ⌘F handler in RiffApp bumps this token; grab
+                    // focus into the field on every bump. Runs on
+                    // the next runloop tick so the tab switch that
+                    // typically precedes the focus request completes
+                    // first (SearchView may have been off-screen).
+                    Task { @MainActor in searchFieldFocused = true }
+                }
+                // Suggestions-as-you-type. 150ms debounce (lighter than
+                // the 300ms full-search debounce — suggestions should
+                // feel instantaneous); cancelled and cleared when the
+                // query empties or a suggestion is picked.
+                .task(id: query) {
+                    let trimmed = query.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.isEmpty, trimmed != suppressSuggestionsFor else {
+                        suggestions = []
+                        suggestionsFetchedFor = nil
+                        return
+                    }
+                    // Re-appearance (Back from a pushed page) re-runs this
+                    // task with the same query; the strip already holds
+                    // the suggestions fetched for this text.
+                    guard trimmed != suggestionsFetchedFor else { return }
+                    try? await Task.sleep(nanoseconds: 150_000_000)
+                    guard !Task.isCancelled else { return }
+                    let fetched: [String]? = try? await env.innerTube.searchSuggestions(query: trimmed)
+                    guard !Task.isCancelled else { return }
+                    // Suggesting exactly what's already typed is noise.
+                    suggestions = (fetched ?? []).filter { $0.lowercased() != trimmed.lowercased() }.prefix(6).map { $0 }
+                    // Only a successful fetch counts as done; a failed
+                    // one is retried the next time this text runs.
+                    if fetched != nil {
+                        suggestionsFetchedFor = trimmed
+                    } else {
+                        suggestionsFetchedFor = nil
+                    }
+                }
+
+            // Completion strip under the field — YT Music's own
+            // suggestions (with typo corrections). Picking one commits
+            // it as the query; the existing .task(id:) then runs the
+            // real search.
+            if !suggestions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(suggestions, id: \.self) { s in
+                            Button {
+                                suppressSuggestionsFor = s
+                                suggestions = []
+                                query = s
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "magnifyingglass")
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(Theme.Text.tertiary)
+                                    Text(s)
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(Theme.Text.secondary)
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Theme.Fill.medium)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                }
+            }
 
             // Pill-style filter row mirroring YT Music's chips. Horizontal
             // scroll keeps it from clipping when the user resizes the
@@ -215,7 +348,7 @@ struct SearchView: View {
                     HStack(spacing: 6) {
                         Text("\(displayedResults.count) of \(results.count) matches")
                             .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(Theme.Text.secondary)
                         Button("Clear") {
                             yearFilter = .any
                             durationFilter = .any
@@ -247,29 +380,46 @@ struct SearchView: View {
 
             ScrollView {
                 if let errorMessage {
+                    // Retry re-keys the `.task(id:)` rather than spawning
+                    // an unstructured Task, so every search has one owner
+                    // and a keystroke cancels an in-flight retry.
                     ErrorBanner(message: errorMessage) {
-                        Task { await debouncedRunSearch() }
+                        retryToken &+= 1
                     }
                     .padding(.horizontal, 24)
                     .padding(.bottom, 12)
                 }
-                if searching && results.isEmpty {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Searching…")
-                            .font(.system(size: 13))
-                            .foregroundStyle(.white.opacity(0.75))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 60)
+                if results.isEmpty && (searching || awaitingResults) {
+                    // Row skeleton instead of a lone "Searching…" spinner,
+                    // so the pane reads as loading results rather than idle.
+                    RowListSkeleton()
+                        .padding(.horizontal, 24)
+                        .padding(.top, 16)
                 } else if query.isEmpty && results.isEmpty {
-                    // Pre-search empty state. Without this the user sees
-                    // an unstyled blank surface the moment they wipe the
-                    // field, which reads as "broken". The prompt mirrors
-                    // YT Music's "Find your music" rest state.
-                    InitialSearchState()
-                        .padding(.top, 80)
-                } else if results.isEmpty, !query.isEmpty {
+                    // Pre-search empty state. Renders recent
+                    // searches (if any) as one-tap chips above the
+                    // illustrated empty prompt. Users end up
+                    // re-searching the same handful of queries most
+                    // days; this collapses the ~4 keystrokes of a
+                    // typical repeat search to a single click.
+                    let recents = recentSearches
+                    if !recents.isEmpty {
+                        RecentSearchesRow(
+                            recents: recents,
+                            onPick: { term in query = term },
+                            onClear: {
+                                SearchView.clearRecentSearches()
+                                recentsRevision &+= 1
+                            }
+                        )
+                        .padding(.top, 24)
+                    }
+                    InitialSearchState(onPick: { query = $0 })
+                        .padding(.top, recents.isEmpty ? 60 : 24)
+                } else if results.isEmpty, !query.isEmpty, errorMessage == nil {
+                    // Reached only once a search has answered this exact
+                    // input (`awaitingResults` is false) — never during
+                    // the debounce, and never under the error banner.
                     EmptySearchState(query: query)
                         .padding(.top, 80)
                 } else if !results.isEmpty && displayedResults.isEmpty {
@@ -279,7 +429,7 @@ struct SearchView: View {
                     VStack(spacing: 8) {
                         Text("No results match these filters.")
                             .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.85))
+                            .foregroundStyle(Theme.Text.secondary)
                         Button("Clear refinements") {
                             yearFilter = .any
                             durationFilter = .any
@@ -295,10 +445,13 @@ struct SearchView: View {
                 }
             }
         }
-        // Re-run on every (query, filter) change. The 300ms debounce
-        // collapses bursts of keystrokes into a single request; .task(id:)
-        // cancels the previous in-flight search when inputs change.
-        .task(id: SearchInput(query: query, filter: filter)) {
+        // Re-run on every (query, filter, retry) change. The 300ms
+        // debounce collapses bursts of keystrokes into a single request;
+        // .task(id:) cancels the previous in-flight search when inputs
+        // change. SwiftUI also re-runs this when the root re-appears
+        // after a pop — `debouncedRunSearch` keeps the loaded results
+        // in that case instead of re-fetching page 1.
+        .task(id: currentInput) {
             await debouncedRunSearch()
         }
         // When the filter changes, reset the sort if the previously-
@@ -314,6 +467,26 @@ struct SearchView: View {
             }
         }
         .navigationDestination(for: MediaItem.self) { DetailView(item: $0) }
+        .navigationDestination(for: HomeSection.self) { SectionGridView(section: $0) }
+        // Keyboard navigation across the result list. Live at the
+        // container level so the shortcuts fire whenever this pane
+        // is on-screen; up/down aren't caret nav for a single-line
+        // TextField, so they bubble past the focused search field.
+        .onKeyPress(.downArrow) {
+            moveFocus(1)
+            return .handled
+        }
+        .onKeyPress(.upArrow) {
+            moveFocus(-1)
+            return .handled
+        }
+        .onKeyPress(.return) {
+            if let id = focusedResultId, let item = displayedResults.first(where: { $0.id == id }) {
+                Task { await play(item) }
+                return .handled
+            }
+            return .ignored
+        }
     }
 
     /// "Top result" hero card + list rows for the rest. Mirrors YT
@@ -322,6 +495,33 @@ struct SearchView: View {
     /// rows. We also break the list at the kind boundary (Songs /
     /// Albums / Artists / etc.) under the "All" filter so users can
     /// scan by category, the way YT Music does.
+    private func moveFocus(_ delta: Int) {
+        let ids = displayedResults.map(\.id)
+        guard !ids.isEmpty else { return }
+        // Steal focus from the search text field on first ↓ so
+        // typing doesn't fight the traversal. Users can hit Esc or
+        // click the field to return to typing.
+        searchFieldFocused = false
+        if let current = focusedResultId, let idx = ids.firstIndex(of: current) {
+            let next = ((idx + delta) % ids.count + ids.count) % ids.count
+            focusedResultId = ids[next]
+        } else {
+            focusedResultId = delta >= 0 ? ids.first : ids.last
+        }
+    }
+
+    /// Play any MediaItem — mirrors the row's own play() but usable
+    /// from the keyboard handler that lives at container level.
+    private func play(_ item: MediaItem) async {
+        switch item.kind {
+        case .song, .episode: await env.player.play(item: item)
+        case .album:          await env.player.playAlbum(id: item.id)
+        case .playlist:       await env.player.playPlaylist(id: item.id)
+        case .artist:         await env.player.playArtistRadio(id: item.id)
+        case .podcast:        await env.player.playPodcast(id: item.id)
+        }
+    }
+
     @ViewBuilder
     private var resultList: some View {
         if let top = displayedResults.first {
@@ -343,7 +543,7 @@ struct SearchView: View {
                                     .padding(.bottom, 8)
                             }
                             ForEach(group.items) { item in
-                                SearchResultRow(item: item)
+                                SearchResultRow(item: item, focusBinding: $focusedResultId)
                             }
                         }
                         loadMoreFooter
@@ -370,7 +570,7 @@ struct SearchView: View {
             HStack(spacing: 8) {
                 Text(err)
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(Theme.Text.secondary)
                 Button("Retry") {
                     loadMoreError = nil
                     Task { await loadMoreIfNeeded() }
@@ -395,7 +595,7 @@ struct SearchView: View {
                     ProgressView().controlSize(.small)
                     Text("Loading more…")
                         .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(Theme.Text.secondary)
                 }
                 .padding(.top, 16)
                 .padding(.bottom, 8)
@@ -443,45 +643,133 @@ struct SearchView: View {
     private struct SearchInput: Hashable {
         let query: String
         let filter: SearchFilter
+        /// `retryToken` at issue time — lets a same-input Retry change
+        /// the task identity.
+        let retry: Int
     }
 
     /// Resting state shown before the user has typed anything (or after
     /// they've cleared the field). A blank scroll surface reads as
     /// "broken" — the icon + prompt signal that the input is the next
     /// action.
-    private struct InitialSearchState: View {
+    /// Horizontal chip row of the user's last N successful search
+    /// terms. Tapping a chip re-runs that search (via the parent's
+    /// `onPick` closure, which just assigns the query string; the
+    /// existing `.task(id:)` debounces the network fetch). Header
+    /// row includes a "Clear" affordance that wipes the persisted
+    /// list — matches the affordance users expect from Chrome /
+    /// Safari's own recent-search UI.
+    private struct RecentSearchesRow: View {
+        let recents: [String]
+        let onPick: (String) -> Void
+        /// Wipes the persisted list. Owned by the parent so it can bump
+        /// its render dependency — a UserDefaults write alone wouldn't
+        /// redraw the row.
+        let onClear: () -> Void
         var body: some View {
-            VStack(spacing: 12) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 40))
-                    .foregroundStyle(.white.opacity(0.4))
-                Text("Find your music")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                Text("Search for songs, albums, artists, playlists, or podcasts.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .multilineTextAlignment(.center)
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Recent searches")
+                        .font(.system(size: 11, weight: .semibold))
+                        .textCase(.uppercase)
+                        .tracking(1.2)
+                        .foregroundStyle(Theme.Text.tertiary)
+                    Spacer()
+                    Button("Clear") {
+                        onClear()
+                    }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.Text.tertiary)
+                }
+                .padding(.horizontal, 24)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(recents, id: \.self) { term in
+                            Button {
+                                onPick(term)
+                            } label: {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "clock.arrow.circlepath")
+                                        .font(.system(size: 11, weight: .medium))
+                                    Text(term)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .lineLimit(1)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 7)
+                                .background(Theme.Fill.soft)
+                                .foregroundStyle(Theme.Text.secondary)
+                                .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 24)
+                }
+            }
+        }
+    }
+
+    private struct InitialSearchState: View {
+        /// Fills the search field with a tapped suggestion; the existing
+        /// debounced `.task(id:)` then runs the query.
+        let onPick: (String) -> Void
+
+        /// Curated starter queries for a blank search — genres, moods and
+        /// eras that always return something, so a first-run search isn't
+        /// a staring contest with an empty field.
+        private let suggestions = [
+            "Lo-fi beats", "Top hits", "Workout", "Focus",
+            "Jazz", "90s", "Acoustic", "Chill", "Party", "Running",
+        ]
+
+        var body: some View {
+            VStack(spacing: 22) {
+                EmptyState(
+                    systemImage: "magnifyingglass",
+                    title: "Find your music",
+                    subtitle: "Search for songs, albums, artists, playlists, or podcasts."
+                )
+                VStack(spacing: 10) {
+                    Text("TRY")
+                        .font(.system(size: 10, weight: .bold))
+                        .tracking(1.4)
+                        .foregroundStyle(Theme.Text.tertiary)
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 92), spacing: 8)],
+                        alignment: .center, spacing: 8
+                    ) {
+                        ForEach(suggestions, id: \.self) { term in
+                            Button { onPick(term) } label: {
+                                Text(term)
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(Theme.Text.primary)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 7)
+                                    .background(Capsule().fill(Color.white.opacity(0.06)))
+                                    .overlay(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+                                    .contentShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
+                            .help("Search \u{201C}\(term)\u{201D}")
+                        }
+                    }
+                    .frame(maxWidth: 380)
+                }
             }
             .frame(maxWidth: .infinity)
-            .padding(.horizontal, 32)
         }
     }
 
     private struct EmptySearchState: View {
         let query: String
         var body: some View {
-            VStack(spacing: 12) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 40))
-                    .foregroundStyle(.white.opacity(0.4))
-                Text("No results for \u{201C}\(query)\u{201D}")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.white.opacity(0.85))
-                Text("Try a different keyword or filter.")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.75))
-            }
+            EmptyState(
+                systemImage: "questionmark.circle",
+                title: "No results for \u{201C}\(query)\u{201D}",
+                subtitle: "Try a different keyword, or remove a filter."
+            )
             .frame(maxWidth: .infinity)
         }
     }
@@ -499,8 +787,8 @@ struct SearchView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .padding(.horizontal, 14)
                     .padding(.vertical, 7)
-                    .background(selected ? Color.white : Color.white.opacity(0.08))
-                    .foregroundStyle(selected ? .black : .white)
+                    .background(selected ? Theme.Selected.fill : Theme.Fill.medium)
+                    .foregroundStyle(selected ? Theme.Selected.text : Theme.Text.primary)
                     .clipShape(Capsule())
             }
             .buttonStyle(.plain)
@@ -521,8 +809,8 @@ struct SearchView: View {
                     .font(.system(size: 11, weight: .medium))
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
-                    .background(selected ? Theme.red.opacity(0.85) : Color.white.opacity(0.06))
-                    .foregroundStyle(selected ? .white : .white.opacity(0.75))
+                    .background(selected ? Theme.Selected.fill : Theme.Fill.soft)
+                    .foregroundStyle(selected ? Theme.Selected.text : Theme.Text.secondary)
                     .clipShape(Capsule())
             }
             .buttonStyle(.plain)
@@ -530,31 +818,96 @@ struct SearchView: View {
     }
 
     private func debouncedRunSearch() async {
+        let issued = currentInput
+        // SwiftUI re-runs this `.task(id:)` whenever the stack root
+        // re-appears (Back from a pushed DetailView) even though the id
+        // is unchanged. The loaded results — including every page
+        // `loadMoreIfNeeded` appended — already answer this input, so
+        // keep them rather than collapsing to page 1. Only drop rows for
+        // an artist blocked on the page just left (blocking is
+        // otherwise applied at fetch time).
+        if issued == completedInput, errorMessage == nil {
+            if results.contains(where: { env.isBlocked($0) }) {
+                results.removeAll { env.isBlocked($0) }
+            }
+            return
+        }
         do {
             try await Task.sleep(nanoseconds: 300_000_000)
         } catch {
             return  // task was cancelled — newer input arrived
         }
-        guard !query.isEmpty else {
+        guard issued == currentInput else { return }
+        guard !issued.query.isEmpty else {
             results = []
             nextPageToken = nil
             loadMoreError = nil
+            errorMessage = nil   // a cancelled in-flight search must not leave its banner on an empty screen
+            completedInput = nil
             searching = false
             return
         }
         searching = true
         defer { searching = false }
         do {
-            let page = try await env.innerTube.searchPaged(query: query, filter: filter)
+            let page = try await env.innerTube.searchPaged(query: issued.query, filter: issued.filter)
+            // A response for an input that's no longer current must not
+            // land (nor its continuation token).
+            guard !Task.isCancelled, issued == currentInput else { return }
             results = page.items.filter { !env.isBlocked($0) }
             nextPageToken = page.continuation
             loadMoreError = nil
             errorMessage = nil
+            completedInput = issued
+            // Persist to the recent-searches ring only on a
+            // SUCCESSFUL non-empty result — no point remembering
+            // typos that returned nothing. Runs on the trimmed
+            // query so "  hits" and "hits" don't dedupe as
+            // separate entries.
+            if !page.items.isEmpty {
+                Self.rememberRecentSearch(issued.query.trimmingCharacters(in: .whitespaces))
+            }
         } catch {
+            if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
+            guard issued == currentInput else { return }
             results = []
             nextPageToken = nil
+            completedInput = nil
             errorMessage = LoadErrorPresenter.message(for: error, env: env)
         }
+    }
+
+    // MARK: - Recent searches
+
+    private static let recentSearchesKey = "search.recentQueries"
+    private static let recentSearchesLimit = 10
+
+    /// Prepend `query` to the persisted ring buffer of recent
+    /// searches. Dedupes case-insensitively — searching "abba" then
+    /// "ABBA" collapses to one entry (most-recent form kept).
+    /// Skips empty / whitespace-only strings. Runs synchronously
+    /// against UserDefaults — the array is at most 10 short
+    /// strings, ~200 bytes total.
+    static func rememberRecentSearch(_ query: String) {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return }
+        var current = UserDefaults.standard.stringArray(forKey: recentSearchesKey) ?? []
+        // Case-insensitive dedupe: drop any prior entry that
+        // matches the incoming query.
+        current.removeAll { $0.lowercased() == trimmed.lowercased() }
+        current.insert(trimmed, at: 0)
+        if current.count > recentSearchesLimit {
+            current.removeLast(current.count - recentSearchesLimit)
+        }
+        UserDefaults.standard.set(current, forKey: recentSearchesKey)
+    }
+
+    static func loadRecentSearches() -> [String] {
+        UserDefaults.standard.stringArray(forKey: recentSearchesKey) ?? []
+    }
+
+    static func clearRecentSearches() {
+        UserDefaults.standard.removeObject(forKey: recentSearchesKey)
     }
 
     /// Fetch the next page when the user scrolls near the bottom. We
@@ -565,10 +918,14 @@ struct SearchView: View {
     /// land on the wrong result set — the `query`/`filter` snapshot
     /// is compared on return.
     private func loadMoreIfNeeded() async {
+        // `completedInput == currentInput`: the token must belong to
+        // what's typed. During a new input's debounce the previous
+        // result set (and its token) is still on screen.
         guard let token = nextPageToken,
               !loadingMore,
               !searching,
-              !query.isEmpty else { return }
+              !query.isEmpty,
+              completedInput == currentInput else { return }
         loadingMore = true
         let issuedQuery = query
         let issuedFilter = filter
@@ -586,6 +943,7 @@ struct SearchView: View {
             nextPageToken = page.continuation
             loadMoreError = nil
         } catch {
+            if Task.isCancelled || LoadErrorPresenter.isCancellation(error) { return }
             // Don't wipe `results` — the user is mid-scroll. Surface
             // a retry chip under the list instead.
             guard issuedQuery == query, issuedFilter == filter else { return }

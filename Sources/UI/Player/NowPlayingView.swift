@@ -9,7 +9,6 @@ import SwiftUI
 ///   - ESC dismisses
 struct NowPlayingView: View {
     @Environment(AppEnvironment.self) private var env
-    @State private var scrubbing: Double? = nil
     @State private var bottomTab: BottomTab = .upNext
     @State private var queueMode: QueueMode = .related
     /// Anchor for extrapolating `env.player.elapsed` between polls.
@@ -26,6 +25,11 @@ struct NowPlayingView: View {
     @State private var translation: LyricsTranslator.Translation? = nil
     @State private var translationLoading: Bool = false
     @State private var translationError: String? = nil
+    /// Token identifying the newest translation request. Bumped on
+    /// every new request and on track/language change so a superseded
+    /// request's completion (success OR failure) can never overwrite
+    /// state that now belongs to a newer request.
+    @State private var translationRequestID = UUID()
 
     /// X-Ray cards for the current track (B4). Held in view state so
     /// the view re-renders when the bundle lands; the service's own
@@ -33,6 +37,26 @@ struct NowPlayingView: View {
     @State private var xrayCards: XRayCardsService.Bundle? = nil
     @State private var xrayLoading: Bool = false
     @State private var xrayError: String? = nil
+    /// Same supersession token as `translationRequestID`, for X-Ray.
+    @State private var xrayRequestID = UUID()
+
+    /// The videoId currently being dragged-over inside the Up Next
+    /// list. Drives the 2pt red insertion indicator above the target
+    /// row. Nil when no drag is in flight.
+    @State private var dragHoverTargetId: String? = nil
+
+    /// Adaptive backdrop accent color extracted from the current
+    /// track's artwork (Apple Music-style). Nil until extracted;
+    /// the backdrop falls back to the plain blurred art + black.
+    @State private var backdropColor: Color? = nil
+
+    /// Fullscreen lyrics mode — hides the art + side pane and fills
+    /// the player with large, centered (synced) lyrics over the
+    /// adaptive backdrop. Apple Music's dedicated lyrics view.
+    @State private var lyricsFullscreen: Bool = false
+    /// Volume level to restore when the speaker icon un-mutes.
+    @State private var preMuteVolume: Double = 1.0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     enum BottomTab: String, CaseIterable, Identifiable {
         case upNext = "Up Next"
@@ -66,24 +90,34 @@ struct NowPlayingView: View {
         // without inflating the foreground's frame.
         VStack(spacing: 0) {
             topBar
-            HStack(alignment: .top, spacing: 16) {
-                leftPlayer
+            if lyricsFullscreen {
+                fullscreenLyricsView
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                sidePane
-                    .frame(width: 380)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 24)
+                    .transition(.opacity)
+            } else {
+                HStack(alignment: .top, spacing: 16) {
+                    leftPlayer
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    sidePane
+                        .frame(width: 380)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, 24)
+                .padding(.bottom, 24)
+                .transition(.opacity)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .padding(.horizontal, 24)
-            .padding(.bottom, 24)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .animation(.easeInOut(duration: 0.25), value: lyricsFullscreen)
         .background {
             // Backdrops as a background stack — entirely behind the
             // foreground; their sizes have no effect on the foreground's
             // layout. ZStack here is fine because it has no influence on
             // the VStack above.
             ZStack {
-                Color.black
+                Theme.Bg.base
                 AsyncImage(url: track?.thumbnailURL) { phase in
                     if case .success(let img) = phase {
                         img.resizable().scaledToFill().blur(radius: 80).opacity(0.45)
@@ -92,25 +126,52 @@ struct NowPlayingView: View {
                                        startPoint: .top, endPoint: .bottom)
                     }
                 }
+                // Adaptive accent wash (Apple Music signature): a
+                // top-anchored gradient of the artwork's dominant
+                // color, fading to black. Layered OVER the blurred
+                // art so the hue reads clearly, UNDER the darkening
+                // gradient so foreground text stays legible.
+                // Cross-fades when the track (and thus color) changes.
+                if let backdropColor {
+                    LinearGradient(
+                        colors: [backdropColor.opacity(0.55), backdropColor.opacity(0.12), .clear],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .transition(.opacity)
+                }
                 LinearGradient(
                     colors: [Color.black.opacity(0.45), Color.black.opacity(0.78)],
                     startPoint: .top, endPoint: .bottom
                 )
             }
             .ignoresSafeArea()
+            .animation(.easeInOut(duration: 0.6), value: backdropColor)
+        }
+        .task(id: track?.videoId) {
+            // Extract the accent color when the track changes. Runs
+            // off the URLCache (warmed by the artwork AsyncImage), so
+            // it's usually instant. nil clears the wash to the plain
+            // black+blur fallback.
+            guard let url = track?.thumbnailURL else {
+                backdropColor = nil
+                return
+            }
+            let color = await DominantColor.extract(from: url)
+            // A cancelled task (fast Previous/Next skip) must not land
+            // late and clobber the NEW track's color with nil — its
+            // cancelled URL fetch surfaces as a nil result.
+            guard !Task.isCancelled else { return }
+            backdropColor = color
         }
         .preferredColorScheme(.dark)
         .onExitCommand {
-            // Closing Now Playing must drop video back to audio-only so
-            // the architectural rule holds by default on next open.
-            env.player.isVideoVisible = false
-            env.player.isFullPlayerOpen = false
-        }
-        .onDisappear {
-            // Belt-and-suspenders: if we're being dismissed by some
-            // path other than the close button / ESC (e.g. the parent
-            // ZStack switching branches), still drop the video pane.
-            env.player.isVideoVisible = false
+            // Esc is layered: exit fullscreen lyrics first if it's
+            // up, otherwise close the whole player.
+            if lyricsFullscreen {
+                lyricsFullscreen = false
+            } else {
+                env.player.isFullPlayerOpen = false
+            }
         }
         .onChange(of: bottomTab) { _, newTab in
             if newTab == .lyrics { env.player.loadLyricsIfNeeded() }
@@ -124,14 +185,32 @@ struct NowPlayingView: View {
             if mode == .discover { env.player.loadRelatedIfNeeded() }
         }
         // Reset X-Ray view state on track change so a cached bundle for
-        // the new track paints (or a fresh request fires) the next time
-        // the Context tab is opened. The service's own cache means
+        // the new track paints (or a fresh request fires via the
+        // debounced task below). The service's own cache means
         // back-and-forth between two tracks is instant.
         .onChange(of: env.player.currentTrack?.videoId) { _, _ in
+            xrayRequestID = UUID()   // orphan any in-flight request
             xrayCards = nil
             xrayError = nil
             xrayLoading = false
-            if bottomTab == .context { fireXRayIfNeeded() }
+        }
+        // Debounced auto-fire: with the Context tab open, skipping
+        // through tracks must not bill one LLM request per skip — and a
+        // request fired the instant `currentTrack` changes can still
+        // carry the PREVIOUS track's lyrics (the bridge only clears
+        // them once /next returns). SwiftUI cancels the sleep when the
+        // id changes, so only the track the user settles on fires; a
+        // cache hit skips the debounce and paints instantly. The id
+        // also covers configuring an API key while the tab is open.
+        .task(id: "\(track?.videoId ?? "none")#\(env.hasLLMAPIKey)") {
+            guard bottomTab == .context, env.hasLLMAPIKey else { return }
+            if let vid = track?.videoId, env.xrayCardsService.cached(videoId: vid) != nil {
+                fireXRayIfNeeded()
+                return
+            }
+            try? await Task.sleep(for: .seconds(1.2))
+            guard !Task.isCancelled else { return }
+            fireXRayIfNeeded()
         }
     }
 
@@ -140,7 +219,6 @@ struct NowPlayingView: View {
     private var topBar: some View {
         HStack {
             Button {
-                env.player.isVideoVisible = false
                 env.player.isFullPlayerOpen = false
             } label: {
                 HStack(spacing: 6) {
@@ -152,56 +230,23 @@ struct NowPlayingView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
-                .background(Color.white.opacity(0.1))
+                .background(Theme.Fill.medium)
                 .clipShape(Capsule())
             }
             .buttonStyle(.plain)
-            .keyboardShortcut(.cancelAction)
+            // Esc is layered (see onExitCommand): in fullscreen lyrics
+            // the Exit-fullscreen button owns .cancelAction instead —
+            // key shortcuts dispatch via performKeyEquivalent BEFORE
+            // onExitCommand ever sees the key, so an unconditional
+            // shortcut here would close the whole player from
+            // fullscreen lyrics. Exactly one .cancelAction is live at
+            // a time.
+            .keyboardShortcut(lyricsFullscreen ? nil : KeyboardShortcut.cancelAction)
 
             Spacer()
-            audioVideoToggle
-            Spacer()
-            // Symmetry placeholder, sized like the Close button so the
-            // toggle reads centered.
-            Color.clear.frame(width: 88, height: 32)
         }
         .padding(.horizontal, 24)
         .padding(.vertical, 14)
-    }
-
-    /// Pill toggle that swaps the left column between the static
-    /// artwork (Song) and the live music video (Video). The scoped
-    /// exception to the WebView-never-visible rule lives here — see
-    /// the leftPlayer comments and CLAUDE.md.
-    private var audioVideoToggle: some View {
-        HStack(spacing: 0) {
-            toggleSegment(label: "Song", on: !env.player.isVideoVisible) {
-                env.player.isVideoVisible = false
-            }
-            toggleSegment(label: "Video", on: env.player.isVideoVisible) {
-                env.player.isVideoVisible = true
-            }
-        }
-        .background(Color.white.opacity(0.08))
-        .clipShape(Capsule())
-        .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
-        .help(env.player.isVideoVisible
-              ? "Switch to audio-only artwork view"
-              : "Show the official music video")
-    }
-
-    private func toggleSegment(label: String, on: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(on ? .white : .white.opacity(0.6))
-                .padding(.horizontal, 14)
-                .padding(.vertical, 6)
-                .background(on ? Theme.red : Color.clear)
-                .clipShape(Capsule())
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
     }
 
     // MARK: - Left column (artwork + title + scrubber + transport)
@@ -223,15 +268,21 @@ struct NowPlayingView: View {
                        env.trackOverrides.hasOverride(for: vid) {
                         Image(systemName: "pencil")
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(Theme.Text.secondary)
                             .help("Metadata edited locally")
                             .accessibilityLabel("Metadata edited")
                     }
                 }
-                Text(displayedSubtitle(track: track))
-                    .font(.system(size: 14))
-                    .foregroundStyle(.white.opacity(0.7))
-                    .lineLimit(1)
+                // Each credited artist is its own link (hover highlights
+                // only that name; click opens THAT artist) — the previous
+                // single link lit the whole credit string and could only
+                // reach the first artist.
+                ArtistLinkLine(
+                    subtitle: displayedSubtitle(track: track),
+                    primaryArtistId: track?.artistId,
+                    fontSize: 14,
+                    baseOpacity: 0.7
+                )
             }
             .padding(.horizontal, 32)
             .contextMenu { nowPlayingMenuItems }
@@ -240,45 +291,62 @@ struct NowPlayingView: View {
                 .frame(maxWidth: 480)
             playbackControls
                 .padding(.top, 4)
+            volumeBar
+                .frame(maxWidth: 300)
+                .padding(.top, 2)
 
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    /// Hero media — either the static artwork (default) or the live
-    /// WKWebView showing the music video. The toggle is the one scoped
-    /// exception to CLAUDE.md's WebView-never-visible rule: video lives
-    /// only inside this Now Playing pane, only when the user opts in,
-    /// and reverts to artwork on dismiss. Sized at 16:9 when video is
-    /// on (matching the YT player aspect), square when on artwork.
-    @ViewBuilder
+    /// Hero artwork. Riff intentionally does NOT surface the music video —
+    /// see CLAUDE.md's "WKWebView is never visible after sign-in" rule.
+    /// The earlier audio↔video toggle was the scoped exception and it
+    /// caused architectural drift (chrome leakage, MSE stream switching,
+    /// reparenting bugs); now removed. The "Watch music video" button
+    /// in the corner of the hero replaces it — hands the URL off to
+    /// the system browser so the video plays in a real browser tab
+    /// instead of an embedded WebView Riff has to reparent.
     private func heroMedia(track: PlayerBridge.Track?) -> some View {
-        if env.player.isVideoVisible {
-            VideoPaneView(
-                webView: env.player.hostedWebView,
-                onDismantle: { [env] in env.player.reattachWebViewOffscreen() }
-            )
-            .frame(width: 480, height: 270)
-            .clipShape(RoundedRectangle(cornerRadius: 12))
-            .shadow(color: .black.opacity(0.6), radius: 26, y: 10)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Color.white.opacity(0.15), lineWidth: 1)
-            )
-            .contextMenu { nowPlayingMenuItems }
-        } else {
-            AsyncImage(url: track?.thumbnailURL) { phase in
-                switch phase {
-                case .success(let img): img.resizable().aspectRatio(contentMode: .fit)
-                default: Color.white.opacity(0.06)
-                }
+        // 320pt hero = 640px on Retina; the track thumbnail PlayerBridge
+        // reports is typically 544px or smaller. Upscale via the =wN-hN
+        // host rewrite for a crisp hero.
+        AsyncImage(url: track?.thumbnailURL?.upscaledArtwork(to: 720)) { phase in
+            switch phase {
+            case .success(let img): img.resizable().aspectRatio(contentMode: .fit)
+            default: Theme.Fill.soft
             }
-            .frame(width: 320, height: 320)
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .shadow(color: .black.opacity(0.6), radius: 26, y: 10)
-            .contextMenu { nowPlayingMenuItems }
         }
+        .frame(width: 320, height: 320)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .shadow(color: .black.opacity(0.6), radius: 26, y: 10)
+        .overlay(alignment: .bottomTrailing) {
+            if let track, !track.videoId.isEmpty {
+                Button {
+                    if let url = URL(string: "https://music.youtube.com/watch?v=\(track.videoId)") {
+                        NSWorkspace.shared.open(url)
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "play.rectangle.fill")
+                            .font(.system(size: 12, weight: .semibold))
+                        Text("Watch video")
+                            .font(.system(size: 11, weight: .semibold))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.75))
+                    .foregroundStyle(.white)
+                    .clipShape(Capsule())
+                    .overlay(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .padding(10)
+                .help("Open the music video in your browser")
+            }
+        }
+        .contextMenu { nowPlayingMenuItems }
     }
 
     // MARK: - Right column (Up Next / Lyrics / Related side pane)
@@ -291,10 +359,14 @@ struct NowPlayingView: View {
                     Button {
                         withAnimation(.easeInOut(duration: 0.18)) { bottomTab = t }
                     } label: {
-                        VStack(spacing: 6) {
+                        VStack(spacing: 7) {
+                            // Uppercase + tracked — YT Music web's watch-
+                            // page tab treatment (UP NEXT / LYRICS / …).
                             Text(t.rawValue)
-                                .font(.system(size: 13, weight: bottomTab == t ? .semibold : .regular))
-                                .foregroundStyle(bottomTab == t ? .white : .white.opacity(0.6))
+                                .font(.system(size: 11, weight: .semibold))
+                                .textCase(.uppercase)
+                                .tracking(1.1)
+                                .foregroundStyle(bottomTab == t ? Color.white : Theme.Text.tertiary)
                             Rectangle()
                                 .fill(bottomTab == t ? Theme.red : Color.clear)
                                 .frame(height: 2)
@@ -305,9 +377,15 @@ struct NowPlayingView: View {
                 }
             }
 
-            Divider().background(Color.white.opacity(0.15))
+            Divider().background(Theme.Fill.strong)
 
-            // Selected tab content fills remaining height.
+            // Selected tab content fills remaining height. Plain
+            // ScrollView — UP NEXT renders first, so it's naturally
+            // at the top on open; Recently Played sits below it, so
+            // history is a scroll-DOWN away. (An earlier version
+            // pinned UP NEXT via a ScrollViewReader while history
+            // rendered above; the forced scroll landed at odd
+            // positions — removed.)
             ScrollView {
                 Group {
                     switch bottomTab {
@@ -324,11 +402,15 @@ struct NowPlayingView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        // .regularMaterial = macOS native frosted-glass surface. Reads as
-        // a clearly distinct panel against the dark blurred backdrop —
-        // previous solid Color(white: 0.16) blended in too much. The
-        // brand-red top edge is an unmistakable visual landmark.
+        // Frost over a DARK base, not straight over the backdrop.
+        // The adaptive color wash (F1) is saturated at the top; a
+        // bare `.regularMaterial` picked that up and tinted the whole
+        // Up Next pane the album's color, which read as "off". The
+        // dark fill underneath keeps the frost neutral while still
+        // giving the subtle translucency that separates the pane
+        // from the artwork behind it.
         .background(.regularMaterial)
+        .background(Color(white: 0.09))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .overlay(alignment: .top) {
             Rectangle()
@@ -339,37 +421,20 @@ struct NowPlayingView: View {
         }
         .overlay(
             RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
+                .strokeBorder(Theme.Fill.strong, lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.5), radius: 16, x: -4, y: 0)
     }
 
     // MARK: - Scrubber
 
-    private var scrubber: some View {
-        let duration = max(env.player.duration, 0.001)
-        let displayed = scrubbing ?? env.player.elapsed
-        return VStack(spacing: 6) {
-            ScrubberSlider(
-                value: Binding(
-                    get: { displayed },
-                    set: { scrubbing = $0 }
-                ),
-                range: 0...duration,
-                onCommit: { value in
-                    scrubbing = nil
-                    Task { await env.player.seek(to: value / duration) }
-                }
-            )
-            HStack {
-                Text(format(time: displayed))
-                Spacer()
-                Text("-" + format(time: max(0, duration - displayed)))
-            }
-            .font(.system(size: 11, weight: .medium, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.75))
-        }
-    }
+    // Scrubber lives in its own View struct (ScrubberSection, end of
+    // file) — @Observable tracks property access per view body, and
+    // elapsed/duration mutate at ~4Hz. When this 2,100-line view read
+    // them directly, the ENTIRE body re-evaluated four times a second
+    // for the life of the player; isolated in a child, only the child
+    // re-renders per tick.
+    private var scrubber: some View { ScrubberSection() }
 
     /// Help-text label for the shuffle button, surfacing the Smart
     /// Shuffle state alongside regular shuffle so a hover hint tells
@@ -383,16 +448,20 @@ struct NowPlayingView: View {
         }
     }
 
+    /// Transport, in two tiers so the hierarchy reads at a glance: the
+    /// primary row is the core playback transport (centered, large play
+    /// hub); the secondary row holds the lighter utilities (like + the
+    /// rate / output / sleep / playlist / more menus) at reduced weight
+    /// so they no longer compete with prev/play/next.
     private var playbackControls: some View {
-        HStack(spacing: 16) {
-            controlButton(
-                systemName: env.player.liked ? "heart.fill" : "heart",
-                size: 20,
-                tint: env.player.liked ? Theme.red : .white.opacity(0.7),
-                help: env.player.liked ? "Unlike" : "Like"
-            ) {
-                Task { await env.player.toggleLike() }
-            }
+        VStack(spacing: 18) {
+            primaryTransportRow
+            secondaryUtilityRow
+        }
+    }
+
+    private var primaryTransportRow: some View {
+        HStack(spacing: 20) {
             // Shuffle — when ON, our `next()` plays a random upcoming
             // track instead of advancing to the page's natural next.
             // Right-click reveals the Smart Shuffle (B5) toggle: when
@@ -404,7 +473,7 @@ struct NowPlayingView: View {
                     ? "shuffle.circle.fill"
                     : "shuffle",
                 size: 18,
-                tint: env.player.shuffleEnabled ? Theme.red : .white.opacity(0.7),
+                tint: env.player.shuffleEnabled ? Theme.red : Theme.Text.secondary,
                 help: shuffleHelpText
             ) {
                 env.player.toggleShuffle()
@@ -422,7 +491,7 @@ struct NowPlayingView: View {
                 Text("Smart Shuffle injects related-song suggestions every few slots when shuffle is on.")
             }
             // Skip-back -15s — useful for any track but especially podcasts.
-            controlButton(systemName: "gobackward.15", size: 20, tint: .white.opacity(0.85), help: "Back 15 seconds") {
+            controlButton(systemName: "gobackward.15", size: 20, tint: Theme.Text.secondary, help: "Back 15 seconds") {
                 Task { await env.player.skip(by: -15) }
             }
             controlButton(systemName: "backward.fill", size: 22, tint: .white, help: "Previous") {
@@ -439,11 +508,13 @@ struct NowPlayingView: View {
             }
             .onTapGesture { Task { await env.player.togglePlay() } }
             .help(env.player.isPlaying ? "Pause" : "Play")
+            .accessibilityLabel(env.player.isPlaying ? "Pause" : "Play")
+            .accessibilityAddTraits(.isButton)
             controlButton(systemName: "forward.fill", size: 22, tint: .white, help: "Next") {
                 Task { await env.player.next() }
             }
             // Skip-forward +30s.
-            controlButton(systemName: "goforward.30", size: 20, tint: .white.opacity(0.85), help: "Forward 30 seconds") {
+            controlButton(systemName: "goforward.30", size: 20, tint: Theme.Text.secondary, help: "Forward 30 seconds") {
                 Task { await env.player.skip(by: 30) }
             }
             // Repeat — currently two-state (off / one). The "1" badge
@@ -451,10 +522,24 @@ struct NowPlayingView: View {
             controlButton(
                 systemName: env.player.repeatMode == .one ? "repeat.1" : "repeat",
                 size: 18,
-                tint: env.player.repeatMode == .off ? .white.opacity(0.7) : Theme.red,
-                help: env.player.repeatMode == .one ? "Repeat one" : "Repeat"
+                tint: env.player.repeatMode == .off ? Theme.Text.secondary : Theme.red,
+                help: env.player.repeatMode == .one ? "Repeat one"
+                    : env.player.repeatMode == .all ? "Repeat all" : "Repeat"
             ) {
                 Task { await env.player.toggleRepeat() }
+            }
+        }
+    }
+
+    private var secondaryUtilityRow: some View {
+        HStack(spacing: 20) {
+            controlButton(
+                systemName: env.player.liked ? "heart.fill" : "heart",
+                size: 18,
+                tint: env.player.liked ? Theme.red : Theme.Text.secondary,
+                help: env.player.liked ? "Unlike" : "Like"
+            ) {
+                Task { await env.player.toggleLike() }
             }
             playbackRateMenu
             audioOutputButton
@@ -462,6 +547,50 @@ struct NowPlayingView: View {
             addToPlaylistMenu
             moreMenu
         }
+        // Lighter than the transport above — a tier of secondary actions,
+        // not primary controls.
+        .opacity(0.9)
+    }
+
+    /// Volume bar under the transport controls — the full player had no
+    /// in-window volume control (only the mini-player slider and the
+    /// ⌘↑/⌘↓ nudge shortcuts). Speaker icon click toggles mute,
+    /// restoring the pre-mute level rather than snapping to 100%.
+    private var volumeBar: some View {
+        HStack(spacing: 8) {
+            Button {
+                if env.player.volume > 0 {
+                    preMuteVolume = env.player.volume
+                    Task { await env.player.setVolume(0) }
+                } else {
+                    Task { await env.player.setVolume(preMuteVolume > 0 ? preMuteVolume : 1.0) }
+                }
+            } label: {
+                Image(systemName: env.player.volume == 0 ? "speaker.slash.fill"
+                                   : env.player.volume < 0.5 ? "speaker.wave.1.fill"
+                                   : "speaker.wave.2.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(Theme.Text.secondary)
+                    .frame(width: 18)
+            }
+            .buttonStyle(.plain)
+            .help(env.player.volume == 0 ? "Unmute" : "Mute")
+            Slider(
+                value: Binding(
+                    get: { env.player.volume },
+                    set: { v in Task { await env.player.setVolume(v) } }
+                ),
+                in: 0...1
+            )
+            .controlSize(.mini)
+            .tint(Theme.Text.secondary)
+            Image(systemName: "speaker.wave.3.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(Theme.Text.tertiary)
+                .frame(width: 18)
+        }
+        .accessibilityLabel("Volume")
+        .accessibilityValue("\(Int((env.player.volume * 100).rounded())) percent")
     }
 
     /// Sleep-timer menu. Shows the running countdown when armed (mm:ss),
@@ -502,7 +631,7 @@ struct NowPlayingView: View {
                         .font(.system(size: 9, weight: .semibold, design: .monospaced))
                 }
             }
-            .foregroundStyle(sleepTimerActive ? Theme.red : .white.opacity(0.7))
+            .foregroundStyle(sleepTimerActive ? Theme.red : Theme.Text.secondary)
             .frame(height: 40)
             .padding(.horizontal, 4)
             .contentShape(Rectangle())
@@ -510,6 +639,12 @@ struct NowPlayingView: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .help(sleepTimerHelp)
+        // VoiceOver: read the mode + remaining as a single label,
+        // and mark the value as updates-frequently so the countdown
+        // ticks don't spam-announce every second. (U6)
+        .accessibilityLabel("Sleep timer")
+        .accessibilityValue(sleepTimerHelp)
+        .accessibilityAddTraits(.updatesFrequently)
     }
 
     /// Whether the sleep-timer affordance should render in its
@@ -566,7 +701,7 @@ struct NowPlayingView: View {
         } label: {
             Image(systemName: "airplayaudio")
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(Theme.Text.secondary)
                 .frame(width: 40, height: 40)
                 .contentShape(Rectangle())
         }
@@ -593,7 +728,7 @@ struct NowPlayingView: View {
         } label: {
             Image(systemName: "ellipsis")
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(Theme.Text.secondary)
                 .frame(width: 36, height: 40)
                 .contentShape(Rectangle())
         }
@@ -643,8 +778,24 @@ struct NowPlayingView: View {
                 } else {
                     ForEach(env.userPlaylists) { pl in
                         Button(pl.title) {
+                            // Capture the track at tap time — it can
+                            // change before the Task runs, and a nil
+                            // current track must not toast "Added".
+                            guard let track = env.player.currentTrack else { return }
+                            let videoId = track.videoId
                             Task {
-                                try? await env.player.addCurrentTrackToPlaylist(playlistId: pl.id)
+                                // Toast both outcomes, same copy as
+                                // TrackContextMenu — a silent add read
+                                // as "did that even work?"
+                                do {
+                                    try await env.innerTube.addToPlaylist(
+                                        videoId: videoId,
+                                        playlistId: pl.id
+                                    )
+                                    env.showToast("Added to \(pl.title)")
+                                } catch {
+                                    env.showToast("Couldn't add to \(pl.title)")
+                                }
                             }
                         }
                     }
@@ -653,7 +804,7 @@ struct NowPlayingView: View {
         } label: {
             Image(systemName: "text.badge.plus")
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.white.opacity(0.7))
+                .foregroundStyle(Theme.Text.secondary)
                 .frame(width: 36, height: 40)
                 .contentShape(Rectangle())
         }
@@ -667,6 +818,12 @@ struct NowPlayingView: View {
     /// Playback-speed picker. 1× by default; useful for podcasts at 1.25–2×.
     /// Replaces the inert shuffle button which we don't have a real backend
     /// for yet (YT Music's shuffle is server-driven inside the queue).
+    ///
+    /// Podcast pill variant: when the current track's kind is spoken
+    /// (podcast episode), a single tap cycles through the common
+    /// podcast speeds (1×→1.25×→1.5×→1.75×→2×→1×), Overcast-style,
+    /// so the user doesn't have to open a menu for the primary
+    /// action. Right-click / long-press keeps the full menu.
     private var playbackRateMenu: some View {
         Menu {
             ForEach([0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0], id: \.self) { rate in
@@ -684,13 +841,36 @@ struct NowPlayingView: View {
         } label: {
             Text(env.player.playbackRate == 1.0 ? "1×" : Self.formatRate(env.player.playbackRate) + "×")
                 .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                .foregroundStyle(env.player.playbackRate == 1.0 ? .white.opacity(0.75) : Theme.red)
+                .foregroundStyle(env.player.playbackRate == 1.0 ? Theme.Text.secondary : Theme.red)
                 .frame(width: 44, height: 40)
                 .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .frame(width: 60, height: 40)
-        .help("Playback speed")
+        .help(env.player.currentKind == .spoken
+              ? "Playback speed (tap to cycle)"
+              : "Playback speed")
+        .overlay {
+            // When podcast mode is active, layer an invisible tap
+            // handler that runs FIRST — SwiftUI hit-tests overlays
+            // above the labeled Menu, so this catches primary
+            // clicks. Right-click still opens the Menu (SwiftUI's
+            // built-in behavior) because it goes through the
+            // Menu's own contextual handler, not this button.
+            if env.player.currentKind == .spoken {
+                Button {
+                    let presets: [Double] = [1.0, 1.25, 1.5, 1.75, 2.0]
+                    let currentRate = env.player.playbackRate
+                    let nextIdx = (presets.firstIndex { abs($0 - currentRate) < 0.01 } ?? -1) + 1
+                    let next = presets[nextIdx % presets.count]
+                    Task { await env.player.setPlaybackRate(next) }
+                } label: {
+                    Color.clear
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 
     private static func formatRate(_ rate: Double) -> String {
@@ -709,35 +889,60 @@ struct NowPlayingView: View {
         }
         .buttonStyle(.plain)
         .help(help ?? "")
-    }
-
-    private func format(time: Double) -> String {
-        guard time.isFinite, time >= 0 else { return "0:00" }
-        let total = Int(time)
-        return String(format: "%d:%02d", total / 60, total % 60)
+        // Route the help tooltip into VoiceOver too — every
+        // transport button call site already passes a meaningful
+        // `help` string ("Play", "Previous", "Skip forward 30s",
+        // etc.), so mirror it into the accessibility label so
+        // VoiceOver reads the same intent, not the raw SF Symbol
+        // name.
+        .accessibilityLabel(help ?? systemName)
     }
 
     // MARK: - Tab content
 
     @State private var tunePopoverOpen: Bool = false
-    /// "Recently played" only shows the most-recent few rows by default;
-    /// scrolling back through every track played in the session was making
-    /// the Up Next pane feel like a log file. Flips to true on "Show more".
+    /// "Recently played" (rendered below Up Next) shows the last few
+    /// rows by default; "Show all" expands the full session log.
+    /// Keeps the pane from feeling like a log file while still
+    /// giving access to everything.
     @State private var historyExpanded: Bool = false
-    private static let historyDefaultLimit: Int = 3
+    private static let historyDefaultLimit = 4
 
-    private var upNextContent: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Header row: queue mode label on the left, "Tune" affordance
-            // on the right — mirrors YT Music's popover-driven pattern
-            // instead of always-visible mode pills.
-            HStack(spacing: 6) {
-                Text(queueModeHeader)
-                    .font(.system(size: 11, weight: .semibold))
-                    .textCase(.uppercase)
-                    .tracking(1.2)
-                    .foregroundStyle(.white.opacity(0.75))
-                Spacer()
+    private var queueModeLabel: some View {
+        Text(queueModeHeader)
+            .font(.system(size: 11, weight: .semibold))
+            .textCase(.uppercase)
+            .tracking(1.2)
+            .foregroundStyle(Theme.Text.secondary)
+            .lineLimit(1)
+            .truncationMode(.tail)
+    }
+
+    /// Autoplay switch — YT web's watch-page queue toggle, wired to the
+    /// existing `autoplayEnabled` setting (same one as Settings →
+    /// Playback). OFF stops playback when the queue runs out instead of
+    /// extending it with related tracks.
+    private var autoplayToggle: some View {
+        Toggle(isOn: Binding(
+            get: { env.player.autoplayEnabled },
+            set: { env.player.setAutoplayEnabled($0) }
+        )) {
+            Text("Autoplay")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(Theme.Text.secondary)
+        }
+        .toggleStyle(.switch)
+        .controlSize(.mini)
+        .tint(Theme.red)
+        .fixedSize()
+        .help("When on, the queue auto-extends with similar music as it nears the end.")
+        .accessibilityLabel("Autoplay")
+    }
+
+    /// Save / Clear / Build / Tune — mirrors YT Music's popover-driven
+    /// pattern instead of always-visible mode pills.
+    @ViewBuilder
+    private var queueHeaderChips: some View {
                 // "Save queue" — YT Music's Up-Next save affordance.
                 // Disabled when there's nothing to save, hidden when
                 // the user is anonymous (the createPlaylist endpoint
@@ -755,12 +960,44 @@ struct NowPlayingView: View {
                         }
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background(Color.white.opacity(0.06))
-                        .foregroundStyle(.white.opacity(0.85))
+                        .background(Theme.Fill.soft)
+                        .foregroundStyle(Theme.Text.secondary)
                         .clipShape(Capsule())
+                        // Never wrap a chip label mid-word ("Sav e") when
+                        // four chips share the pane header; overflow is
+                        // absorbed by the section title instead.
+                        .fixedSize()
                     }
                     .buttonStyle(.plain)
                     .help("Save these tracks as a new playlist")
+                }
+                // "Clear" — empties Up Next (user + server regions).
+                // The playing track is unaffected; for radio, YT's
+                // autoplay continues, matching YT Music's own
+                // clear-queue behavior.
+                if !env.player.upNext.isEmpty {
+                    Button {
+                        Task { await env.player.clearUpNext() }
+                        env.showToast("Queue cleared")
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "xmark.circle")
+                                .font(.system(size: 11, weight: .semibold))
+                            Text("Clear")
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Theme.Fill.soft)
+                        .foregroundStyle(Theme.Text.secondary)
+                        .clipShape(Capsule())
+                        // Never wrap a chip label mid-word ("Sav e") when
+                        // four chips share the pane header; overflow is
+                        // absorbed by the section title instead.
+                        .fixedSize()
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove all upcoming tracks")
                 }
                 // "✨ Build" — opens the AI Queue Builder sheet.
                 // Discoverable but unobtrusive: same chip shape as
@@ -779,12 +1016,13 @@ struct NowPlayingView: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.06))
-                    .foregroundStyle(.white.opacity(0.85))
+                    .background(Theme.Fill.soft)
+                    .foregroundStyle(Theme.Text.secondary)
                     .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
                 .help("Build a queue from a vibe with AI")
+                .fixedSize()
 
                 Button {
                     tunePopoverOpen = true
@@ -797,11 +1035,12 @@ struct NowPlayingView: View {
                     }
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
-                    .background(Color.white.opacity(0.06))
-                    .foregroundStyle(.white.opacity(0.85))
+                    .background(Theme.Fill.soft)
+                    .foregroundStyle(Theme.Text.secondary)
                     .clipShape(Capsule())
                 }
                 .buttonStyle(.plain)
+                .fixedSize()
                 .popover(isPresented: $tunePopoverOpen, arrowEdge: .top) {
                     TunePopover(
                         chips: env.player.availableChips,
@@ -809,6 +1048,69 @@ struct NowPlayingView: View {
                         onSelectChip: { chip in env.player.applyChip(chip) },
                         fallbackSelection: $queueMode
                     )
+                }
+    }
+
+    private var upNextContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            // "Playing from <album/playlist>" + Save — YT web's watch-page
+            // queue header. Only when the queue context came from a named
+            // tracklist (playTracks with a sourceTitle); radio and bare
+            // single-track contexts show nothing here.
+            if let src = env.player.queueSourceTitle {
+                HStack(alignment: .center, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Playing from")
+                            .font(.system(size: 9, weight: .semibold))
+                            .textCase(.uppercase)
+                            .tracking(1.2)
+                            .foregroundStyle(Theme.Text.tertiary)
+                        Text(src)
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                    }
+                    Spacer()
+                    if let pid = env.player.queueSourcePlaylistId, !pid.isEmpty {
+                        let saved = env.isSavedToLibrary(pid)
+                        Button {
+                            env.toggleSavedToLibrary(playlistId: pid, title: src)
+                        } label: {
+                            Label(saved ? "Saved" : "Save",
+                                  systemImage: saved ? "checkmark" : "plus")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(saved ? Theme.red : .white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .help(saved ? "Remove from your library" : "Save to your library")
+                    }
+                }
+                .padding(.horizontal, 4)
+                Divider().background(Theme.Fill.medium)
+            }
+            // Header: mode label + Save / Clear / Build / Tune chips.
+            // One row when the pane is wide enough; otherwise the label
+            // takes its own line above the chips. Chips are fixed-size
+            // so they never wrap mid-word ("Buil d", "Tu ne") and the
+            // label truncates instead of breaking ("INSTRUM ENTAL").
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) {
+                    queueModeLabel
+                    Spacer()
+                    queueHeaderChips
+                    autoplayToggle
+                }
+                VStack(alignment: .leading, spacing: 8) {
+                    queueModeLabel
+                    HStack(spacing: 6) {
+                        queueHeaderChips
+                        autoplayToggle
+                        Spacer(minLength: 0)
+                    }
                 }
             }
 
@@ -819,66 +1121,131 @@ struct NowPlayingView: View {
             // sections. The "upcoming" list source switches based on the
             // selected mode pill (see QueueMode docs).
             let currentId = env.player.currentTrack?.videoId
-            let history = env.player.playedHistory.filter { $0.id != currentId }
-            let upcoming = upcomingList(currentId: currentId)
-            if history.isEmpty && upcoming.isEmpty {
-                emptyHint(emptyHintText)
-            } else {
-                if !history.isEmpty, isDefaultLens {
-                    // Recently played only makes sense in the default
-                    // (Related / "All") lens — it's a chronological log
-                    // of THIS session, not part of a tuned variant's
-                    // curation.
-                    //
-                    // We cap the visible rows at `historyDefaultLimit`
-                    // (currently 3) to keep the Up Next pane focused
-                    // on what's coming next rather than dominating the
-                    // viewport with session history. The cap shows the
-                    // tail (most-recent N), since that's the part the
-                    // user actually needs as quick rewind context. A
-                    // "Show all / Show fewer" button reveals the full
-                    // log on demand.
-                    HStack(spacing: 6) {
-                        Text("Recently played")
-                            .font(.system(size: 10, weight: .semibold))
-                            .textCase(.uppercase)
-                            .tracking(1.2)
-                            .foregroundStyle(.white.opacity(0.45))
-                        Spacer()
-                        if history.count > Self.historyDefaultLimit {
-                            Button {
-                                historyExpanded.toggle()
-                            } label: {
-                                Text(historyExpanded
-                                     ? "Show fewer"
-                                     : "Show all (\(history.count))")
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .textCase(.uppercase)
-                                    .tracking(1.2)
-                                    .foregroundStyle(.white.opacity(0.75))
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                    .padding(.horizontal, 4)
-                    let visibleHistory: [MediaItem] = historyExpanded
-                        ? history
-                        : Array(history.suffix(Self.historyDefaultLimit))
-                    queueList(visibleHistory, faded: true)
-                    Divider().background(Color.white.opacity(0.08))
-                        .padding(.vertical, 4)
-                }
-                if !upcoming.isEmpty {
-                    Text(upcomingHeader)
+            // Blank-row guard applied to BOTH lists: entries archived
+            // (or queued) before metadata landed have an empty title
+            // and no artwork — they render as anonymous slots. Drop
+            // them everywhere so neither section shows visual noise.
+            //
+            // History legally repeats videoIds (A, B, A), so its rows
+            // can't be ForEach-keyed by videoId alone — that logged
+            // "ID occurs multiple times" and mis-animated rows. Keep
+            // each entry's index in the FULL, unfiltered history (it
+            // only shifts when the cap trims the front, unlike an
+            // index into the filtered suffix window) and key rows by
+            // "index-videoId".
+            let historyRows = Array(env.player.playedHistory.enumerated()).filter { pair in
+                pair.element.id != currentId
+                    && !pair.element.title.trimmingCharacters(in: .whitespaces).isEmpty
+                    && pair.element.thumbnailURL != nil
+            }
+            let upcoming = upcomingList(currentId: currentId).filter {
+                !$0.title.trimmingCharacters(in: .whitespaces).isEmpty
+            }
+            // Queue-mutating affordances (drag-reorder, Move Up/Down,
+            // Remove) only make sense when the rows really are the
+            // page's queue — i.e. `upcomingList` returned `upNext`.
+            // The Discover lens (no chips) shows `related` rows;
+            // "editing" those is a no-op that ends in a false
+            // "Couldn't remove" error toast.
+            let upcomingIsQueue = !env.player.availableChips.isEmpty || queueMode != .discover
+            let showRadioHint = upcoming.isEmpty
+                && env.player.isRadioContext
+                && currentId != nil
+            // Radio: anchor the compact autoplay banner at the TOP of the
+            // pane (where a queue would be) so it reads as the "up next"
+            // state, instead of floating in the gap under a short
+            // Recently Played list. Recently Played follows beneath it.
+            if showRadioHint {
+                radioAutoplayHint
+            }
+            // Recently played — the session log. Capped by default;
+            // "Show all" reveals the rest. Default lens only (a tuned
+            // variant's curation isn't a history).
+            if !historyRows.isEmpty, isDefaultLens {
+                HStack(spacing: 6) {
+                    Text("Recently played")
                         .font(.system(size: 10, weight: .semibold))
                         .textCase(.uppercase)
                         .tracking(1.2)
-                        .foregroundStyle(.white.opacity(0.45))
-                        .padding(.horizontal, 4)
-                    queueList(upcoming, faded: false)
+                        .foregroundStyle(Theme.Text.tertiary)
+                    Spacer()
+                    if historyRows.count > Self.historyDefaultLimit {
+                        Button(historyExpanded ? "Show fewer" : "Show all (\(historyRows.count))") {
+                            historyExpanded.toggle()
+                        }
+                        .buttonStyle(.plain)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(Theme.Text.secondary)
+                    }
+                }
+                .padding(.horizontal, 4)
+                // Chronological (oldest → newest) so the most
+                // recently-played track sits at the BOTTOM of the
+                // section, right above "Up next". Capped view keeps
+                // the last N (closest to now).
+                let shown = historyExpanded
+                    ? historyRows
+                    : Array(historyRows.suffix(Self.historyDefaultLimit))
+                queueList(
+                    shown.map(\.element),
+                    faded: true,
+                    rowKeys: shown.map { "\($0.offset)-\($0.element.id)" }
+                )
+                // Divider only when an Up Next list follows — otherwise a
+                // trailing divider dangles under radio/empty states.
+                if !upcoming.isEmpty {
+                    Divider().background(Theme.Fill.medium)
+                        .padding(.vertical, 4)
                 }
             }
+            if !upcoming.isEmpty {
+                Text(upcomingHeader)
+                    .font(.system(size: 10, weight: .semibold))
+                    .textCase(.uppercase)
+                    .tracking(1.2)
+                    .foregroundStyle(Theme.Text.tertiary)
+                    .padding(.horizontal, 4)
+                queueList(upcoming, faded: false, reorderable: upcomingIsQueue)
+            }
+            // Nothing to show and not a radio context → neutral empty hint.
+            if historyRows.isEmpty && upcoming.isEmpty && !showRadioHint {
+                emptyHint(emptyHintText)
+            }
         }
+    }
+
+    /// Shown in the Up Next tab for radio contexts, where we deliberately
+    /// don't display an upcoming queue: a radio's next tracks are
+    /// non-deterministic (the WebView plays its own radio, which an
+    /// independent /next call can't reproduce), so any list we drew would
+    /// not match what actually plays. Truthful placeholder until Phase 2
+    /// mirrors the page's real queue. Explicit Play next / Add to queue
+    /// items still appear above this (they live in the user region).
+    private var radioAutoplayHint: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Theme.Text.secondary)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Autoplay radio")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(Theme.Text.secondary)
+                Text("Next tracks are chosen automatically as the station plays. Use “Play next” or “Add to queue” to line up specific songs.")
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Theme.Text.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .background(Theme.Fill.soft)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Radius.card)
+                .strokeBorder(Theme.Fill.medium, lineWidth: 1)
+        )
+        .padding(.horizontal, 4)
     }
 
     /// Returns the upcoming list excluding the currently-playing track.
@@ -962,12 +1329,24 @@ struct NowPlayingView: View {
     private var lyricsContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Translate toggle + "Create card" share a header row.
-            // Both surfaces only render when there are lyrics to act on.
-            if !env.player.lyricsLoading,
-               (!env.player.lyricsLines.isEmpty || (env.player.lyrics?.isEmpty == false)) {
+            // Both surfaces only render when there are REAL lyrics to
+            // act on — `lyricsLines` is filled by every successful
+            // fetch, while the plain `lyrics` string can also hold the
+            // "Lyrics not available." UI sentinel, which must not
+            // enable Translate / Create card.
+            if !env.player.lyricsLoading, !env.player.lyricsLines.isEmpty {
                 HStack(spacing: 12) {
                     translationToolbar
                     Spacer()
+                    Button {
+                        lyricsFullscreen = true
+                    } label: {
+                        Label("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(Theme.Text.secondary)
+                    .help("Show lyrics fullscreen")
                     Button {
                         env.isLyricCardSheetPresented = true
                     } label: {
@@ -975,7 +1354,7 @@ struct NowPlayingView: View {
                             .font(.system(size: 12, weight: .medium))
                     }
                     .buttonStyle(.borderless)
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(Theme.Text.secondary)
                 }
             }
             Group {
@@ -984,7 +1363,7 @@ struct NowPlayingView: View {
                         ProgressView().controlSize(.small)
                         Text("Loading lyrics…")
                             .font(.system(size: 13))
-                            .foregroundStyle(.white.opacity(0.7))
+                            .foregroundStyle(Theme.Text.secondary)
                     }
                     .frame(maxWidth: .infinity, alignment: .center)
                     .padding(.vertical, 16)
@@ -997,26 +1376,33 @@ struct NowPlayingView: View {
                 }
             }
         }
-        // Reset + refire when the source track or target language
-        // changes. The translator's own cache means re-firing is
-        // usually free (cache hit, instant return); the @State here
-        // just keeps the UI in sync.
+        // Reset on track change. The refire is NOT immediate: at this
+        // instant `env.player.lyricsLines` can still hold the PREVIOUS
+        // track's lines (the bridge only clears them once /next
+        // returns), so an immediate request would translate the wrong
+        // song and cache it under the new videoId. The debounced
+        // .task(id:) below fires once the track settles.
         .onChange(of: env.player.currentTrack?.videoId) { _, _ in
+            translationRequestID = UUID()   // orphan any in-flight request
             translation = nil
             translationError = nil
-            if env.lyricsTranslationEnabled { fireTranslateIfNeeded() }
+            translationLoading = false
         }
         .onChange(of: env.translationLanguage) { _, _ in
+            translationRequestID = UUID()
             translation = nil
             translationError = nil
+            translationLoading = false
             if env.lyricsTranslationEnabled { fireTranslateIfNeeded() }
         }
         .onChange(of: env.lyricsTranslationEnabled) { _, newValue in
             if newValue { fireTranslateIfNeeded() } else {
                 // Toggling off doesn't drop the cache — flipping back
                 // on should be free. Just hide.
+                translationRequestID = UUID()
                 translation = nil
                 translationError = nil
+                translationLoading = false
             }
         }
         // Lyrics often land asynchronously after the tab opens — if
@@ -1024,6 +1410,26 @@ struct NowPlayingView: View {
         // first batch of lines arrives.
         .onChange(of: env.player.lyricsLines.count) { _, _ in
             if env.lyricsTranslationEnabled, translation == nil {
+                fireTranslateIfNeeded()
+            }
+        }
+        // Debounced track-change work: re-request the new track's
+        // lyrics (idempotent; a no-op until the bridge has cleared the
+        // previous track's) and, once the track settles, fire the
+        // translation. SwiftUI cancels the sleep when the id changes,
+        // so tracks the user skips past never start a billed request.
+        // A cache hit paints instantly, without the debounce.
+        .task(id: env.player.currentTrack?.videoId) {
+            env.player.loadLyricsIfNeeded()
+            if env.lyricsTranslationEnabled,
+               let vid = env.player.currentTrack?.videoId,
+               env.lyricsTranslator.cached(videoId: vid, language: env.translationLanguage) != nil {
+                fireTranslateIfNeeded()   // cache hit — instant paint
+            }
+            try? await Task.sleep(for: .seconds(1.2))
+            guard !Task.isCancelled else { return }
+            env.player.loadLyricsIfNeeded()
+            if env.lyricsTranslationEnabled, translation == nil, !translationLoading {
                 fireTranslateIfNeeded()
             }
         }
@@ -1051,7 +1457,7 @@ struct NowPlayingView: View {
                             .font(.system(size: 12, weight: .medium))
                         Text("(\(env.translationLanguage))")
                             .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.55))
+                            .foregroundStyle(Theme.Text.tertiary)
                     }
                 }
                 .toggleStyle(.switch)
@@ -1071,7 +1477,7 @@ struct NowPlayingView: View {
                     .font(.system(size: 11))
             }
             .buttonStyle(.borderless)
-            .foregroundStyle(.white.opacity(0.6))
+            .foregroundStyle(Theme.Text.tertiary)
             .help("Add an Anthropic API key in Settings → AI features to unlock lyric translation.")
         }
     }
@@ -1089,10 +1495,10 @@ struct NowPlayingView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(line.isEmpty ? "♪" : line)
                         .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.85))
+                        .foregroundStyle(Theme.Text.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .textSelection(.enabled)
-                    translatedSubtitle(at: idx)
+                    translatedSubtitle(at: idx, selectable: true)
                 }
             }
         }
@@ -1102,29 +1508,38 @@ struct NowPlayingView: View {
     /// Optional translated subtitle for a given source-line index.
     /// Renders nothing when translation is off, errored, or the index
     /// is out of range of what the model returned.
+    ///
+    /// `selectable` is false on the synced (karaoke) path, where the
+    /// row carries a tap-to-seek gesture: a selectable Text would
+    /// consume the mouse-down itself and the tap would never fire.
+    /// An outer .textSelection(.disabled) would NOT be enough — the
+    /// innermost modifier wins, so selectability must be decided here.
     @ViewBuilder
-    private func translatedSubtitle(at idx: Int) -> some View {
+    private func translatedSubtitle(at idx: Int, selectable: Bool) -> some View {
         if env.lyricsTranslationEnabled,
            let lines = translation?.lines,
            idx < lines.count {
             let entry = lines[idx]
             if !entry.translated.isEmpty || (entry.pronunciation?.isEmpty == false) {
-                VStack(alignment: .leading, spacing: 1) {
+                let column = VStack(alignment: .leading, spacing: 1) {
                     if let pron = entry.pronunciation, !pron.isEmpty {
                         Text(pron)
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.5))
-                            .textSelection(.enabled)
+                            .foregroundStyle(Theme.Text.tertiary)
                     }
                     if !entry.translated.isEmpty {
                         Text(entry.translated)
                             .font(.system(size: 12, weight: .regular))
                             .italic()
                             .foregroundStyle(Theme.red.opacity(0.9))
-                            .textSelection(.enabled)
                     }
                 }
                 .padding(.leading, 4)
+                if selectable {
+                    column.textSelection(.enabled)
+                } else {
+                    column
+                }
             }
         }
         if env.lyricsTranslationEnabled, idx == 0, let err = translationError {
@@ -1141,22 +1556,19 @@ struct NowPlayingView: View {
     private func fireTranslateIfNeeded() {
         guard env.lyricsTranslationEnabled, env.hasLLMAPIKey else { return }
         guard let track = env.player.currentTrack else { return }
-        // Prefer the structured `lyricsLines` (timed or not) so we
-        // match the renderer's index space; fall back to splitting the
-        // plain-text blob the same way `plainLyricsWithTranslation`
-        // does so indices line up.
-        let lines: [String]
-        if !env.player.lyricsLines.isEmpty {
-            lines = env.player.lyricsLines.map(\.text)
-        } else if let text = env.player.lyrics, !text.isEmpty {
-            lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        } else {
-            return
-        }
+        // Translate only the structured `lyricsLines` — every
+        // successful fetch fills them (the plain `lyrics` blob is
+        // derived from them, so indices line up), while a lyrics-less
+        // track leaves them empty and stores the "Lyrics not
+        // available." UI sentinel in `lyrics`. That sentinel must
+        // never be sent to the model as if it were a verse.
+        guard !env.player.lyricsLines.isEmpty else { return }
+        let lines = env.player.lyricsLines.map(\.text)
         let videoId = track.videoId
         let language = env.translationLanguage
         // Cache hit — render synchronously without flickering loader.
         if let hit = env.lyricsTranslator.cached(videoId: videoId, language: language) {
+            translationRequestID = UUID()   // orphan any stale in-flight request
             translation = hit
             translationError = nil
             translationLoading = false
@@ -1164,6 +1576,12 @@ struct NowPlayingView: View {
         }
         translationLoading = true
         translationError = nil
+        // Every completion path checks this token so a superseded
+        // request (newer request started, or track/language changed)
+        // can neither commit its result nor surface its error — and
+        // never touches the spinner the newer request now owns.
+        let requestID = UUID()
+        translationRequestID = requestID
         let translator = env.lyricsTranslator
         Task { @MainActor in
             do {
@@ -1172,22 +1590,28 @@ struct NowPlayingView: View {
                     language: language,
                     lines: lines
                 )
-                // Only commit if the track + language are still the
-                // same — the user may have skipped while we waited.
-                guard env.player.currentTrack?.videoId == videoId,
-                      env.translationLanguage == language else {
-                    translationLoading = false
-                    return
-                }
+                // Only commit if this is still the newest request and
+                // the track + language still match — the user may have
+                // skipped while we waited.
+                guard translationRequestID == requestID,
+                      env.player.currentTrack?.videoId == videoId,
+                      env.translationLanguage == language else { return }
                 translation = result
+                translationError = nil
                 translationLoading = false
+            } catch is CancellationError {
+                // Cancellation is not an error the user should see.
+                if translationRequestID == requestID { translationLoading = false }
             } catch let err as LLMError {
+                guard translationRequestID == requestID else { return }
                 translationError = err.errorDescription ?? "Translation failed."
                 translationLoading = false
             } catch LyricsTranslator.ParseError.noJSONArray {
+                guard translationRequestID == requestID else { return }
                 translationError = "Couldn't parse the model's response."
                 translationLoading = false
             } catch {
+                guard translationRequestID == requestID else { return }
                 translationError = "Translation failed: \(error.localizedDescription)"
                 translationLoading = false
             }
@@ -1196,12 +1620,99 @@ struct NowPlayingView: View {
 
     // MARK: - X-Ray context cards (B4)
 
+    /// "Track details" — the factual card premium players lead with:
+    /// album (linked), year, length, and your own listening stats from
+    /// the journal. Honest scope: YouTube Music doesn't expose writer /
+    /// producer credits through the endpoints Riff uses, so this shows
+    /// what is verifiably known rather than inventing a credits list.
+    @ViewBuilder
+    private var trackDetailsCard: some View {
+        if let track = env.player.currentTrack {
+            let entries = env.player.playedEntries.filter { $0.item.id == track.videoId }
+            let match = entries.last?.item ?? env.player.upNext.first(where: { $0.id == track.videoId })
+            let segments = track.subtitle
+                .split(whereSeparator: { $0 == "·" || $0 == "•" })
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            let albumName: String? = segments.count >= 2 ? segments[1] : nil
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Track details")
+                    .font(.system(size: 10, weight: .semibold))
+                    .textCase(.uppercase)
+                    .tracking(1.2)
+                    .foregroundStyle(Theme.Text.tertiary)
+                VStack(alignment: .leading, spacing: 6) {
+                    detailRow("Artist") {
+                        ArtistLinkLine(subtitle: segments.first ?? track.subtitle, primaryArtistId: track.artistId, fontSize: 12, baseOpacity: 0.9)
+                    }
+                    if let albumName, !Self.detailKindLabels.contains(albumName.lowercased()) {
+                        detailRow("Album") {
+                            if let albumId = track.albumId {
+                                Button(albumName) { env.navigateToBrowseId(albumId, kind: .album, fallbackTitle: albumName) }
+                                    .buttonStyle(.plain)
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Theme.Text.secondary)
+                                    .help("Open album")
+                            } else {
+                                Text(albumName).font(.system(size: 12)).foregroundStyle(Theme.Text.secondary)
+                            }
+                        }
+                    }
+                    if let year = match?.year {
+                        detailRow("Year") { Text(String(year)).font(.system(size: 12)).foregroundStyle(Theme.Text.secondary) }
+                    }
+                    if env.player.duration > 0 {
+                        detailRow("Length") {
+                            Text(Self.formatLength(env.player.duration)).font(.system(size: 12, design: .monospaced)).foregroundStyle(Theme.Text.secondary)
+                        }
+                    }
+                    if !entries.isEmpty {
+                        detailRow("Your plays") {
+                            Text("\(entries.count)× · first \(Self.relative(entries.first!.playedAt)) · last \(Self.relative(entries.last!.playedAt))")
+                                .font(.system(size: 12)).foregroundStyle(Theme.Text.secondary)
+                        }
+                    }
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Theme.Fill.soft)
+            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.card))
+            .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card).strokeBorder(Theme.Fill.medium, lineWidth: 1))
+            .padding(.bottom, 16)
+        }
+    }
+
+    private static let detailKindLabels: Set<String> = ["song", "video", "album", "single", "ep", "playlist", "artist", "episode", "podcast"]
+    private static let detailRelativeFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter(); f.unitsStyle = .short; return f
+    }()
+    private static func relative(_ date: Date) -> String {
+        detailRelativeFormatter.localizedString(for: date, relativeTo: Date())
+    }
+    private static func formatLength(_ seconds: Double) -> String {
+        let total = Int(seconds)
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    private func detailRow<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(Theme.Text.tertiary)
+                .frame(width: 72, alignment: .leading)
+            content()
+            Spacer(minLength: 0)
+        }
+    }
+
     /// "Context" tab: magazine-style stack of LLM-generated cards
     /// covering people / place / era / sample / trivia for the current
     /// track. Gated on a configured API key — without one, shows a
     /// short hint pointing to Settings.
     @ViewBuilder
     private var contextContent: some View {
+        trackDetailsCard
         if !env.hasLLMAPIKey {
             VStack(alignment: .leading, spacing: 10) {
                 Text("X-Ray")
@@ -1209,7 +1720,7 @@ struct NowPlayingView: View {
                     .foregroundStyle(.white)
                 Text("Configure an Anthropic API key in Settings to surface context cards — people, places, era, samples, trivia — for the current song.")
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(Theme.Text.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button {
                     env.isSettingsSheetPresented = true
@@ -1229,7 +1740,7 @@ struct NowPlayingView: View {
                 ProgressView().controlSize(.small)
                 Text("Reading the room…")
                     .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(Theme.Text.secondary)
             }
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.vertical, 16)
@@ -1244,8 +1755,11 @@ struct NowPlayingView: View {
                     .controlSize(.small)
             }
         } else {
+            // No onAppear fire here — this branch re-appears on every
+            // track-change reset, and an immediate fire would defeat
+            // the debounced .task(id:) in `body`. Tab-open (onChange of
+            // bottomTab) and the debounced task cover all entry paths.
             emptyHint("Pick a track to surface context.")
-                .onAppear { fireXRayIfNeeded() }
         }
     }
 
@@ -1262,7 +1776,7 @@ struct NowPlayingView: View {
                     xrayCardView(card)
                         .padding(.vertical, 14)
                     if idx < bundle.cards.count - 1 {
-                        Divider().background(Color.white.opacity(0.12))
+                        Divider().background(Theme.Fill.strong)
                     }
                 }
             }
@@ -1280,7 +1794,7 @@ struct NowPlayingView: View {
                 Text(card.kind.label.uppercased())
                     .font(.system(size: 10, weight: .semibold))
                     .tracking(0.8)
-                    .foregroundStyle(.white.opacity(0.55))
+                    .foregroundStyle(Theme.Text.tertiary)
             }
             if !card.title.isEmpty {
                 Text(card.title)
@@ -1292,7 +1806,7 @@ struct NowPlayingView: View {
             if !card.body.isEmpty {
                 Text(card.body)
                     .font(.system(size: 12))
-                    .foregroundStyle(.white.opacity(0.78))
+                    .foregroundStyle(Theme.Text.secondary)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
                     .lineSpacing(2)
@@ -1311,6 +1825,7 @@ struct NowPlayingView: View {
         let videoId = track.videoId
         // Cache hit — render synchronously, no loader flash.
         if !force, let hit = env.xrayCardsService.cached(videoId: videoId) {
+            xrayRequestID = UUID()   // orphan any stale in-flight request
             xrayCards = hit
             xrayError = nil
             xrayLoading = false
@@ -1320,16 +1835,18 @@ struct NowPlayingView: View {
         xrayLoading = true
         xrayError = nil
         xrayCards = nil
+        // See translationRequestID — a superseded request must not
+        // touch state a newer request now owns.
+        let requestID = UUID()
+        xrayRequestID = requestID
         let title = track.title
         let artist = track.subtitle
-        let lyricLines: [String]?
-        if !env.player.lyricsLines.isEmpty {
-            lyricLines = env.player.lyricsLines.map(\.text)
-        } else if let text = env.player.lyrics, !text.isEmpty {
-            lyricLines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        } else {
-            lyricLines = nil
-        }
+        // Only real lyric lines feed the prompt — the plain `lyrics`
+        // string can hold the "Lyrics not available." UI sentinel
+        // (see fireTranslateIfNeeded); X-Ray handles nil lyrics fine.
+        let lyricLines: [String]? = env.player.lyricsLines.isEmpty
+            ? nil
+            : env.player.lyricsLines.map(\.text)
         let service = env.xrayCardsService
         Task { @MainActor in
             do {
@@ -1339,23 +1856,79 @@ struct NowPlayingView: View {
                     artist: artist,
                     lyrics: lyricLines
                 )
-                // Only commit if the track is still the same — the
-                // user may have skipped while we waited.
-                guard env.player.currentTrack?.videoId == videoId else {
-                    xrayLoading = false
-                    return
-                }
+                // Only commit if this is still the newest request and
+                // the track is still the same — the user may have
+                // skipped while we waited.
+                guard xrayRequestID == requestID,
+                      env.player.currentTrack?.videoId == videoId else { return }
                 xrayCards = bundle
+                xrayError = nil
                 xrayLoading = false
+            } catch is CancellationError {
+                // Cancellation is not an error the user should see.
+                if xrayRequestID == requestID { xrayLoading = false }
             } catch let err as LLMError {
+                guard xrayRequestID == requestID else { return }
                 xrayError = err.errorDescription ?? "X-Ray failed."
                 xrayLoading = false
             } catch XRayCardsService.ParseError.noJSONArray {
+                guard xrayRequestID == requestID else { return }
                 xrayError = "Couldn't parse the model's response."
                 xrayLoading = false
             } catch {
+                guard xrayRequestID == requestID else { return }
                 xrayError = "X-Ray failed: \(error.localizedDescription)"
                 xrayLoading = false
+            }
+        }
+    }
+
+    /// Fullscreen lyrics layout — reuses the synced/plain lyric
+    /// renderers (so karaoke fill + auto-scroll work identically) but
+    /// centered in a wide column over the adaptive backdrop, with an
+    /// exit control. Apple Music's dedicated lyrics screen.
+    private var fullscreenLyricsView: some View {
+        VStack(spacing: 16) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(env.player.currentTrack?.title ?? "")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(env.player.currentTrack?.subtitle ?? "")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Theme.Text.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Button {
+                    lyricsFullscreen = false
+                } label: {
+                    Label("Exit fullscreen", systemImage: "arrow.down.right.and.arrow.up.left")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Theme.Text.secondary)
+                }
+                .buttonStyle(.borderless)
+                // Owns Esc while fullscreen lyrics is up (the top-bar
+                // Close button's shortcut is nil'd out in this mode).
+                .keyboardShortcut(.cancelAction)
+                .help("Exit fullscreen lyrics (Esc)")
+            }
+            ScrollView(showsIndicators: false) {
+                Group {
+                    if env.player.lyricsTimed && !env.player.lyricsLines.isEmpty {
+                        syncedLyrics
+                    } else if let text = env.player.lyrics, !text.isEmpty {
+                        plainLyricsWithTranslation(text)
+                    } else {
+                        emptyHint("Lyrics not available for this track.")
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 80)
+                    }
+                }
+                .frame(maxWidth: 640)
+                .frame(maxWidth: .infinity)   // center the 640 column
+                .padding(.vertical, 24)
             }
         }
     }
@@ -1369,8 +1942,14 @@ struct NowPlayingView: View {
         return ScrollViewReader { proxy in
             // Re-anchor whenever the player reports a new elapsed value.
             // Between polls (~1Hz) we extrapolate locally so the active
-            // line's per-word fill stays smooth at ~30fps.
-            TimelineView(.periodic(from: .now, by: 1.0 / 30.0)) { context in
+            // line's per-word fill stays smooth at ~30fps. Paused while
+            // playback is paused: the extrapolation freezes at the
+            // anchor anyway, so ticking 30×/s would rebuild every lyric
+            // line for identical output. A resume/seek re-anchors via
+            // the `.progress`-driven onChange below, which also restarts
+            // the schedule (isPlaying is @Observable-tracked here).
+            TimelineView(.animation(minimumInterval: 1.0 / 30.0,
+                                    paused: !env.player.isPlaying)) { context in
                 let elapsedMs = extrapolatedElapsedMs(at: context.date)
                 let activeIndex = LyricsKaraoke.activeLyricIndex(
                     for: elapsedMs, in: lines
@@ -1396,6 +1975,14 @@ struct NowPlayingView: View {
             }
             .onChange(of: env.player.elapsed) { _, newValue in
                 anchorElapsed = newValue
+                anchorAt = Date()
+            }
+            // Re-anchor on play/pause flips. Without this, `anchorAt`
+            // keeps its pre-pause timestamp, so the first tick after a
+            // resume extrapolates `now - anchorAt` (capped at 2s) and
+            // the active-line fill jumps ahead until the next ~1Hz poll.
+            .onChange(of: env.player.isPlaying) { _, _ in
+                anchorElapsed = env.player.elapsed
                 anchorAt = Date()
             }
             .onAppear {
@@ -1435,11 +2022,15 @@ struct NowPlayingView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .textSelection(.enabled)
+            // No .textSelection here: on macOS selectable Text consumes
+            // mouse-down to begin a selection, so the row's tap-to-seek
+            // gesture would only fire on the empty space past the
+            // glyphs. Copy/select stays available on the plain-lyrics
+            // path, which has no tap gesture.
             // Inline translation + optional pronunciation, indented
             // slightly so the source line still reads as the "primary"
             // text. Renders nothing when translation is off / loading.
-            translatedSubtitle(at: idx)
+            translatedSubtitle(at: idx, selectable: false)
         }
         .contentShape(Rectangle())
         .onTapGesture {
@@ -1534,15 +2125,15 @@ struct NowPlayingView: View {
                             Task { await env.player.play(item: item) }
                         } label: {
                             VStack(alignment: .leading, spacing: 6) {
-                                AsyncImage(url: item.thumbnailURL) { phase in
+                                AsyncImage(url: item.thumbnailURL?.upscaledArtwork(to: 240)) { phase in
                                     if case .success(let img) = phase {
                                         img.resizable().aspectRatio(contentMode: .fill)
                                     } else {
-                                        Color.white.opacity(0.06)
+                                        Theme.Fill.soft
                                     }
                                 }
                                 .frame(width: 110, height: 110)
-                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.thumb))
                                 Text(item.title)
                                     .font(.system(size: 11, weight: .medium))
                                     .foregroundStyle(.white)
@@ -1551,7 +2142,7 @@ struct NowPlayingView: View {
                                 if !item.subtitle.isEmpty {
                                     Text(item.subtitle)
                                         .font(.system(size: 10))
-                                        .foregroundStyle(.white.opacity(0.75))
+                                        .foregroundStyle(Theme.Text.secondary)
                                         .lineLimit(1)
                                         .truncationMode(.tail)
                                 }
@@ -1567,50 +2158,136 @@ struct NowPlayingView: View {
         }
     }
 
-    private func queueList(_ items: [MediaItem], faded: Bool = false) -> some View {
+    /// Renders a track list styled as queue rows. `reorderable` marks a
+    /// list whose rows really live in the playback queue: it enables
+    /// drag-reorder AND the queue-mutating actions (Move Up/Down,
+    /// Remove from queue). History, the Related tab, and the Discover
+    /// lens pass false — their rows are NOT in the queue, so those
+    /// actions were silent no-ops ending in a false "Couldn't remove"
+    /// toast. Non-mutating actions (Play next / Add to queue) stay on
+    /// every row. `rowKeys` overrides ForEach identity for lists that
+    /// can legally repeat a videoId (history); defaults to the item
+    /// ids, which upNext/related keep unique.
+    private func queueList(
+        _ items: [MediaItem],
+        faded: Bool = false,
+        reorderable: Bool = false,
+        rowKeys: [String]? = nil
+    ) -> some View {
+        let keys = rowKeys ?? items.map(\.id)
         let currentId = env.player.currentTrack?.videoId
+        let visibleIds = items.map(\.id)
         return LazyVStack(alignment: .leading, spacing: 4) {
-            ForEach(items) { item in
+            ForEach(Array(keys.enumerated()), id: \.element) { pos, _ in
+                let item = items[pos]
                 let isCurrent = item.id == currentId
+                let isDropTarget = dragHoverTargetId == item.id
                 Button {
-                    Task { await env.player.play(item: item) }
+                    // `skipTo` (not `play`) preserves rows above the
+                    // tap. Jump-to-row should behave as "skip forward
+                    // to N", not "clear queue and play N with fresh
+                    // radio around it". `skipTo` pre-removes the
+                    // item from the queue so the trackChanged
+                    // `consumeUpTo` becomes a no-op. (C1)
+                    Task { await env.player.skipTo(item: item) }
                 } label: {
-                    queueRow(item: item, isCurrent: isCurrent)
+                    queueRow(item: item, isCurrent: isCurrent, allowsQueueEdits: reorderable)
                         .opacity(faded ? 0.6 : 1.0)
+                        .overlay(alignment: .top) {
+                            // Insertion indicator when a drag is
+                            // hovering above this row. 2pt red bar
+                            // matches the brand accent and reads
+                            // clearly against the dark background.
+                            if reorderable && isDropTarget {
+                                Rectangle()
+                                    .fill(Theme.red)
+                                    .frame(height: 2)
+                                    .offset(y: -3)
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
+                .modifier(QueueDragReorderModifier(
+                    enabled: reorderable && !isCurrent,
+                    itemId: item.id,
+                    hoverTargetId: $dragHoverTargetId,
+                    onDrop: { droppedId in
+                        performReorder(dropped: droppedId, before: item.id, visibleIds: visibleIds)
+                    }
+                ))
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(
+                    isCurrent
+                        ? "Now playing: \(item.title) by \(item.subtitle)"
+                        : "\(item.title) by \(item.subtitle)"
+                )
+                .accessibilityHint(isCurrent ? "" : "Double tap to jump to this track.")
+                .accessibilityAddTraits(isCurrent ? [.isButton, .isSelected] : .isButton)
                 .contextMenu {
                     // Full track menu plus queue-specific reorder/remove
-                    // operations underneath. omitPrimaryPlay because the
-                    // row's tap already plays it; keep "Start radio" so
-                    // the user can break out of the current queue.
+                    // operations underneath — but ONLY for rows that are
+                    // actually in the queue (see the doc comment above).
+                    // omitPrimaryPlay because the row's tap already plays
+                    // it; keep "Start radio" so the user can break out of
+                    // the current queue.
                     TrackContextMenu(item: item, omitPrimaryPlay: true)
-                    Divider()
-                    Button("Move Up") { env.player.moveInQueue(videoId: item.id, by: -1) }
-                        .disabled(isCurrent)
-                    Button("Move Down") { env.player.moveInQueue(videoId: item.id, by: 1) }
-                        .disabled(isCurrent)
-                    Button("Remove from Queue") {
-                        Task { await env.player.removeFromQueue(videoId: item.id) }
+                    if reorderable {
+                        Divider()
+                        Button("Move Up") { env.player.moveInQueue(videoId: item.id, by: -1) }
+                            .disabled(isCurrent)
+                        Button("Move Down") { env.player.moveInQueue(videoId: item.id, by: 1) }
+                            .disabled(isCurrent)
+                        Button("Remove from Queue") {
+                            Task { await env.player.removeFromQueue(videoId: item.id) }
+                        }
+                        .disabled(isCurrent)  // can't remove the playing track
                     }
-                    .disabled(isCurrent)  // can't remove the playing track
                 }
             }
         }
+        // Rows slide when the queue consumes/reorders instead of popping.
+        .animation(reduceMotion ? nil : Theme.Motion.list, value: keys)
     }
 
-    private func queueRow(item: MediaItem, isCurrent: Bool) -> some View {
+    /// Compute a drop destination index and hand it to the bridge.
+    /// The caller has already validated `dropped != nil` (drop
+    /// modifier only fires with a non-empty payload). "Before" the
+    /// target row places the dropped item at that row's index; if
+    /// the dropped item was previously above the target, SwiftUI's
+    /// `Array.move(fromOffsets:toOffset:)` semantics handle the
+    /// offset shift so no manual adjustment is needed here.
+    private func performReorder(dropped: String, before targetId: String, visibleIds: [String]) {
+        guard dropped != targetId,
+              let sourceIdx = visibleIds.firstIndex(of: dropped),
+              let targetIdx = visibleIds.firstIndex(of: targetId) else { return }
+        env.player.reorderQueue(
+            visibleIds: visibleIds,
+            from: IndexSet(integer: sourceIdx),
+            to: targetIdx
+        )
+    }
+
+    private func queueRow(item: MediaItem, isCurrent: Bool, allowsQueueEdits: Bool) -> some View {
         // B5: rows that came from /related via Smart Shuffle get a
         // "+" badge so the user can tell at a glance that this slot
         // is a suggestion rather than the playlist's own next track.
         let isSmartShuffleInjected = env.player.smartShuffleInjectedIds.contains(item.id)
         return HStack(spacing: 10) {
             ZStack {
-                AsyncImage(url: item.thumbnailURL) { phase in
+                AsyncImage(url: item.thumbnailURL?.upscaledArtwork(to: 120)) { phase in
                     if case .success(let img) = phase {
                         img.resizable().aspectRatio(contentMode: .fill)
                     } else {
-                        Color.white.opacity(0.06)
+                        // Placeholder — an SF Symbol on a subtle
+                        // fill reads as "no artwork yet" instead
+                        // of "broken/missing tile". Cheaper than
+                        // a shimmer and unambiguous.
+                        ZStack {
+                            Theme.Fill.soft
+                            Image(systemName: "music.note")
+                                .font(.system(size: 14, weight: .light))
+                                .foregroundStyle(Theme.Text.disabled)
+                        }
                     }
                 }
                 .frame(width: 36, height: 36)
@@ -1629,22 +2306,69 @@ struct NowPlayingView: View {
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(env.displayTitle(for: item))
                         .font(.system(size: 12, weight: isCurrent ? .semibold : .medium))
-                        .foregroundStyle(isCurrent ? Theme.red : .white)
+                        .foregroundStyle(isCurrent ? Theme.red : Color.white)
                         .lineLimit(1)
                     if env.hasMetadataOverride(item) {
                         Image(systemName: "pencil")
                             .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(.white.opacity(0.75))
+                            .foregroundStyle(Theme.Text.secondary)
                             .help("Metadata edited locally")
                             .accessibilityLabel("Metadata edited")
                     }
                 }
-                Text(env.displaySubtitle(for: item))
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.75))
-                    .lineLimit(1)
+                // Artist line is its own click target (Spotify-style):
+                // clicking it opens the artist page instead of playing
+                // the row. Button-inside-row wins the hit test over the
+                // row's tap gesture, so the rest of the row still plays.
+                QueueArtistLink(
+                    label: env.displaySubtitle(for: item),
+                    item: item
+                )
             }
             Spacer()
+            // Inline row actions (Spotify-style "⋯"): the same queue
+            // operations were right-click-only before.
+            if !isCurrent {
+                Menu {
+                    Button("Play next") {
+                        env.player.playNext(item: item)
+                        env.showToast("Playing next: \(item.title)")
+                    }
+                    Button("Add to queue") {
+                        env.player.addToQueueEnd(item: item)
+                        env.showToast("Added to queue: \(item.title)")
+                    }
+                    // Removal only offered on rows that are actually in
+                    // the queue — history/Related/Discover rows aren't,
+                    // and "removing" them only produced an error toast.
+                    if allowsQueueEdits {
+                        Divider()
+                        Button("Remove from queue", role: .destructive) {
+                            Task { await env.player.removeFromQueue(videoId: item.id) }
+                        }
+                    }
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(Theme.Text.tertiary)
+                        .frame(width: 22, height: 22)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .frame(width: 22)
+                .help("Queue actions")
+                .accessibilityLabel("Queue actions for \(item.title)")
+            }
+            // Row duration — YT-web queue rows carry one on the right.
+            // Present for /next-fetched and page-mirrored rows; absent
+            // (renders nothing) for rows whose source had no lengthText.
+            if let secs = item.durationSeconds {
+                Text(secs >= 3600
+                     ? String(format: "%d:%02d:%02d", secs / 3600, (secs % 3600) / 60, secs % 60)
+                     : String(format: "%d:%02d", secs / 60, secs % 60))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.white.opacity(isCurrent ? 0.8 : 0.5))
+            }
             if isSmartShuffleInjected {
                 Image(systemName: "plus")
                     .font(.system(size: 9, weight: .bold))
@@ -1658,8 +2382,8 @@ struct NowPlayingView: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 5)
-        .background(isCurrent ? Theme.red.opacity(0.10) : Color.white.opacity(0.04))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .background(isCurrent ? Theme.red.opacity(0.10) : Theme.Fill.faint)
+        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.thumb))
     }
 
     /// D2 — Now Playing big title routed through any per-videoId
@@ -1694,12 +2418,95 @@ struct NowPlayingView: View {
         return segments.joined(separator: " · ")
     }
 
+    /// Best-effort artist name for the now-playing artist link. Prefers a
+    /// local override; otherwise parses the subtitle by stripping a
+    /// leading media-type token ("Song", "Video", …) and taking the first
+    /// remaining segment. Used as the search fallback name when the track
+    /// carries no artistId. Empty only when the subtitle is empty.
+    private func artistName(track: PlayerBridge.Track?) -> String {
+        guard let track else { return "" }
+        if let a = env.trackOverrides.overriddenArtist(for: track.videoId) { return a }
+        let typeTokens: Set<String> = [
+            "song", "video", "album", "single", "ep",
+            "playlist", "artist", "episode", "podcast"
+        ]
+        let segments = track.subtitle
+            .split(whereSeparator: { $0 == "·" || $0 == "•" })
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        return segments.first(where: { !typeTokens.contains($0.lowercased()) })
+            ?? segments.first
+            ?? ""
+    }
+
     private func emptyHint(_ text: String) -> some View {
         Text(text)
             .font(.system(size: 12))
-            .foregroundStyle(.white.opacity(0.75))
+            .foregroundStyle(Theme.Text.secondary)
             .frame(maxWidth: .infinity, alignment: .center)
             .padding(.vertical, 12)
+    }
+}
+
+/// The scrubber + time labels, isolated from NowPlayingView so its
+/// ~4Hz elapsed/duration reads only re-render THIS view, not the
+/// 2,100-line parent body (see the `scrubber` accessor comment).
+private struct ScrubberSection: View {
+    @Environment(AppEnvironment.self) private var env
+    @State private var scrubbing: Double? = nil
+
+    var body: some View {
+        // Sanitize against NaN/±inf. `<video>.duration` is NaN until a new
+        // track's metadata loads, and Swift's `max(NaN, x)` returns NaN
+        // (NaN fails every comparison) — so `0...duration` would trap with
+        // "Range requires lowerBound <= upperBound". Never let a non-finite
+        // value reach the Range or the Slider binding.
+        let rawDuration = env.player.duration
+        let duration = (rawDuration.isFinite && rawDuration > 0) ? rawDuration : 0.001
+        let rawElapsed = scrubbing ?? env.player.elapsed
+        let displayed = min(max(rawElapsed.isFinite ? rawElapsed : 0, 0), duration)
+        return VStack(spacing: 6) {
+            ScrubberSlider(
+                value: Binding(
+                    get: { displayed },
+                    set: { scrubbing = $0 }
+                ),
+                range: 0...duration,
+                onCommit: { value in
+                    scrubbing = nil
+                    Task { await env.player.seek(to: value / duration) }
+                }
+            )
+            HStack {
+                Text(format(time: displayed))
+                Spacer()
+                Text("-" + format(time: max(0, duration - displayed)))
+            }
+            .font(.system(size: 11, weight: .medium, design: .monospaced))
+            .foregroundStyle(Theme.Text.secondary)
+        }
+    }
+
+    private func format(time: Double) -> String {
+        guard time.isFinite, time >= 0 else { return "0:00" }
+        let total = Int(time)
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+/// Clickable artist line inside a queue row. Hover underlines +
+/// brightens; click opens the artist page (by id when the row carries
+/// one, else name-resolved via search — see `navigateToArtist`). The
+/// name passed for resolution is the first subtitle segment (artist
+/// comes first in "Artist · Album · Year").
+private struct QueueArtistLink: View {
+    let label: String
+    let item: MediaItem
+
+    var body: some View {
+        ArtistLinkLine(subtitle: label, primaryArtistId: item.artistId, fontSize: 10, baseOpacity: 0.75)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .clipped()
     }
 }
 
@@ -1713,7 +2520,7 @@ private struct ScrubberSlider: View {
             let span = max(range.upperBound - range.lowerBound, 0.0001)
             let progress = max(0, min(1, (value - range.lowerBound) / span))
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.18)).frame(height: 4)
+                Capsule().fill(Theme.Fill.strong).frame(height: 4)
                 Capsule().fill(Color.white).frame(width: geo.size.width * progress, height: 4)
                 Circle()
                     .fill(.white)
@@ -1731,8 +2538,50 @@ private struct ScrubberSlider: View {
                     }
                     .onEnded { _ in onCommit(value) }
             )
+            // Keyboard seek: left/right arrows nudge by 5 seconds.
+            // Only fires when the scrubber has focus (Tab into it).
+            .focusable(true)
+            .onKeyPress(.leftArrow) {
+                nudge(by: -5)
+                return .handled
+            }
+            .onKeyPress(.rightArrow) {
+                nudge(by: 5)
+                return .handled
+            }
+            // VoiceOver: expose as an adjustable value so the user
+            // can swipe up/down (or arrow ±) to seek. Reads out as
+            // "Playback position, 1:23 of 3:45" — mm:ss format.
+            .accessibilityElement()
+            .accessibilityLabel("Playback position")
+            .accessibilityValue("\(formatted(value)) of \(formatted(range.upperBound))")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAdjustableAction { direction in
+                switch direction {
+                case .increment: nudge(by: 5)
+                case .decrement: nudge(by: -5)
+                @unknown default: break
+                }
+            }
         }
         .frame(height: 18)
+    }
+
+    /// Move the scrubber by `seconds` (positive = forward) and
+    /// commit — used by both keyboard arrows and VoiceOver
+    /// adjustable action.
+    private func nudge(by seconds: Double) {
+        let next = max(range.lowerBound, min(range.upperBound, value + seconds))
+        value = next
+        onCommit(next)
+    }
+
+    /// mm:ss formatter — mirrors NowPlayingView.format(time:) so
+    /// VoiceOver reads "1:23 of 3:45" instead of raw seconds.
+    private func formatted(_ time: Double) -> String {
+        guard time.isFinite, time >= 0 else { return "0:00" }
+        let total = Int(time)
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }
 
@@ -1766,7 +2615,7 @@ private struct TunePopover: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             header
-            Divider().background(Color.white.opacity(0.1))
+            Divider().background(Theme.Fill.medium)
             if chips.isEmpty {
                 fallbackSection
             } else {
@@ -1803,7 +2652,7 @@ private struct TunePopover: View {
                 .font(.system(size: 10, weight: .semibold))
                 .textCase(.uppercase)
                 .tracking(1.2)
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(Theme.Text.secondary)
             FlowLayout(spacing: 6) {
                 ForEach(chips) { chip in
                     let isSelected = (selectedChipId ?? chips.first(where: \.isSelected)?.id) == chip.id
@@ -1814,8 +2663,8 @@ private struct TunePopover: View {
                             .font(.system(size: 11, weight: .semibold))
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(isSelected ? Theme.red : Color.white.opacity(0.06))
-                            .foregroundStyle(isSelected ? .white : .white.opacity(0.85))
+                            .background(isSelected ? Theme.Selected.fill : Theme.Fill.soft)
+                            .foregroundStyle(isSelected ? Theme.Selected.text : Theme.Text.secondary)
                             .clipShape(Capsule())
                     }
                     .buttonStyle(.plain)
@@ -1823,7 +2672,7 @@ private struct TunePopover: View {
             }
             Text("Tap a chip to retune the queue. The currently-playing track keeps playing.")
                 .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -1836,7 +2685,7 @@ private struct TunePopover: View {
                 .font(.system(size: 10, weight: .semibold))
                 .textCase(.uppercase)
                 .tracking(1.2)
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(Theme.Text.secondary)
             HStack(spacing: 6) {
                 ForEach(NowPlayingView.QueueMode.allCases) { mode in
                     Button {
@@ -1850,16 +2699,16 @@ private struct TunePopover: View {
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 10)
-                        .background(fallbackSelection == mode ? Theme.red : Color.white.opacity(0.06))
-                        .foregroundStyle(fallbackSelection == mode ? .white : .white.opacity(0.85))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .background(fallbackSelection == mode ? Theme.red : Theme.Fill.soft)
+                        .foregroundStyle(fallbackSelection == mode ? Color.white : Theme.Text.secondary)
+                        .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.row))
                     }
                     .buttonStyle(.plain)
                 }
             }
             Text(description(for: fallbackSelection))
                 .font(.system(size: 11))
-                .foregroundStyle(.white.opacity(0.75))
+                .foregroundStyle(Theme.Text.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }

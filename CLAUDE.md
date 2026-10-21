@@ -60,6 +60,25 @@ Under `.claude/orchestration/`:
 
 Drop iPhone YT Music screenshots in `.claude/refs/ytm-ios/` per its README. Image files are gitignored. UI agents read these as the design ground truth.
 
+## Queue core — behavior lock (load-bearing)
+
+The playback queue follows a **single-authority** design: the hidden
+page owns the queue; Riff is a remote control and a lens. The intended
+behavior is a contract — see `docs/QUEUE-DESIGN.md` ("Behavior
+contract") — encoded as a pure decision table in
+`Sources/Audio/QueuePolicy.swift`, tested by `tools/harness/run.sh`,
+and fenced by `tools/harness/guard.sh`.
+
+- Any change deciding WHETHER to navigate, force-play, enforce, mirror,
+  or shuffle locally goes in `QueuePolicy` **with a table row** — not
+  inline in `PlayerBridge`.
+- Adding a navigation or `play(item:)` call site fails the static
+  guard until its allowlisted count is bumped with a justification.
+- Never `playVideoAt(index)`; never click page rows by position.
+- Run `./tools/harness/run.sh` before committing to `Sources/Audio/`,
+  `Resources/player-bridge.js`, or `tools/harness/` (or
+  `git config core.hooksPath .githooks`).
+
 ## Things to avoid
 
 - Surfacing the WKWebView outside the sign-in sheet (architectural rule above).

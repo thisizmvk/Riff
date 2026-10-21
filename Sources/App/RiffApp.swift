@@ -1,9 +1,64 @@
 import SwiftUI
 import AppKit
+import Combine
+
+/// Bridges AppKit's Dock-menu callback into the SwiftUI app. The Dock
+/// icon is the one surface guaranteed visible for every user (unlike
+/// the opt-in menu-bar and floating mini players), and Spotify /
+/// Music.app both put transport controls there. `env` is injected by
+/// RiffApp at init; the menu is rebuilt on every right-click, so it
+/// always reflects live player state.
+final class RiffAppDelegate: NSObject, NSApplicationDelegate {
+    var env: AppEnvironment?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Riff is single-window; macOS window tabbing only added useless
+        // "Show Tab Bar" / "Show All Tabs" items to the View menu.
+        NSWindow.allowsAutomaticWindowTabbing = false
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        guard let env else { return nil }
+        let menu = NSMenu()
+        if let track = env.player.currentTrack {
+            let info = NSMenuItem(title: "\(track.title) — \(track.subtitle)", action: nil, keyEquivalent: "")
+            info.isEnabled = false
+            menu.addItem(info)
+            menu.addItem(.separator())
+        }
+        let playPause = NSMenuItem(
+            title: env.player.isPlaying ? "Pause" : "Play",
+            action: #selector(dockTogglePlay), keyEquivalent: ""
+        )
+        playPause.target = self
+        menu.addItem(playPause)
+        let next = NSMenuItem(title: "Next Track", action: #selector(dockNext), keyEquivalent: "")
+        next.target = self
+        menu.addItem(next)
+        let prev = NSMenuItem(title: "Previous Track", action: #selector(dockPrevious), keyEquivalent: "")
+        prev.target = self
+        menu.addItem(prev)
+        return menu
+    }
+
+    @MainActor @objc private func dockTogglePlay() {
+        guard let env else { return }
+        Task { await env.player.togglePlay() }
+    }
+    @MainActor @objc private func dockNext() {
+        guard let env else { return }
+        Task { await env.player.next() }
+    }
+    @MainActor @objc private func dockPrevious() {
+        guard let env else { return }
+        Task { await env.player.previous() }
+    }
+}
 
 @main
 struct RiffApp: App {
     @State private var environment = AppEnvironment()
+    @NSApplicationDelegateAdaptor(RiffAppDelegate.self) private var appDelegate
 
     var body: some Scene {
         WindowGroup {
@@ -11,25 +66,35 @@ struct RiffApp: App {
                 .environment(environment)
                 .frame(minWidth: 980, minHeight: 640)
                 .preferredColorScheme(.dark)
+                .onAppear { appDelegate.env = environment }
         }
-        .windowStyle(.hiddenTitleBar)
-        .windowToolbarStyle(.unifiedCompact)
+        // NOTE: no .windowStyle(.hiddenTitleBar) and no .windowToolbarStyle.
+        // Riff never uses the window toolbar (in-content tabs + back
+        // button); the hidden toolbar fed the NSToolbar duplicate-item
+        // crash, and on macOS 27 hiddenTitleBar-without-a-toolbar leaves
+        // NO titlebar view hosting the close/minimize/zoom buttons, so
+        // they vanished entirely (live audit 2026-10-20). Instead the
+        // window keeps its REAL titlebar — which hosts the buttons — and
+        // WindowButtonsFixer makes it chromeless the AppKit way:
+        // transparent titlebar, hidden title, full-size content view.
         .commands {
             CommandGroup(after: .appInfo) {
-                if environment.isSignedIn {
-                    Button("Sign Out") { environment.signOut() }
-                } else {
-                    Button("Sign In…") { environment.isSignInSheetPresented = true }
-                        .keyboardShortcut("L", modifiers: [.command, .shift])
-                }
+                AccountCommandItems()
                 Button("Settings…") { environment.isSettingsSheetPresented = true }
                     .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(after: .windowArrangement) {
-                MiniPlayerMenuItem()
+                MiniPlayerMenuItem(environment: environment)
             }
             CommandGroup(before: .toolbar) {
                 TabSwitchMenuItems()
+                Divider()
+                // Riff can produce share links; this lets it consume one.
+                Button("Open YouTube Music Link from Clipboard") {
+                    environment.openLinkFromPasteboard()
+                }
+                // ⌘⇧O — ⌘⇧L is already Sign In.
+                .keyboardShortcut("o", modifiers: [.command, .shift])
                 Divider()
             }
             // Transport shortcuts — Space play/pause, ⌘← / ⌘→ for prev/next
@@ -61,17 +126,12 @@ struct RiffApp: App {
             }
         }
 
-        // Always-on-top compact playback tile in a separate window.
-        // Open via Window → Mini Player (⌥⌘M). The user can grow the
-        // window past the 280×140 minimum — the artwork fills whatever
-        // size they pick — but cannot shrink below it.
-        Window("Mini Player", id: "mini-player") {
-            FloatingMiniPlayerView()
-                .environment(environment)
-        }
-        .defaultSize(width: 320, height: 180)
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentMinSize)
+        // NOTE: the always-on-top compact tile is NOT a SwiftUI `Window`
+        // scene — a regular app's NSWindow can't float over other apps'
+        // native full-screen. It's a non-activating NSPanel owned by
+        // `MiniPlayerPanelController`, toggled from the Window menu / ⌥⌘M /
+        // command palette (see MiniPlayerMenuItem and the notification
+        // handler in RootView).
 
         // System menu-bar mini player. Compact transport + scrubber that
         // lives next to the system clock, so the user can pause/skip
@@ -123,13 +183,38 @@ private struct RecapMenuItem: View {
     }
 }
 
-/// Re-usable menu item that opens the Mini Player window. Lives in its
-/// own struct so it can use `@Environment(\.openWindow)`.
-private struct MiniPlayerMenuItem: View {
-    @Environment(\.openWindow) private var openWindow
+/// Sign In / Sign Out menu-bar item. Extracted into its own View —
+/// reading the env via `@FocusedValue` — so it participates in
+/// SwiftUI's observation graph and flips label immediately when
+/// `isSignedIn` changes. Inlining the `if environment.isSignedIn`
+/// check directly in the `CommandGroup` builder snapshotted the
+/// value and left the menu item stale until relaunch. ⇧⌘L keeps
+/// working as the Sign In shortcut when signed out.
+private struct AccountCommandItems: View {
+    @FocusedValue(\.appEnvironment) private var env
+
     var body: some View {
-        Button("Mini Player") { openWindow(id: "mini-player") }
-            .keyboardShortcut("M", modifiers: [.command, .option])
+        if env?.isSignedIn == true {
+            Button("Sign Out") { env?.signOut() }
+                .disabled(env == nil)
+        } else {
+            Button("Sign In…") { env?.isSignInSheetPresented = true }
+                .keyboardShortcut("L", modifiers: [.command, .shift])
+                .disabled(env == nil)
+        }
+    }
+}
+
+/// Menu item that toggles the always-on-top Mini Player panel. Takes the
+/// AppEnvironment directly (Commands can't read scene @Environment) so it
+/// can hand it to the panel controller.
+private struct MiniPlayerMenuItem: View {
+    let environment: AppEnvironment
+    var body: some View {
+        Button("Mini Player") {
+            MiniPlayerPanelController.shared.toggle(environment: environment)
+        }
+        .keyboardShortcut("M", modifiers: [.command, .option])
     }
 }
 
@@ -140,6 +225,13 @@ private struct TabSwitchMenuItems: View {
     @FocusedValue(\.appEnvironment) private var env
 
     var body: some View {
+        Button("Command Palette…") { env?.isCommandPaletteOpen = true }
+            .keyboardShortcut("K", modifiers: .command)
+            .disabled(env == nil)
+        Button("Find (Search)") { env?.focusSearchField() }
+            .keyboardShortcut("F", modifiers: .command)
+            .disabled(env == nil)
+        Divider()
         Button("Home") { env?.activeTab = .home }
             .keyboardShortcut("1", modifiers: .command)
             .disabled(env == nil)
@@ -259,29 +351,102 @@ extension FocusedValues {
 
 struct RootView: View {
     @Environment(AppEnvironment.self) private var env
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Dominant color of the currently-playing artwork, washed very
+    /// faintly into the whole-window background so every tab subtly
+    /// reflects what's playing instead of sitting on flat graphite.
+    /// nil (nothing playing / extraction failed) → plain base.
+    @State private var ambientColor: Color? = nil
 
     var body: some View {
         @Bindable var env = env
         ZStack {
-            // Swap the entire main content rather than overlay it. SwiftUI's
-            // .overlay was rendering around (rather than over) the
-            // NavigationStack-wrapped tabs, leaking the home content through.
-            if env.player.isFullPlayerOpen {
-                NowPlayingView()
-                    .transition(.move(edge: .bottom))
-            } else {
-                ZStack(alignment: .bottom) {
-                    MainTabs()
-                    if env.player.hasTrack {
-                        MiniPlayerView()
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
-                    }
+            // The tabs stay MOUNTED while Now Playing is open. They used
+            // to be swapped out, which re-created every tab view on each
+            // close: Search lost its query and results, Library and
+            // Explore refetched, scroll positions reset. Now Playing is
+            // opaque; the covered tabs layer is hidden, non-hit-testable
+            // and disabled (so no stray keyboard focus lives under it).
+            // The old "content leaked through" was the ZStack backdrop-
+            // inflation bug, since fixed by moving backdrops into
+            // `.background {}`.
+            ZStack(alignment: .bottom) {
+                MainTabs()
+                if env.player.hasTrack {
+                    MiniPlayerView()
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
+            .opacity(env.player.isFullPlayerOpen ? 0 : 1)
+            .allowsHitTesting(!env.player.isFullPlayerOpen)
+            .disabled(env.player.isFullPlayerOpen)
+            .accessibilityHidden(env.player.isFullPlayerOpen)
+            if env.player.isFullPlayerOpen {
+                NowPlayingView()
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
         }
-        .animation(.easeInOut(duration: 0.25), value: env.player.isFullPlayerOpen)
-        .background(Color.black.ignoresSafeArea())
+        .animation(reduceMotion ? nil : Theme.Motion.panel, value: env.player.isFullPlayerOpen)
+        .background {
+            // Ambient now-playing wash — the whole-window background.
+            // A faint top-anchored gradient of the playing artwork's
+            // dominant color over the base, so Home / Search / Library
+            // quietly reflect what's playing. Kept low-opacity so white
+            // text and tiles stay fully legible; cross-fades on track
+            // change. Lives in `.background {}`, never a foreground
+            // ZStack sibling (the fullscreen inflation trap).
+            ZStack {
+                Theme.Bg.base
+                if let ambientColor {
+                    LinearGradient(
+                        stops: [
+                            .init(color: ambientColor.opacity(0.18), location: 0.0),
+                            .init(color: ambientColor.opacity(0.10), location: 0.18),
+                            .init(color: ambientColor.opacity(0.03), location: 0.42),
+                            .init(color: .clear, location: 0.62),
+                        ],
+                        startPoint: .top, endPoint: .bottom
+                    )
+                    .transition(.opacity)
+                }
+            }
+            .ignoresSafeArea()
+            .animation(.easeInOut(duration: 0.7), value: ambientColor)
+        }
+        .task(id: env.player.currentTrack?.videoId) {
+            // Extract the wash color from the current artwork. Reads the
+            // shared URLCache the mini-player artwork warms, so usually
+            // instant. A cancelled fetch (fast skip) must not land late
+            // and clear the next track's color.
+            guard let url = env.player.currentTrack?.thumbnailURL else {
+                ambientColor = nil
+                return
+            }
+            let color = await DominantColor.extract(from: url)
+            guard !Task.isCancelled else { return }
+            ambientColor = color
+        }
         .focusedSceneValue(\.appEnvironment, env)
+        // Keep the close / minimize / zoom buttons visible. With a hidden
+        // title bar they can vanish after a native-fullscreen exit (an
+        // AppKit quirk), leaving no way to close or minimize the window.
+        .background(WindowButtonsFixer())
+        .overlay(alignment: .bottom) {
+            // Toast overlay. Slides in above the mini-player when
+            // env.currentToast is non-nil; auto-dismisses via the
+            // env-side timer or on Undo tap.
+            if let toast = env.currentToast {
+                ToastBanner(toast: toast) { env.dismissToast() }
+                    .padding(.bottom, env.player.hasTrack ? 88 : 20)
+                    .padding(.horizontal, 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    // NOT .isModal — that told VoiceOver to ignore the
+                    // entire window for the toast's 3-second life.
+                    // Announcement happens in showToast instead.
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: env.currentToast)
         .sheet(isPresented: $env.isSignInSheetPresented) {
             SignInView()
         }
@@ -300,6 +465,13 @@ struct RootView: View {
         .sheet(isPresented: $env.isQueueBuilderSheetPresented) {
             QueueBuilderSheet()
         }
+        .sheet(isPresented: $env.isCommandPaletteOpen) {
+            CommandPalette()
+                .presentationBackground(.clear)
+        }
+        .sheet(isPresented: $env.isOnboardingSheetPresented) {
+            OnboardingSheet()
+        }
         // D2 — Edit-metadata sheet. `item:` binding mode so the sheet
         // is parameterized by the row the user opened it from.
         .sheet(item: Binding(
@@ -308,25 +480,152 @@ struct RootView: View {
         )) { item in
             EditMetadataSheet(item: item)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .riffOpenMiniPlayerWindow)) { _ in
+            MiniPlayerPanelController.shared.show(environment: env)
+        }
+    }
+}
+
+/// Zero-size bridge to the hosting NSWindow that keeps the standard
+/// window buttons (close / minimize / zoom) visible. Under
+/// `.windowStyle(.hiddenTitleBar)` AppKit can leave those buttons hidden
+/// after the window returns from native fullscreen — so the user is
+/// stuck with no way to close or minimize. We re-assert them on attach
+/// and on every fullscreen exit for this specific window.
+private struct WindowButtonsFixer: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { ButtonsRevealer() }
+    func updateNSView(_ nsView: NSView, context: Context) {
+        (nsView as? ButtonsRevealer)?.reveal()
+    }
+
+    /// Keeps the close/minimize/zoom buttons visible. With the window
+    /// toolbar hidden (to dodge the NSToolbar crash) on a hidden-title-bar
+    /// window, SwiftUI re-hides those buttons AFTER our first reveal — so
+    /// re-assert them on every relevant window event and on a delayed tick
+    /// so our reveal is the last word.
+    final class ButtonsRevealer: NSView {
+        private var observers: [NSObjectProtocol] = []
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            guard let window, observers.isEmpty else { reveal(); return }
+            reveal()
+            scheduleReveal()
+            let nc = NotificationCenter.default
+            for name in [NSWindow.didBecomeKeyNotification,
+                         NSWindow.didBecomeMainNotification,
+                         NSWindow.didResizeNotification,
+                         NSWindow.didEnterFullScreenNotification,
+                         NSWindow.didExitFullScreenNotification] {
+                observers.append(nc.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated {
+                        self?.reveal()
+                        self?.scheduleReveal()
+                    }
+                })
+            }
+        }
+
+        /// Re-reveal on the next couple of runloop ticks, after any SwiftUI
+        /// toolbar/titlebar pass that would re-hide the buttons.
+        private func scheduleReveal() {
+            DispatchQueue.main.async { [weak self] in self?.reveal() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in self?.reveal() }
+        }
+
+        func reveal() {
+            guard let window else { return }
+            // Chromeless the AppKit way: keep the REAL titlebar (it hosts
+            // the traffic-light buttons), make it invisible, and let
+            // content extend underneath.
+            //
+            // The load-bearing line is the EMPTY NSToolbar. On macOS 27 a
+            // SwiftUI window with no toolbar never materializes the
+            // titlebar button cluster at all — standardWindowButton()
+            // returns nil, so un-hiding is a no-op (verified live
+            // 2026-10-20: buttons absent even after the toolbar-hidden
+            // belt was removed). Attaching an item-less toolbar forces
+            // AppKit to build the unified titlebar WITH close/minimize/
+            // zoom. It is crash-safe: the NSToolbar duplicate-identifier
+            // crash came from SwiftUI registering duplicate BACK-BUTTON
+            // items, which every pushed page now suppresses
+            // (navigationBarBackButtonHidden) — this toolbar has no
+            // items and no delegate.
+            if window.toolbar == nil {
+                let tb = NSToolbar(identifier: "RiffChromeToolbar")
+                tb.showsBaselineSeparator = false
+                window.toolbar = tb
+            }
+            window.toolbarStyle = .unifiedCompact
+            window.styleMask.insert(.fullSizeContentView)
+            window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
+            window.titlebarSeparatorStyle = .none
+            for type in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+                guard let button = window.standardWindowButton(type) else { continue }
+                button.isHidden = false
+                button.alphaValue = 1
+                button.superview?.isHidden = false
+            }
+        }
     }
 }
 
 struct MainTabs: View {
     @Environment(AppEnvironment.self) private var env
+    /// Tabs mount on first visit and STAY mounted. A `switch` gave each
+    /// tab a distinct structural identity, so every switch destroyed
+    /// the outgoing view: Search lost its query and results, Explore
+    /// re-skeletoned and refetched, Library refired its loads (27
+    /// requests on Artists), Home re-pulled seven shelves. Unvisited
+    /// tabs cost nothing until first shown.
+    @State private var mounted: Set<AppTab> = []
 
     var body: some View {
         VStack(spacing: 0) {
             TopTabBar()
-            Group {
-                switch env.activeTab {
-                case .home:    HomeView()
-                case .explore: ExploreView()
-                case .search:  SearchView()
-                case .library: LibraryView()
-                }
+            ZStack {
+                if mounted.contains(.home)    { HomeView().tabPane(active: env.activeTab == .home) }
+                if mounted.contains(.explore) { ExploreView().tabPane(active: env.activeTab == .explore) }
+                if mounted.contains(.search)  { SearchView().tabPane(active: env.activeTab == .search) }
+                if mounted.contains(.library) { LibraryView().tabPane(active: env.activeTab == .library) }
+            }
+            .onChange(of: env.activeTab, initial: true) { _, tab in
+                mounted.insert(tab)
             }
         }
     }
+}
+
+/// An inactive, still-mounted tab: invisible, untouchable, disabled
+/// (no keyboard focus or shortcuts fire underneath the visible tab),
+/// hidden from accessibility, and below the active one.
+private struct TabPane: ViewModifier {
+    let active: Bool
+    func body(content: Content) -> some View {
+        content
+            .opacity(active ? 1 : 0)
+            .allowsHitTesting(active)
+            .disabled(!active)
+            .accessibilityHidden(!active)
+            .zIndex(active ? 1 : 0)
+            // NOTE: no `.toolbar(.hidden, for: .windowToolbar)` here. It
+            // was the belt against the NSToolbar duplicate-item crash, but
+            // on macOS 27 the titlebar and toolbar are unified — hiding
+            // the window toolbar collapses the WHOLE titlebar, so the
+            // close/minimize/zoom buttons cease to exist
+            // (standardWindowButton returns nil; live audit 2026-10-20).
+            // The crash is fixed at the SOURCE instead: every pushed page
+            // is DetailView, which sets .navigationBarBackButtonHidden, so
+            // no back-button toolbar item is ever registered and the
+            // duplicate-identifier throw can't happen. If a new
+            // navigationDestination is added, it MUST also hide the back
+            // button (grep DetailView for the CRITICAL comment).
+    }
+}
+
+private extension View {
+    func tabPane(active: Bool) -> some View { modifier(TabPane(active: active)) }
 }
 
 struct TopTabBar: View {
@@ -366,6 +665,11 @@ struct TopTabBar: View {
                 .foregroundStyle(env.activeTab == value ? .white : .secondary)
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("\(title) tab")
+        .accessibilityHint(env.activeTab == value
+                           ? "Selected. Double tap to return to top."
+                           : "Double tap to switch tabs.")
+        .accessibilityAddTraits(env.activeTab == value ? [.isButton, .isSelected] : .isButton)
     }
 }
 
@@ -376,12 +680,32 @@ private struct AccountMenu: View {
     @Environment(AppEnvironment.self) private var env
 
     var body: some View {
-        if env.isSignedIn {
-            Menu {
+        // Always a Menu with a STABLE identity — the label + items
+        // vary by sign-in state, but the view itself is never
+        // swapped for a different type. Swapping Menu ⇄ Button in
+        // this slot caused the corner to go empty after Sign Out:
+        // SwiftUI tore down the Menu mid-action and didn't render
+        // the replacement Button until a later layout pass.
+        Menu {
+            if env.isSignedIn {
                 Button("Settings…") { env.isSettingsSheetPresented = true }
                 Divider()
+                Button("Switch Account…") {
+                    // Sign out (clears cookies + purges WebView),
+                    // then open a fresh Google login so the user
+                    // can switch accounts without hunting for two
+                    // separate actions.
+                    env.signOut()
+                    env.isSignInSheetPresented = true
+                }
                 Button("Sign Out") { env.signOut() }
-            } label: {
+            } else {
+                Button("Sign In with Google") { env.isSignInSheetPresented = true }
+                Divider()
+                Button("Settings…") { env.isSettingsSheetPresented = true }
+            }
+        } label: {
+            if env.isSignedIn {
                 Circle()
                     .fill(Theme.red)
                     .frame(width: 28, height: 28)
@@ -390,15 +714,62 @@ private struct AccountMenu: View {
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundStyle(.white)
                     )
+            } else {
+                HStack(spacing: 5) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("Sign In")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Theme.red)
+                .foregroundStyle(.white)
+                .clipShape(Capsule())
             }
-            .menuStyle(.borderlessButton)
-            .menuIndicator(.hidden)
-            .frame(width: 28, height: 28)
-        } else {
-            Button("Sign In") { env.isSignInSheetPresented = true }
-                .buttonStyle(.borderedProminent)
-                .tint(Theme.red)
-                .controlSize(.small)
         }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .accessibilityLabel(env.isSignedIn ? "Account" : "Sign in")
+    }
+}
+
+/// Transient toast banner. Renders a rounded pill with the message
+/// on the left and an optional "Undo" button on the right. Sits
+/// above the mini-player when one is present; over the tab bar
+/// otherwise. Auto-dismisses via the AppEnvironment-side timer;
+/// tapping Undo runs the callback and dismisses immediately.
+private struct ToastBanner: View {
+    let toast: AppEnvironment.Toast
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(toast.message)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(2)
+            Spacer(minLength: 12)
+            if let undo = toast.undo {
+                Button("Undo") {
+                    undo()
+                    onDismiss()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(Theme.red)
+                .accessibilityHint("Undoes the last action.")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.card)
+                .fill(Color(white: 0.15))
+                .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+        )
+        .frame(maxWidth: 480)
+        .accessibilityElement(children: .combine)
     }
 }

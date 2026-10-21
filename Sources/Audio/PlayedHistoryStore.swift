@@ -90,6 +90,17 @@ struct PlayedHistoryStore {
         defaults.set(data, forKey: Self.key)
     }
 
+    /// Raw persisted journal bytes, as written by `save(_:)`. Exists
+    /// for the diagnostics exporter, which dumps what would survive a
+    /// relaunch rather than the in-memory copy. Routing the read
+    /// through here keeps the storage key (and the storage medium)
+    /// private to this type, so the export can't silently go empty
+    /// the next time the schema version bumps (v2 → v3 already
+    /// happened once).
+    static func rawJournalData(defaults: UserDefaults = .standard) -> Data? {
+        defaults.data(forKey: key)
+    }
+
     /// Used on Sign Out to wipe the journal — keeps the next user of
     /// this Mac (or the same user who deliberately signed out) from
     /// seeing the previous session's plays.

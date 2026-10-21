@@ -127,6 +127,150 @@ final class QueueManagerTests: XCTestCase {
         XCTAssertEqual(before, after,
             "Test-suite QueueManager must never write to UserDefaults.standard — that's the production app's history journal")
     }
+
+    // MARK: - Two-region model invariants
+    //
+    // Each of these guards a specific bug we've hit in this
+    // codebase's history — the two-region model was born from
+    // repeatedly patching around wrong-shaped state. If any of
+    // these regress the same class of bug comes back.
+
+    /// After Play Next + Add to Queue, the user region contains
+    /// both in the right positions: Play Next at 0, Add to Queue
+    /// at 1 (right before what would be the first server item).
+    func testPlayNextAndAddToEndOccupyUserRegionInOrder() {
+        let q = makeQueue()
+        q.addToEnd(item("addend"))
+        q.playNext(item("playnext"))
+        XCTAssertEqual(q.upNext.map(\.id), ["playnext", "addend"])
+        XCTAssertEqual(q.userQueueCount, 2)
+    }
+
+    /// `replaceServerRegion` MUST NOT touch user-queued items —
+    /// this was the root of the "Add to Queue items get dropped
+    /// on /next refresh" bug.
+    func testReplaceServerRegionPreservesUserRegion() {
+        let q = makeQueue()
+        q.playNext(item("user1"))
+        q.addToEnd(item("user2"))
+        q.replaceServerRegion([item("s1"), item("s2"), item("s3")])
+        XCTAssertEqual(q.upNext.map(\.id), ["user1", "user2", "s1", "s2", "s3"])
+        XCTAssertEqual(q.userQueueCount, 2)
+    }
+
+    /// `replaceServerRegion` MUST dedupe against user region ids —
+    /// if the server response contains a videoId already user-queued,
+    /// it drops from the incoming list rather than duplicating.
+    func testReplaceServerRegionDedupesAgainstUserRegion() {
+        let q = makeQueue()
+        q.playNext(item("shared"))
+        q.replaceServerRegion([item("shared"), item("s1")])
+        XCTAssertEqual(q.upNext.map(\.id), ["shared", "s1"])
+        XCTAssertEqual(q.userQueueCount, 1)
+    }
+
+    /// `consumeHead` decrements userQueueCount when the head was
+    /// user-queued; doesn't touch it when the head was a server item.
+    func testConsumeHeadAdjustsUserRegion() {
+        let q = makeQueue()
+        q.playNext(item("u1"))
+        q.replaceServerRegion([item("s1")])
+        XCTAssertEqual(q.userQueueCount, 1)
+        _ = q.consumeHead()
+        XCTAssertEqual(q.upNext.map(\.id), ["s1"])
+        XCTAssertEqual(q.userQueueCount, 0)
+        _ = q.consumeHead()
+        XCTAssertEqual(q.upNext.map(\.id), [])
+        XCTAssertEqual(q.userQueueCount, 0, "must stay non-negative")
+    }
+
+    /// `consumeUpTo` (used by jump-to-row in Up Next) drops
+    /// everything up to and including the target, correctly
+    /// decrementing userQueueCount when items crossed the region
+    /// boundary. This was the source of the "queue plays songs
+    /// different from what's shown" bug.
+    func testConsumeUpToDiscardsSkippedRowsAndRebalancesRegion() {
+        let q = makeQueue()
+        q.playNext(item("u1"))
+        q.addToEnd(item("u2"))
+        q.replaceServerRegion([item("s1"), item("s2"), item("s3")])
+        // Queue: [u1, u2 | s1, s2, s3], userQueueCount = 2.
+        let dropped = q.consumeUpTo(videoId: "s2")
+        XCTAssertEqual(dropped.map(\.id), ["u1", "u2", "s1", "s2"])
+        XCTAssertEqual(q.upNext.map(\.id), ["s3"])
+        XCTAssertEqual(q.userQueueCount, 0, "no user region remains after consuming past the boundary")
+    }
+
+    /// `consumeUpTo` on a missing id is a no-op.
+    func testConsumeUpToNoOpWhenIdMissing() {
+        let q = makeQueue()
+        q.playNext(item("a"))
+        q.replaceServerRegion([item("s1")])
+        let dropped = q.consumeUpTo(videoId: "not-in-queue")
+        XCTAssertEqual(dropped, [])
+        XCTAssertEqual(q.upNext.map(\.id), ["a", "s1"])
+        XCTAssertEqual(q.userQueueCount, 1)
+    }
+
+    /// `replaceQueue` (fresh watch context) wipes BOTH regions —
+    /// after a play(item:, clearQueue: true), no prior user-queued
+    /// item should survive.
+    func testReplaceQueueZeroesUserRegion() {
+        let q = makeQueue()
+        q.playNext(item("old"))
+        q.replaceQueue([item("new1"), item("new2")])
+        XCTAssertEqual(q.upNext.map(\.id), ["new1", "new2"])
+        XCTAssertEqual(q.userQueueCount, 0)
+    }
+
+    /// Dedupe on Add-to-Queue: if the item is already user-queued
+    /// it's a no-op. If it's a server item, it gets promoted into
+    /// the user region.
+    func testAddToEndDedupePromotesFromServerRegion() {
+        let q = makeQueue()
+        q.replaceServerRegion([item("promoteme"), item("s1")])
+        XCTAssertEqual(q.userQueueCount, 0)
+        q.addToEnd(item("promoteme"))
+        XCTAssertEqual(q.upNext.map(\.id), ["promoteme", "s1"])
+        XCTAssertEqual(q.userQueueCount, 1, "server item promoted into user region")
+    }
+
+    /// `isUserQueued(videoId:)` reports region membership correctly
+    /// across mutations.
+    func testIsUserQueuedTracksRegion() {
+        let q = makeQueue()
+        q.playNext(item("u"))
+        q.replaceServerRegion([item("s")])
+        XCTAssertTrue(q.isUserQueued(videoId: "u"))
+        XCTAssertFalse(q.isUserQueued(videoId: "s"))
+        XCTAssertFalse(q.isUserQueued(videoId: "not-in-queue"))
+    }
+
+    /// Invariant: `userQueueCount <= upNext.count` always. Runs a
+    /// randomized sequence of operations and asserts the invariant
+    /// after each. Catches "off-by-one" style bugs that manual tests
+    /// might miss.
+    func testUserQueueCountInvariantHoldsUnderRandomOps() {
+        let q = makeQueue()
+        var rng = SystemRandomNumberGenerator()
+        let ids = (0..<20).map { "t\($0)" }
+        for _ in 0..<200 {
+            switch Int.random(in: 0..<7, using: &rng) {
+            case 0: q.playNext(item(ids.randomElement(using: &rng)!))
+            case 1: q.addToEnd(item(ids.randomElement(using: &rng)!))
+            case 2: q.remove(videoId: ids.randomElement(using: &rng)!)
+            case 3: _ = q.consumeHead()
+            case 4: _ = q.consumeUpTo(videoId: ids.randomElement(using: &rng)!)
+            case 5: q.replaceServerRegion(ids.shuffled(using: &rng).prefix(5).map { item($0) })
+            case 6: q.move(videoId: ids.randomElement(using: &rng)!, by: Int.random(in: -3...3, using: &rng))
+            default: break
+            }
+            XCTAssertLessThanOrEqual(q.userQueueCount, q.upNext.count,
+                "userQueueCount must never exceed upNext.count")
+            XCTAssertGreaterThanOrEqual(q.userQueueCount, 0,
+                "userQueueCount must be non-negative")
+        }
+    }
 }
 
 /// `BrowseIdResolver` paths 2 and 3 are pure (no network) and can be

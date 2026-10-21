@@ -16,23 +16,43 @@ struct MiniPlayerView: View {
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
                     Rectangle()
-                        .fill(Color.white.opacity(0.06))
+                        .fill(Theme.Fill.soft)
                     Rectangle()
                         .fill(Theme.red)
                         .frame(width: geo.size.width * env.player.progress)
                 }
+                // Click (or drag-release) to seek — desktop players all
+                // treat the bottom-bar progress line as a scrubber.
+                // contentShape widens the 2pt line's hit area.
+                // highPriorityGesture, NOT .gesture: the whole mini
+                // player carries an onTapGesture that opens the full
+                // player, and a plain gesture lost to it — clicking the
+                // bar opened the full screen instead of seeking.
+                .contentShape(Rectangle())
+                .highPriorityGesture(
+                    DragGesture(minimumDistance: 0)
+                        .onEnded { value in
+                            let fraction = min(max(value.location.x / max(geo.size.width, 1), 0), 1)
+                            Task { await env.player.seek(to: fraction) }
+                        }
+                )
+                .onHover { inside in
+                    if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
             }
-            .frame(height: 2)
+            .frame(height: 6)
+            .accessibilityLabel("Playback progress")
+            .accessibilityHint("Click to seek")
 
             HStack(spacing: 14) {
-                AsyncImage(url: track?.thumbnailURL) { phase in
+                AsyncImage(url: track?.thumbnailURL?.upscaledArtwork(to: 120)) { phase in
                     switch phase {
                     case .success(let img): img.resizable().aspectRatio(contentMode: .fill)
                     default: Color.gray.opacity(0.2)
                     }
                 }
                 .frame(width: 52, height: 52)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.row))
                 .shadow(color: .black.opacity(0.4), radius: 6, y: 2)
 
                 VStack(alignment: .leading, spacing: 2) {
@@ -46,6 +66,38 @@ struct MiniPlayerView: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 12)
+
+                // Elapsed / total — the unambiguous readout every player
+                // uses. (The old "9:58  -1:00" elapsed-and-negative-
+                // remaining pair read as a stray negative number.)
+                // Monospaced so the digits don't jitter as they tick;
+                // elapsed brighter than total so the eye lands on "where
+                // am I" first.
+                if track != nil, env.player.duration > 0 {
+                    HStack(spacing: 4) {
+                        Text(Self.clock(env.player.elapsed))
+                            .foregroundStyle(Theme.Text.secondary)
+                        Text("/")
+                            .foregroundStyle(Theme.Text.tertiary)
+                        Text(Self.clock(env.player.duration))
+                            .foregroundStyle(Theme.Text.tertiary)
+                    }
+                    .font(.system(size: 11, design: .monospaced))
+                    .accessibilityHidden(true)
+                }
+
+                // Like — ⌘L exists but was invisible on the one control
+                // users see 90% of the time.
+                if track != nil {
+                    controlButton(
+                        systemName: env.player.liked ? "heart.fill" : "heart",
+                        size: 15,
+                        help: env.player.liked ? "Unlike" : "Like",
+                        tint: env.player.liked ? Theme.red : nil
+                    ) {
+                        Task { await env.player.toggleLike() }
+                    }
+                }
 
                 controlButton(systemName: "backward.fill", size: 16, help: "Previous") {
                     Task { await env.player.previous() }
@@ -68,7 +120,7 @@ struct MiniPlayerView: View {
                                        : env.player.volume < 0.5 ? "speaker.wave.1.fill"
                                        : "speaker.wave.2.fill")
                         .font(.system(size: 12))
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(Theme.Text.secondary)
                         .frame(width: 18)
                     Slider(
                         value: Binding(
@@ -80,6 +132,8 @@ struct MiniPlayerView: View {
                     .controlSize(.small)
                     .frame(width: 84)
                     .tint(.white)
+                    .accessibilityLabel("Volume")
+                    .accessibilityValue("\(Int((env.player.volume * 100).rounded())) percent")
                 }
                 .padding(.leading, 8)
             }
@@ -89,6 +143,19 @@ struct MiniPlayerView: View {
             .background(.ultraThinMaterial)
             .contentShape(Rectangle())
             .onTapGesture { env.player.isFullPlayerOpen = true }
+            // The tap-to-expand was invisible to assistive tech: the
+            // mini player exposed no accessible element at all, so
+            // VoiceOver users had no way to open Now Playing / the
+            // queue. Expose the expand action explicitly (transport +
+            // volume keep their own labels as children).
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(
+                "Now playing: \(track?.title ?? "nothing"). \(track?.subtitle ?? "")"
+            )
+            .accessibilityHint("Opens the full player and queue")
+            .accessibilityAction(named: "Open Now Playing") {
+                env.player.isFullPlayerOpen = true
+            }
             // Right-click on the mini bar surfaces the now-playing
             // version of YT Music's track menu — Go to album/artist
             // are the high-value entries here, so the user can jump
@@ -119,15 +186,23 @@ struct MiniPlayerView: View {
         }
     }
 
-    private func controlButton(systemName: String, size: CGFloat, help: String? = nil, action: @escaping () -> Void) -> some View {
+    private func controlButton(systemName: String, size: CGFloat, help: String? = nil, tint: Color? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: size, weight: .semibold))
-                .foregroundStyle(.white)
+                .foregroundStyle(tint ?? .white)
                 .frame(width: 32, height: 32)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help(help ?? "")
+        .accessibilityLabel(help ?? "")
+    }
+
+    /// "m:ss" for a seconds value, clamped at 0. Shared by the elapsed
+    /// and remaining readouts.
+    static func clock(_ seconds: Double) -> String {
+        let s = Int(max(0, seconds).rounded())
+        return "\(s / 60):\(String(format: "%02d", s % 60))"
     }
 }
