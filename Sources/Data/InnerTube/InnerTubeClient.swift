@@ -194,6 +194,13 @@ final class InnerTubeClient: @unchecked Sendable {
     }
 
     /// Re-fetch Home filtered by a mood chip's params blob.
+    ///
+    /// Follows continuations like `browseHome` does: the filtered feed
+    /// serves only ~3 shelves in page one with the rest behind
+    /// nextContinuationData (verified against the live anonymous feed
+    /// 2026-10-20 — "Relax" page one: Quick picks + 2 rails + 1
+    /// continuation). Not following them is why an active chip showed
+    /// "only 2 rows".
     func browseHomeFiltered(chipParams: String) async throws -> [HomeSection] {
         let body = try await postRaw(.browse, body: [
             "browseId": BrowseID.home,
@@ -202,7 +209,25 @@ final class InnerTubeClient: @unchecked Sendable {
         let shelves = Parsing.array(body, "contents",
             "singleColumnBrowseResultsRenderer", "tabs", "0", "tabRenderer",
             "content", "sectionListRenderer", "contents") ?? []
-        return shelves.compactMap(Self.parseHomeShelf)
+        var sections = shelves.compactMap(Self.parseHomeShelf)
+        var continuation = Self.findContinuationToken(in: body)
+        var iterations = 0
+        let maxIterations = 4
+        while let token = continuation, iterations < maxIterations {
+            iterations += 1
+            do {
+                let resp = try await postRaw(.browse, body: ["continuation": token])
+                let moreShelves = Parsing.array(resp, "continuationContents",
+                    "sectionListContinuation", "contents") ?? []
+                sections.append(contentsOf: moreShelves.compactMap(Self.parseHomeShelf))
+                continuation = Self.findContinuationToken(in: resp)
+            } catch {
+                Log.innertube.error("filtered-home continuation \(iterations) failed: \(error.localizedDescription, privacy: .public)")
+                break
+            }
+        }
+        Log.innertube.debug("filtered home sections=\(sections.count) after \(iterations) continuations")
+        return sections
     }
 
     /// Extract the mood / activity chip cloud above the rails from a
