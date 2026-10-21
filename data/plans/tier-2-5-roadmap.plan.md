@@ -156,7 +156,7 @@ over later Tier 3+ items but slot below in-progress Tier 2 work.
 
 ## Verification (between every step)
 
-1. Push commit → CI must go green at <https://github.com/mvk24199/Riff/actions>.
+1. Push commit → CI must go green at <https://github.com/thisizmvk/Riff/actions>.
 2. Test suite stays ≥25 passing, growing as each step adds tests.
 3. Smoke-test in the running app for UI-visible changes.
 4. `/vajra review` on the diff before commit for steps 4 / 5 / 7 / 11 / 12.

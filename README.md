@@ -68,13 +68,13 @@ What works today:
 
 ## Install
 
-Download the `.dmg` (drag Riff to Applications) or the `.zip` from [Releases](https://github.com/mvk24199/Riff/releases); `.sha256` checksums are attached to each. Until releases are Developer ID signed, first launch of an ad-hoc build needs an extra step: on macOS 14, right-click Riff.app and choose **Open**; on macOS 15 and later (which removed that bypass), launch it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
+Download the `.dmg` (drag Riff to Applications) or the `.zip` from [Releases](https://github.com/thisizmvk/Riff/releases); `.sha256` checksums are attached to each. Until releases are Developer ID signed, first launch of an ad-hoc build needs an extra step: on macOS 14, right-click Riff.app and choose **Open**; on macOS 15 and later (which removed that bypass), launch it once, then go to **System Settings → Privacy & Security** and click **Open Anyway**.
 
 ## Building
 
 ```sh
 brew install xcodegen
-git clone https://github.com/mvk24199/Riff.git
+git clone https://github.com/thisizmvk/Riff.git
 cd Riff
 xcodegen generate
 open Riff.xcodeproj

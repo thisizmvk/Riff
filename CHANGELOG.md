@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-20
+
 ### Added
 - Single-authority queue core: the hidden page owns the queue, Riff is a
   remote control and a lens. The behavior contract lives in
@@ -29,6 +31,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window, and the user's chosen tile size preserved.
 - Sandbox file-access entitlements for the lyric-card save panel
   (user-selected) and the diagnostics export to ~/Downloads.
+- YT Music web look-and-feel: two-column album/playlist pages (centered
+  artwork, artist line above the title, circular shuffle/save/Play/
+  share/menu cluster), rail headers with a More pill + paging chevrons,
+  full-shelf grid pages, Explore category buttons, and numbered
+  multi-column chart lists for all-song shelves.
+- Global play counts ("347M plays") parsed from YT and shown in album
+  tracklists and search results; the local in-Riff counter remains as
+  the fallback.
+- HD artwork pipeline: every display site requests a size-appropriate
+  variant via the googleusercontent/ggpht size rewrite.
+- Moods & Genres: the category-button grid now parses (it was always
+  empty), tiles use YT's own category colors, and tapping opens a
+  category page of curated-playlist shelves.
+- Now Playing watch-page panel: uppercase UP NEXT / LYRICS / RELATED /
+  CONTEXT tabs, "Playing from" header with Save, an Autoplay switch in
+  the queue header, and durations on queue rows.
+- Always-on-top Mini Player rebuilt as a non-activating NSPanel so it
+  floats over other apps' full-screen Spaces; follows the active
+  display.
+- Chip-filtered Home follows continuations (page one carries only ~3
+  shelves).
 
 ### Changed
 - Up Next header in Now Playing adapts instead of wrapping chips
@@ -41,6 +64,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Review findings across the queue core, auth, AI providers, and UI
   (hardened guards, harness self-test, CI supply-chain pinning among
   them).
+- NSToolbar duplicate-identifier crash (macOS 27) fixed at the source:
+  pushed pages never register the automatic back-button toolbar item;
+  detail pages carry their own in-content Back control.
+- Close/minimize/zoom buttons restored on macOS 27 — a window with no
+  toolbar never materializes the titlebar button cluster, so Riff
+  attaches an item-less NSToolbar and keeps the titlebar transparent.
+- Album rows no longer lose their global play counts to the artwork
+  backfill, and playlist headers no longer show a bare year as the
+  artist line.
 
 ## [0.1.0] - 2026-05-05
 
@@ -52,5 +84,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Playing integration and media keys — all real SwiftUI over a native
   InnerTube client, with the WKWebView hidden as the audio engine.
 
-[Unreleased]: https://github.com/mvk24199/Riff/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/mvk24199/Riff/releases/tag/v0.1.0
+[Unreleased]: https://github.com/thisizmvk/Riff/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/thisizmvk/Riff/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/thisizmvk/Riff/releases/tag/v0.1.0

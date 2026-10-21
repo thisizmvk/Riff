@@ -108,12 +108,12 @@ struct RiffApp: App {
                 RecapMenuItem()
                 Divider()
                 Button("Riff on GitHub") {
-                    if let url = URL(string: "https://github.com/mvk24199/Riff") {
+                    if let url = URL(string: "https://github.com/thisizmvk/Riff") {
                         NSWorkspace.shared.open(url)
                     }
                 }
                 Button("Report an Issue…") {
-                    if let url = URL(string: "https://github.com/mvk24199/Riff/issues/new") {
+                    if let url = URL(string: "https://github.com/thisizmvk/Riff/issues/new") {
                         NSWorkspace.shared.open(url)
                     }
                 }
