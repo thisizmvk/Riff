@@ -106,6 +106,7 @@ struct RiffApp: App {
             }
             CommandGroup(replacing: .help) {
                 RecapMenuItem()
+                TasteMenuItem()
                 Divider()
                 Button("Riff on GitHub") {
                     if let url = URL(string: "https://github.com/thisizmvk/Riff") {
@@ -179,6 +180,18 @@ private struct RecapMenuItem: View {
             env?.isRecapSheetPresented = true
         }
         .keyboardShortcut("Y", modifiers: [.command, .shift])
+        .disabled(env == nil)
+    }
+}
+
+/// Help menu entry for the "Your Taste" transparency sheet.
+private struct TasteMenuItem: View {
+    @FocusedValue(\.appEnvironment) private var env
+
+    var body: some View {
+        Button("Your Taste…") {
+            env?.isTasteSheetPresented = true
+        }
         .disabled(env == nil)
     }
 }
@@ -468,6 +481,9 @@ struct RootView: View {
         }
         .sheet(isPresented: $env.isRecapSheetPresented) {
             RecapView()
+        }
+        .sheet(isPresented: $env.isTasteSheetPresented) {
+            TasteView()
         }
         .sheet(isPresented: $env.isLyricCardSheetPresented) {
             LyricCardSheet()

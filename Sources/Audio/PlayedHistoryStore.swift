@@ -14,6 +14,20 @@ import Foundation
 struct PlayedEntry: Equatable, Hashable, Sendable, Codable {
     let item: MediaItem
     let playedAt: Date
+    /// How far into the track playback got when it was archived
+    /// (seconds), and the track's length. Optional: entries recorded
+    /// before this field existed decode with nil and count as neutral
+    /// listens, never as skips. Drives the taste model's skip signal.
+    var listenedSeconds: Double? = nil
+    var trackSeconds: Double? = nil
+
+    /// Left early: under 30 s AND under half the track (so a 40 s
+    /// interlude played through isn't a skip). Unknown → not a skip.
+    var isSkip: Bool {
+        guard let listened = listenedSeconds else { return false }
+        let total = trackSeconds ?? 0
+        return listened < 30 && (total <= 0 || listened < total * 0.5)
+    }
 }
 
 /// Tiny encapsulation of the locally-persisted played-history journal.

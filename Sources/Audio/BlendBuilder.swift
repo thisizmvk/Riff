@@ -67,8 +67,9 @@ enum BlendBuilder {
             guard item.kind == .song, !item.id.isEmpty else { continue }
             let ageDays = max(0, now.timeIntervalSince(entry.playedAt)) / 86_400
             // Exponential recency decay, summed across plays, so both
-            // "played a lot" and "played recently" lift a track.
-            let w = pow(2.0, -ageDays / halfLifeDays)
+            // "played a lot" and "played recently" lift a track. A skip
+            // is weak evidence of liking — it counts a quarter.
+            let w = pow(2.0, -ageDays / halfLifeDays) * (entry.isSkip ? 0.25 : 1)
             if var agg = byId[item.id] {
                 agg.weight += w
                 if entry.playedAt > agg.lastPlayed {
@@ -83,6 +84,11 @@ enum BlendBuilder {
 
         guard byId.count >= minimumDistinctSongs else { return [] }
 
+        // Taste model: eases off skipped songs and over-played artists,
+        // leans into what you play on this kind of day. Same model the
+        // "Your Taste" view shows, so every bias is visible to the user.
+        let taste = TasteProfile.build(from: entries, now: now)
+
         // Weighted sampling without replacement (Efraimidis–Spirakis):
         // key = U^(1/weight), take the largest keys. Heavier tracks tend
         // to surface, but every eligible track keeps a real chance, so
@@ -91,7 +97,7 @@ enum BlendBuilder {
             // Seeded blends multiply the weight of songs by the seed
             // artist so the mix leans into them while still sampling the
             // rest of the library for texture.
-            var weight = agg.weight
+            var weight = agg.weight * taste.weight(for: agg.item)
             if let boost = boostArtistId, let aid = agg.item.artistId, aid == boost {
                 weight *= seedBoost
             }
@@ -99,7 +105,21 @@ enum BlendBuilder {
             let key = pow(u, 1.0 / max(weight, Double.leastNonzeroMagnitude))
             return (agg.item, key, artistKey(for: agg.item))
         }
-        let ordered = keyed.sorted { $0.key > $1.key }.map { ($0.item, $0.artist) }
+        var ordered = keyed.sorted { $0.key > $1.key }.map { ($0.item, $0.artist) }
+
+        // Diversity guard: no artist may fill more than ~30% of the mix
+        // (half for the seed artist of a seeded blend), so a heavy run on
+        // one artist can't collapse the blend into a single-artist queue.
+        let cap = max(3, Int(Double(limit) * 0.3))
+        let seedCap = max(cap, limit / 2)
+        var perArtist: [String: Int] = [:]
+        ordered = ordered.filter { item, artist in
+            let isSeed = boostArtistId != nil && item.artistId == boostArtistId
+            let n = perArtist[artist, default: 0]
+            guard n < (isSeed ? seedCap : cap) else { return false }
+            perArtist[artist] = n + 1
+            return true
+        }
 
         // Light de-clumping: avoid three-in-a-row from the same artist so
         // the mix doesn't open with one album's deep cuts back to back.

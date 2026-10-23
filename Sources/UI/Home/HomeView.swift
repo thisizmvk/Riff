@@ -714,6 +714,23 @@ struct BlendHeroCard: View {
                         .font(.system(size: 12))
                         .foregroundStyle(.white.opacity(0.8))
                         .lineLimit(1)
+                    // Transparency: what the mix is built from. A nested
+                    // plain button wins the hit test over the card's
+                    // play action.
+                    Button {
+                        env.isTasteSheetPresented = true
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "info.circle")
+                            Text("How it's picked")
+                        }
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                        .underline()
+                    }
+                    .buttonStyle(.plain)
+                    .help("See what Riff has learned about your taste")
+                    .padding(.top, 2)
                 }
                 Spacer(minLength: 8)
 
@@ -752,6 +769,9 @@ struct BlendHeroCard: View {
         .accessibilityLabel("Riff Blend, experimental personal mix")
         .accessibilityHint("Plays a fresh shuffle built from your recent listening")
         .accessibilityAddTraits(.isButton)
+        // children: .ignore hides the nested "How it's picked" link from
+        // VoiceOver — surface it as a named action on the card instead.
+        .accessibilityAction(named: "How it's picked") { env.isTasteSheetPresented = true }
     }
 
     /// 2×2 artwork collage behind a darkening scrim so the foreground

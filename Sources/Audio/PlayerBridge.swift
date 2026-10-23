@@ -72,6 +72,9 @@ final class PlayerBridge {
     /// the right Up Next queue when playing inside a playlist (without it,
     /// /next returns radio-style suggestions instead of the playlist's tracks).
     @ObservationIgnored private var currentPlaylistId: String?
+    /// Last playback position seen per video (see the .progress handler);
+    /// feeds PlayedEntry.listenedSeconds when the track is archived.
+    @ObservationIgnored private var lastPosition: (videoId: String, position: Double, duration: Double)?
     /// True when the current playback context is an auto-generated radio
     /// (no deterministic playlist — either no `list=` at all or a radio
     /// prefix like `RDAMVM…`/`RD…`). Radio queues are non-deterministic:
@@ -879,7 +882,11 @@ final class PlayerBridge {
         // the front and the size stays put.
         let prevCount = queue.playedEntries.count
         let prevTail = queue.playedEntries.last
-        queue.archive(item)
+        let snap = lastPosition?.videoId == old.videoId ? lastPosition : nil
+        queue.archive(item,
+                      listenedSeconds: snap?.position,
+                      trackSeconds: (snap?.duration ?? 0) > 0 ? snap?.duration
+                          : (old.duration > 0 ? old.duration : nil))
         let newCount = queue.playedEntries.count
         guard queue.playedEntries.last != prevTail else {
             Log.bridge.debug("archiveCurrent: skip dup last=\(item.title, privacy: .private) (\(item.id, privacy: .public))")
@@ -2334,6 +2341,15 @@ final class PlayerBridge {
         await eval("window.musicBridge.setNormalizationEnabled(\(enabled))")
     }
 
+    /// Replace the play journal (taste-profile import or reset). History
+    /// only — never touches the queue or playback. The Repeat All cycle
+    /// anchor is an absolute index into the journal, so it restarts at
+    /// the new end rather than pointing into replaced entries.
+    func replaceTasteHistory(_ entries: [PlayedEntry]) {
+        queue.replaceHistory(entries)
+        contextStartHistoryIndex = queue.playedEntries.count
+    }
+
     /// Autoplay ("Enhance"). When ON (default), the queue
     /// auto-extends with related/radio tracks as it nears the end,
     /// so music never stops — matching Spotify/Apple Music. When
@@ -2771,6 +2787,13 @@ final class PlayerBridge {
             let durationWasUnknown = duration <= 0
             elapsed = t.isFinite ? t : 0
             duration = (d.isFinite && d > 0) ? d : 0
+            // Per-video position snapshot for the journal's skip signal.
+            // Keyed by videoId so archiveCurrent never credits the NEXT
+            // track's position (progress has often moved on by the time
+            // a track is archived).
+            if let vid = currentTrack?.videoId {
+                lastPosition = (vid, elapsed, duration)
+            }
             if let vid = currentTrack?.videoId {
                 // Session-resume seek (armed by togglePlay). Checked
                 // INDEPENDENTLY of `durationWasUnknown`: on the resume

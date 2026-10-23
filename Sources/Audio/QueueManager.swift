@@ -289,9 +289,12 @@ final class QueueManager {
 
     // MARK: - History
 
-    func archive(_ item: MediaItem, at date: Date = Date()) {
+    func archive(_ item: MediaItem, at date: Date = Date(),
+                 listenedSeconds: Double? = nil, trackSeconds: Double? = nil) {
         if playedEntries.last?.item.id == item.id { return }
-        playedEntries.append(PlayedEntry(item: item, playedAt: date))
+        playedEntries.append(PlayedEntry(item: item, playedAt: date,
+                                         listenedSeconds: listenedSeconds,
+                                         trackSeconds: trackSeconds))
         playedHistory.append(item)
         if playedEntries.count > historyCap {
             playedEntries.removeFirst(playedEntries.count - historyCap)
@@ -302,5 +305,16 @@ final class QueueManager {
 
     func clearPersistedHistory() {
         historyStore.clear()
+    }
+
+    /// Replace the whole journal (taste import / reset). Sorted
+    /// oldest-first like `archive` appends, capped, persisted, and the
+    /// observed `playedHistory` mirror rebuilt.
+    func replaceHistory(_ entries: [PlayedEntry]) {
+        var sorted = entries.sorted { $0.playedAt < $1.playedAt }
+        if sorted.count > historyCap { sorted.removeFirst(sorted.count - historyCap) }
+        playedEntries = sorted
+        playedHistory = sorted.map(\.item)
+        historyStore.save(playedEntries)
     }
 }

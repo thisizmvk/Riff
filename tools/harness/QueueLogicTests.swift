@@ -881,6 +881,104 @@ do {
     check(d(.browse) == nil, "no status and no urlError yields nil")
 }
 
+// ── 19. TasteProfile — skip / fatigue / day-type signals ────────────
+do {
+    var utc = Calendar(identifier: .gregorian)
+    utc.timeZone = TimeZone(identifier: "UTC")!
+    // 2026-10-21 is a Wednesday (weekday); 2026-10-24 a Saturday.
+    func day(_ d: Int, _ h: Int = 12) -> Date {
+        utc.date(from: DateComponents(year: 2026, month: 10, day: d, hour: h))!
+    }
+    func song(_ id: String, artist: String) -> MediaItem {
+        MediaItem(id: id, kind: .song, title: id, subtitle: artist,
+                  thumbnailURL: URL(string: "https://x/\(id)"), artistId: artist)
+    }
+    func play(_ id: String, _ artist: String, _ at: Date, listened: Double? = 200, total: Double? = 200) -> PlayedEntry {
+        PlayedEntry(item: song(id, artist: artist), playedAt: at,
+                    listenedSeconds: listened, trackSeconds: total)
+    }
+
+    // Skip definition.
+    check(play("a", "A", day(20), listened: 10).isSkip, "10 s of 200 is a skip")
+    check(!play("a", "A", day(20), listened: 120).isSkip, "120 s of 200 is a listen")
+    check(!play("a", "A", day(20), listened: 25, total: 40).isSkip, "25 s of a 40 s interlude is NOT a skip")
+    check(!play("a", "A", day(20), listened: nil, total: nil).isSkip, "legacy entry without depth is never a skip")
+
+    // Skipped song is down-weighted; plain song is neutral.
+    var entries: [PlayedEntry] = []
+    for i in 0..<3 { entries.append(play("bad", "B", day(10 + i), listened: 5)) }
+    for i in 0..<3 { entries.append(play("good", "G", day(10 + i))) }
+    var t = TasteProfile.build(from: entries, now: day(21), calendar: utc)
+    check(t.isSkippedSong("bad"), "song skipped 3x with no full plays is flagged")
+    check(!t.isSkippedSong("good"), "song played through is not flagged")
+    check(t.weight(for: song("bad", artist: "B")) < t.weight(for: song("good", artist: "G")),
+          "skipped song weighs less than a played one")
+
+    // Fatigue: one artist dominating the last 3 days.
+    entries = []
+    for i in 0..<9 { entries.append(play("t\(i)", "T", day(20, 8 + i))) }
+    for i in 0..<3 { entries.append(play("o\(i)", "O", day(20, 18 + i))) }
+    t = TasteProfile.build(from: entries, now: day(21), calendar: utc)
+    check(t.isFatigued("T"), "artist with 75% of recent plays is fatigued")
+    check(!t.isFatigued("O"), "minority artist is not fatigued")
+    check(t.reasons(for: song("t0", artist: "T")).contains { $0.hasPrefix("Eased off") },
+          "fatigued artist's reasons explain the easing")
+    check(TasteProfile.build(from: Array(entries.prefix(6)), now: day(21), calendar: utc).totalRecentPlays < 10
+          && !TasteProfile.build(from: Array(entries.prefix(6)), now: day(21), calendar: utc).isFatigued("T"),
+          "fatigue needs at least 10 recent plays of evidence")
+
+    // Day type: a weekend-only artist lifts on a Saturday, not on a Wednesday.
+    entries = []
+    for w in [3, 10, 17] {           // Saturdays in Oct 2026
+        for i in 0..<3 { entries.append(play("w\(w)\(i)", "W", day(w, 10 + i))) }
+    }
+    for d in [5, 6, 7, 12, 13, 14] {  // weekdays
+        for i in 0..<2 { entries.append(play("d\(d)\(i)", "D", day(d, 10 + i))) }
+    }
+    let sat = TasteProfile.build(from: entries, now: day(24), calendar: utc)
+    let wed = TasteProfile.build(from: entries, now: day(21), calendar: utc)
+    check(sat.dayTypeLift("W") > 1.25, "weekend artist lifts on a Saturday")
+    check(wed.dayTypeLift("W") < 1, "weekend artist dips on a Wednesday")
+    check(sat.reasons(for: song("w30", artist: "W")).contains("A weekend favorite"),
+          "weekend lift is explained")
+}
+
+// ── 20. TasteArchive — export / import / merge ──────────────────────
+do {
+    let base = Date(timeIntervalSince1970: 1_790_000_000)
+    func e(_ id: String, _ offset: Double, listened: Double? = nil) -> PlayedEntry {
+        PlayedEntry(item: MediaItem(id: id, kind: .song, title: id, subtitle: "A",
+                                    thumbnailURL: nil, artistId: "A"),
+                    playedAt: base.addingTimeInterval(offset),
+                    listenedSeconds: listened, trackSeconds: listened == nil ? nil : 200)
+    }
+    let journal = [e("a", 0, listened: 12), e("b", 60), e("c", 120, listened: 180)]
+    let data = try! TasteArchive.encode(journal, now: base)
+    let back = try! TasteArchive.decode(data)
+    check(back == journal, "export → import round-trips every field (incl. listen depth)")
+    check(back[0].isSkip && !back[2].isSkip, "skip signal survives the round-trip")
+
+    // Not a profile / wrong version.
+    check((try? TasteArchive.decode(Data("{\"hello\":1}".utf8))) == nil, "arbitrary JSON is rejected")
+    var wrong = TasteArchive.File(exportedAt: base, entries: journal); wrong.version = 9
+    let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+    do { _ = try TasteArchive.decode(try! enc.encode(wrong)); check(false, "future version should throw") }
+    catch { check((error as? TasteArchive.ImportError) == .unsupportedVersion(9), "future version is reported, not misread") }
+
+    // Merge: re-importing the same file adds nothing; new entries interleave by time.
+    check(TasteArchive.merge(journal, journal).count == 3, "re-import of the same profile is idempotent")
+    let merged = TasteArchive.merge(journal, [e("z", 30)])
+    check(merged.map(\.item.id) == ["a", "z", "b", "c"], "merged journal is time-ordered")
+
+    // Legacy JSON (entries without depth fields) still decodes.
+    let legacy = """
+    {"format":"riff.taste-profile","version":1,"exportedAt":"2026-10-21T00:00:00Z",
+     "entries":[{"item":{"id":"x","kind":"song","title":"x","subtitle":"A"},"playedAt":"2026-10-20T00:00:00Z"}]}
+    """
+    let legacyOK = (try? TasteArchive.decode(Data(legacy.utf8)))?.first.map { $0.listenedSeconds == nil && !$0.isSkip } ?? false
+    check(legacyOK, "entries without listen depth decode as neutral listens")
+}
+
 print("KNOWN BUGS (strict xfail, not counted as failures): \(knownBugs)")
 
 print("")

@@ -927,6 +927,14 @@ struct NowPlayingView: View {
             .truncationMode(.tail)
     }
 
+    /// The top taste-model reason the current track is in a Riff Blend.
+    private var blendReasonForCurrentTrack: String? {
+        guard let t = env.player.currentTrack else { return nil }
+        let item = MediaItem(id: t.videoId, kind: .song, title: t.title, subtitle: t.subtitle,
+                             thumbnailURL: t.thumbnailURL, albumId: t.albumId, artistId: t.artistId)
+        return TasteProfile.build(from: env.player.playedEntries).reasons(for: item).first
+    }
+
     /// Autoplay switch — YT web's watch-page queue toggle, wired to the
     /// existing `autoplayEnabled` setting (same one as Settings →
     /// Playback). OFF stops playback when the queue runs out instead of
@@ -1078,6 +1086,24 @@ struct NowPlayingView: View {
                             .font(.system(size: 13, weight: .semibold))
                             .foregroundStyle(.white)
                             .lineLimit(1)
+                        // Blend transparency: why THIS song is in the mix,
+                        // from the same taste model that picked it. Click
+                        // opens the full "Your Taste" view.
+                        if src == "Riff Blend", let why = blendReasonForCurrentTrack {
+                            Button {
+                                env.isTasteSheetPresented = true
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "sparkles")
+                                    Text(why)
+                                }
+                                .font(.system(size: 11))
+                                .foregroundStyle(Theme.Text.secondary)
+                                .lineLimit(1)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Why this song? Open Your Taste")
+                        }
                     }
                     Spacer()
                     if let pid = env.player.queueSourcePlaylistId, !pid.isEmpty {

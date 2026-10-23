@@ -173,6 +173,8 @@ final class AppEnvironment {
     /// Drives the "Your Riff Highlights" recap sheet. Raised from the
     /// Help menu entry; consumed by a `.sheet` on RootView.
     var isRecapSheetPresented: Bool = false
+    /// "Your Taste" — the taste-model transparency sheet.
+    var isTasteSheetPresented: Bool = false
 
     /// Drives the "Create lyric card" sheet. Raised from the lyrics
     /// tab in NowPlayingView; consumed by a `.sheet` on RootView.
