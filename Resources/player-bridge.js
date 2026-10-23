@@ -72,6 +72,102 @@
         try { window.webkit.messageHandlers.bridge.postMessage(payload); } catch (_) {}
     }
 
+    // ---- Audio quality --------------------------------------------------------
+    //
+    // Riff never extracts streams; it reads what the page's OWN player is
+    // playing and steers the page's OWN quality API. Two pieces:
+    //
+    //  - read(): the audio format actually playing — codec + itag from the
+    //    player's "stats for nerds", bitrate from the player response's
+    //    format list (metadata only), plus the best audio format the page
+    //    was offered, so Swift can say "Opus 160 kbps (best available)".
+    //  - pref "high": cap the VIDEO rendition to the smallest. The WebView
+    //    is hidden, so decoding video was pure waste for music videos, and
+    //    it leaves adaptive bitrate more room for audio. The player resets
+    //    its quality range per video, so this re-applies on every track.
+    const __riffAudio = {
+        pref: "auto",
+        codecFromMime(mime) {
+            const m = /codecs="([^"]+)"/.exec(mime || "");
+            if (!m) return null;
+            const c = m[1].toLowerCase();
+            if (c.startsWith("opus")) return "opus";
+            if (c.startsWith("mp4a")) return "aac";
+            return c.split(".")[0];
+        },
+        apply() {
+            const p = playerApi();
+            if (!p) return;
+            try {
+                if (this.pref === "high") {
+                    if (typeof p.setPlaybackQualityRange === "function") p.setPlaybackQualityRange("tiny", "tiny");
+                    if (typeof p.setPlaybackQuality === "function") p.setPlaybackQuality("tiny");
+                } else if (typeof p.setPlaybackQualityRange === "function") {
+                    p.setPlaybackQualityRange("auto", "auto");
+                }
+            } catch (_) {}
+        },
+        read() {
+            const p = playerApi();
+            if (!p) return null;
+            let itag = null, codec = null;
+            try {
+                const st = typeof p.getStatsForNerds === "function" ? p.getStatsForNerds() : null;
+                // e.g. "vp09.00.51.08 (399) / opus (251)", or "opus (251)" audio-only
+                const c = st && st.codecs;
+                if (typeof c === "string") {
+                    const parts = c.split("/").map((x) => x.trim());
+                    const m = /^([\w.]+)\s*\((\d+)\)/.exec(parts[parts.length - 1]);
+                    if (m) {
+                        itag = parseInt(m[2], 10);
+                        const lc = m[1].toLowerCase();
+                        codec = lc.startsWith("mp4a") ? "aac" : lc.startsWith("opus") ? "opus" : lc;
+                    }
+                }
+            } catch (_) {}
+            let bitrate = null, audioQuality = null, best = null;
+            try {
+                const pr = typeof p.getPlayerResponse === "function" ? p.getPlayerResponse() : null;
+                const fmts = (pr && pr.streamingData && pr.streamingData.adaptiveFormats) || [];
+                const audios = fmts.filter((f) => (f.mimeType || "").startsWith("audio/"));
+                const rate = (f) => f.averageBitrate || f.bitrate || 0;
+                const cur = itag != null ? audios.find((f) => f.itag === itag) : null;
+                if (cur) {
+                    bitrate = rate(cur) || null;
+                    audioQuality = cur.audioQuality || null;
+                    if (!codec) codec = this.codecFromMime(cur.mimeType);
+                }
+                for (const f of audios) if (!best || rate(f) > rate(best)) best = f;
+            } catch (_) {}
+            const v = videoEl();
+            return {
+                itag: itag,
+                codec: codec,
+                bitrate: bitrate,
+                audioQuality: audioQuality,
+                bestItag: best ? best.itag : null,
+                bestBitrate: best ? (best.averageBitrate || best.bitrate || null) : null,
+                bestCodec: best ? this.codecFromMime(best.mimeType) : null,
+                videoHeight: v ? (v.videoHeight || 0) : 0,
+            };
+        },
+        report() {
+            const f = this.read();
+            if (f && (f.itag != null || f.bestItag != null)) {
+                postEvent(Object.assign({ event: "audioFormat" }, f));
+            }
+        },
+        // Called on every track change: steer, then report once adaptive
+        // bitrate has had time to settle (and again later — ABR can step
+        // up a few seconds in).
+        onTrack() {
+            setTimeout(() => this.apply(), 300);
+            setTimeout(() => this.apply(), 1500);
+            setTimeout(() => this.report(), 4000);
+            setTimeout(() => this.report(), 12000);
+        },
+    };
+
     // ---- Public API (window.musicBridge) -----------------------------------
 
     const api = {
@@ -159,6 +255,17 @@
         // sets gain to land near -18 dBFS RMS. Not LUFS-accurate, but
         // catches the loud-pop-into-quiet-acoustic gap that's the
         // user-visible failure mode. Off by default.
+        // Audio quality preference: "auto" (the page decides) or "high"
+        // (smallest hidden video rendition; see __riffAudio).
+        setAudioPreference(mode) {
+            __riffAudio.pref = mode === "high" ? "high" : "auto";
+            __riffAudio.apply();
+            setTimeout(() => __riffAudio.report(), 3000);
+        },
+
+        // Re-post the current audio format (Now Playing opening, etc.).
+        requestAudioFormat() { __riffAudio.report(); },
+
         setNormalizationEnabled(on) {
             if (!window.__riffNorm) return;
             window.__riffNorm.init();
@@ -589,6 +696,7 @@
             artist: artist,
             artwork: artwork,
         });
+        __riffAudio.onTrack();
     }
 
     function emitState(state) {
@@ -1605,6 +1713,7 @@
                 artist: md.artist || "",
                 artwork: artwork,
             });
+            __riffAudio.onTrack();
         }, 500);
         // Also attach the <video> ended listener as best-effort EOT signal in
         // fallback mode (in case YT does fire it on some non-MSE contexts

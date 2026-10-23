@@ -111,6 +111,9 @@ struct NowPlayingView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeInOut(duration: 0.25), value: lyricsFullscreen)
+        // Fresh audio-format reading on open (the page also reports a
+        // few seconds into every track).
+        .task { await env.player.requestAudioFormat() }
         .background {
             // Backdrops as a background stack — entirely behind the
             // foreground; their sizes have no effect on the foreground's
@@ -283,6 +286,8 @@ struct NowPlayingView: View {
                     fontSize: 14,
                     baseOpacity: 0.7
                 )
+                audioQualityBadge
+                    .padding(.top, 6)
             }
             .padding(.horizontal, 32)
             .contextMenu { nowPlayingMenuItems }
@@ -925,6 +930,41 @@ struct NowPlayingView: View {
             .foregroundStyle(Theme.Text.secondary)
             .lineLimit(1)
             .truncationMode(.tail)
+    }
+
+    /// What's actually streaming — "OPUS · 160 KBPS" — read from the
+    /// page's own player. When the page was offered a better format than
+    /// it's playing, the tooltip says so (usually: the 256 kbps tier
+    /// needs YouTube Premium). Hidden until the first report lands.
+    @ViewBuilder
+    private var audioQualityBadge: some View {
+        if let f = env.player.audioFormat, let label = f.label {
+            let tip: String = {
+                var t = "Streaming \(label)"
+                if f.isBelowBestAvailable, let best = f.bestLabel {
+                    t += ". This track also offers \(best) — YouTube's top tier needs Premium."
+                }
+                if env.player.audioQualityPreference == .high {
+                    t += " Highest quality is on: hidden video is capped."
+                }
+                return t
+            }()
+            HStack(spacing: 4) {
+                Image(systemName: "waveform")
+                Text(label.uppercased())
+                if f.isBelowBestAvailable {
+                    Image(systemName: "arrow.up.circle")
+                }
+            }
+            .font(.system(size: 10, weight: .semibold))
+            .tracking(0.6)
+            .foregroundStyle(Theme.Text.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+            .help(tip)
+            .accessibilityLabel(tip)
+        }
     }
 
     /// The top taste-model reason the current track is in a Riff Blend.

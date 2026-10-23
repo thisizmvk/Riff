@@ -372,6 +372,33 @@ struct SettingsView: View {
             sectionTitle("Playback")
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
+                    Text("Audio quality")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                    Text("Highest stops the hidden player from streaming video for music videos, so the connection goes to audio. The top bitrate (256 kbps) is a YouTube Premium perk. Now Playing shows what's actually streaming.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let now = env.player.audioFormat?.label {
+                        Text("Now streaming: \(now)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(Theme.Text.tertiary)
+                    }
+                }
+                Spacer(minLength: 16)
+                Picker("", selection: Binding(
+                    get: { env.player.audioQualityPreference },
+                    set: { pref in Task { await env.player.setAudioQualityPreference(pref) } }
+                )) {
+                    Text("Automatic").tag(PlayerBridge.AudioQualityPreference.auto)
+                    Text("Highest").tag(PlayerBridge.AudioQualityPreference.high)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+            }
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Autoplay")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white)

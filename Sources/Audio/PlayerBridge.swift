@@ -212,6 +212,10 @@ final class PlayerBridge {
         self.shuffleEnabled = UserDefaults.standard.bool(forKey: Self.shuffleKey)
         self.smartShuffleEnabled = UserDefaults.standard.bool(forKey: Self.smartShuffleKey)
         self.normalizationEnabled = UserDefaults.standard.bool(forKey: Self.normalizationKey)
+        if let raw = UserDefaults.standard.string(forKey: Self.audioQualityKey),
+           let pref = AudioQualityPreference(rawValue: raw) {
+            self.audioQualityPreference = pref
+        }
         // Autoplay defaults ON (endless similar music at queue end),
         // matching Spotify/Apple Music. `object(forKey:)` so a
         // first-launch absence stays true instead of a bool default
@@ -2341,6 +2345,29 @@ final class PlayerBridge {
         await eval("window.musicBridge.setNormalizationEnabled(\(enabled))")
     }
 
+    /// Audio quality preference. `.high` caps the hidden WebView's VIDEO
+    /// rendition to the smallest, so music videos stop spending bandwidth
+    /// and decode on frames nobody sees, leaving adaptive bitrate more
+    /// room for audio. Audio bitrate itself is the server's call (Premium
+    /// unlocks the top tier); `audioFormat` reports what actually plays.
+    enum AudioQualityPreference: String, CaseIterable, Sendable {
+        case auto, high
+    }
+    private(set) var audioQualityPreference: AudioQualityPreference = .auto
+    private static let audioQualityKey = "player.audioQuality"
+    func setAudioQualityPreference(_ pref: AudioQualityPreference) async {
+        audioQualityPreference = pref
+        UserDefaults.standard.set(pref.rawValue, forKey: Self.audioQualityKey)
+        await eval("window.musicBridge.setAudioPreference('\(pref.rawValue)')")
+    }
+
+    /// The audio format the page is streaming for the current track (nil
+    /// until the page reports it, a few seconds into each track).
+    private(set) var audioFormat: HiddenPlayerWebView.AudioFormat? = nil
+    func requestAudioFormat() async {
+        await eval("window.musicBridge.requestAudioFormat()")
+    }
+
     /// Replace the play journal (taste-profile import or reset). History
     /// only — never touches the queue or playback. The Repeat All cycle
     /// anchor is an absolute index into the journal, so it restarts at
@@ -2517,6 +2544,9 @@ final class PlayerBridge {
                 }
                 if self.normalizationEnabled {
                     await self.evalWithTimeout(js: "window.musicBridge.setNormalizationEnabled(true)")
+                }
+                if self.audioQualityPreference == .high {
+                    await self.evalWithTimeout(js: "window.musicBridge.setAudioPreference('high')")
                 }
                 // Re-arm crossfade on every page (re)load. Cheap
                 // no-op when seconds == 0; idempotent otherwise.
@@ -2830,8 +2860,15 @@ final class PlayerBridge {
             // per-videoId sentinel so we don't re-warm on every
             // progress tick after the threshold.
             prefetchNextArtworkIfDue()
+        case .audioFormat(let format):
+            // Display-only. The JS reads "what's playing now" at report
+            // time, so even a late report describes the current track.
+            audioFormat = format
         case .trackChanged(let id, let playlistId, let title, let artist, let art):
             let sameVideoId = currentTrack?.videoId == id
+            // A new track's format is unknown until the page reports it;
+            // never show the previous track's quality on this one.
+            if !sameVideoId { audioFormat = nil }
             let titleChanged = currentTrack?.title != title
             let withinClickGrace = Date().timeIntervalSince(userClickedAt) < Self.userClickGraceSeconds
 

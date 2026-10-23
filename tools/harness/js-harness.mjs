@@ -1101,5 +1101,60 @@ let firstPageInfoGeneration = null;
   check(!!chain && chain.msg.indexOf("ctrl=controller:absent") > 0 && chain.msg.indexOf("endpoint:no-menu-data") > 0 && chain.msg.indexOf("menu=menu:no-row") > 0, "failure chain diagnostic names every leg (got " + (chain ? chain.msg : "none") + ")");
 }
 
+// ---- Audio quality: format readout + preference ----------------------------
+{
+  elements.clear(); lists.clear();
+  const rangeCalls = [];
+  const api = {
+    getVideoData: () => ({ video_id: "q1" }),
+    getStatsForNerds: () => ({ codecs: "vp09.00.51.08 (399) / opus (251)" }),
+    getPlayerResponse: () => ({ streamingData: { adaptiveFormats: [
+      { itag: 399, mimeType: 'video/mp4; codecs="av01.0.08M.08"', bitrate: 2000000 },
+      { itag: 251, mimeType: 'audio/webm; codecs="opus"', averageBitrate: 138000, bitrate: 160000, audioQuality: "AUDIO_QUALITY_MEDIUM" },
+      { itag: 141, mimeType: 'audio/mp4; codecs="mp4a.40.2"', averageBitrate: 255000, audioQuality: "AUDIO_QUALITY_HIGH" },
+      { itag: 140, mimeType: 'audio/mp4; codecs="mp4a.40.2"', averageBitrate: 129000 },
+    ] } }),
+    setPlaybackQualityRange: (a, b) => rangeCalls.push([a, b]),
+    setPlaybackQuality: () => {},
+  };
+  elements.set("ytmusic-player", { playerApi: api });
+  elements.set("video", { videoHeight: 1080 });
+
+  posted.length = 0;
+  window.musicBridge.requestAudioFormat();
+  const af = posted.find((x) => x.event === "audioFormat");
+  check(!!af, "requestAudioFormat posts an audioFormat event");
+  check(af && af.itag === 251 && af.codec === "opus", "playing itag + codec read from stats-for-nerds (got " + JSON.stringify(af) + ")");
+  check(af && af.bitrate === 138000, "bitrate prefers averageBitrate from the matching format");
+  check(af && af.bestItag === 141 && af.bestCodec === "aac" && af.bestBitrate === 255000, "best offered audio format found (AAC 256)");
+  check(af && af.videoHeight === 1080, "hidden video rendition reported");
+
+  // Audio-only stats string (no video part).
+  api.getStatsForNerds = () => ({ codecs: "opus (251)" });
+  posted.length = 0;
+  window.musicBridge.requestAudioFormat();
+  const af2 = posted.find((x) => x.event === "audioFormat");
+  check(af2 && af2.itag === 251, "audio-only codecs string parses");
+
+  // Player without the stats API: still reports the best offered format.
+  delete api.getStatsForNerds;
+  posted.length = 0;
+  window.musicBridge.requestAudioFormat();
+  const af3 = posted.find((x) => x.event === "audioFormat");
+  check(af3 && af3.itag === null && af3.bestItag === 141, "missing stats API degrades to best-offered only");
+
+  // Preference: "high" caps the video rendition; "auto" releases it.
+  window.musicBridge.setAudioPreference("high");
+  check(rangeCalls.some(([a, b]) => a === "tiny" && b === "tiny"), "high preference caps hidden video to the smallest rendition");
+  window.musicBridge.setAudioPreference("auto");
+  check(rangeCalls.length > 0 && rangeCalls[rangeCalls.length - 1][0] === "auto", "auto preference releases the cap");
+
+  // No player at all: no event, no throw.
+  elements.clear();
+  posted.length = 0;
+  window.musicBridge.requestAudioFormat();
+  check(!posted.some((x) => x.event === "audioFormat"), "no player → no audioFormat event");
+}
+
 console.log(`\nJS RESULT: ${passes} passed, ${failures} failed`);
 process.exit(failures === 0 ? 1 - 1 : 1);

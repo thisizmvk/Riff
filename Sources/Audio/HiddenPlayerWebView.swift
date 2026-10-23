@@ -47,6 +47,50 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         /// non-deterministic and can't be reproduced by an independent
         /// /next call. `selected == true` marks the currently-playing row.
         case queueSnapshot(items: [PageQueueItem], shuffleEnabled: Bool?)
+        /// The audio format the page's player is actually streaming, read
+        /// from its own stats / player response (never extracted).
+        case audioFormat(AudioFormat)
+    }
+
+    /// What the page is streaming right now, plus the best audio format
+    /// it was offered. All fields best-effort — nil when the player API
+    /// didn't expose them on this build.
+    struct AudioFormat: Equatable, Sendable {
+        let itag: Int?
+        let codec: String?          // "opus" / "aac"
+        let bitrate: Int?           // bits per second
+        let audioQuality: String?   // e.g. "AUDIO_QUALITY_MEDIUM"
+        let bestItag: Int?
+        let bestBitrate: Int?
+        let bestCodec: String?
+        let videoHeight: Int        // hidden video rendition (0 = audio-only)
+
+        /// "Opus · 160 kbps" — nil when nothing is known.
+        var label: String? {
+            Self.describe(codec: codec, bitrate: bitrate)
+        }
+        var bestLabel: String? {
+            Self.describe(codec: bestCodec, bitrate: bestBitrate)
+        }
+        /// The page offered a meaningfully better audio format than the
+        /// one playing (>15% higher bitrate).
+        var isBelowBestAvailable: Bool {
+            guard let b = bitrate, let best = bestBitrate, b > 0 else { return false }
+            return Double(best) > Double(b) * 1.15
+        }
+
+        static func describe(codec: String?, bitrate: Int?) -> String? {
+            let name: String? = codec.map {
+                switch $0 { case "opus": return "Opus"; case "aac": return "AAC"; default: return $0.uppercased() }
+            }
+            let kbps = bitrate.map { "\(Int((Double($0) / 1000).rounded())) kbps" }
+            switch (name, kbps) {
+            case let (n?, k?): return "\(n) · \(k)"
+            case let (n?, nil): return n
+            case let (nil, k?): return k
+            default: return nil
+            }
+        }
     }
 
     /// The page's self-description from the `pageInfo` handshake.
@@ -331,6 +375,15 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
                 ok: (body["ok"] as? Bool) ?? false,
                 via: (body["via"] as? String) ?? ""
             )
+        case "audioFormat":
+            func int(_ k: String) -> Int? { (body[k] as? NSNumber)?.intValue }
+            func str(_ k: String) -> String? { (body[k] as? String).flatMap { $0.isEmpty ? nil : $0 } }
+            return .audioFormat(AudioFormat(
+                itag: int("itag"), codec: str("codec"), bitrate: int("bitrate"),
+                audioQuality: str("audioQuality"), bestItag: int("bestItag"),
+                bestBitrate: int("bestBitrate"), bestCodec: str("bestCodec"),
+                videoHeight: int("videoHeight") ?? 0
+            ))
         case "queueSnapshot":
             guard let raw = body["items"] as? [[String: Any]], !raw.isEmpty else { return nil }
             let items: [PageQueueItem] = raw.compactMap { dict in
