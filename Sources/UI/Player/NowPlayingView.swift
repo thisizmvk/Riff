@@ -557,6 +557,16 @@ struct NowPlayingView: View {
             }
             playbackRateMenu
             audioOutputButton
+            controlButton(
+                systemName: "slider.vertical.3",
+                size: 17,
+                tint: env.player.eqEnabled ? Theme.red : Theme.Text.secondary,
+                help: env.player.eqEnabled
+                    ? "Equalizer: \(Equalizer.matchingPreset(env.player.eqGains)?.name ?? "Custom")"
+                    : "Equalizer"
+            ) {
+                env.isEqualizerSheetPresented = true
+            }
             sleepTimerMenu
             addToPlaylistMenu
             moreMenu

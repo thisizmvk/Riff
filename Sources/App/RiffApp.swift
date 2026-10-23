@@ -342,6 +342,14 @@ private struct TransportMenuItems: View {
         }
         .keyboardShortcut("S", modifiers: [.command, .shift])
 
+        Button("Equalizer…") {
+            env?.isEqualizerSheetPresented = true
+        }
+        .keyboardShortcut("E", modifiers: [.command, .option])
+        .disabled(env == nil)
+
+        Divider()
+
         Button("Cycle Repeat") {
             guard let env else { return }
             Task {
@@ -484,6 +492,9 @@ struct RootView: View {
         }
         .sheet(isPresented: $env.isTasteSheetPresented) {
             TasteView()
+        }
+        .sheet(isPresented: $env.isEqualizerSheetPresented) {
+            EqualizerView()
         }
         .sheet(isPresented: $env.isLyricCardSheetPresented) {
             LyricCardSheet()

@@ -212,6 +212,10 @@ final class PlayerBridge {
         self.shuffleEnabled = UserDefaults.standard.bool(forKey: Self.shuffleKey)
         self.smartShuffleEnabled = UserDefaults.standard.bool(forKey: Self.smartShuffleKey)
         self.normalizationEnabled = UserDefaults.standard.bool(forKey: Self.normalizationKey)
+        self.eqEnabled = UserDefaults.standard.bool(forKey: Self.eqEnabledKey)
+        if let stored = UserDefaults.standard.array(forKey: Self.eqGainsKey) as? [Double] {
+            self.eqGains = Equalizer.normalized(stored)
+        }
         if let raw = UserDefaults.standard.string(forKey: Self.audioQualityKey),
            let pref = AudioQualityPreference(rawValue: raw) {
             self.audioQualityPreference = pref
@@ -2361,6 +2365,23 @@ final class PlayerBridge {
         await eval("window.musicBridge.setAudioPreference('\(pref.rawValue)')")
     }
 
+    /// 10-band equalizer (DSP in player-bridge.js's Web Audio graph).
+    /// Off or flat sends `null`, so the page builds no graph at all.
+    private(set) var eqEnabled: Bool = false
+    private(set) var eqGains: [Double] = Equalizer.flat.gains
+    private static let eqEnabledKey = "player.eqEnabled"
+    private static let eqGainsKey = "player.eqGains"
+    func setEqualizer(enabled: Bool, gains: [Double]) async {
+        eqEnabled = enabled
+        eqGains = Equalizer.normalized(gains)
+        UserDefaults.standard.set(enabled, forKey: Self.eqEnabledKey)
+        UserDefaults.standard.set(eqGains, forKey: Self.eqGainsKey)
+        await eval("window.musicBridge.setEQ(\(Equalizer.jsArgument(enabled: enabled, gains: eqGains)))")
+    }
+
+    /// Plain-language notices for the UI (toast). Set by AppEnvironment.
+    var onNotice: ((String) -> Void)? = nil
+
     /// The audio format the page is streaming for the current track (nil
     /// until the page reports it, a few seconds into each track).
     private(set) var audioFormat: HiddenPlayerWebView.AudioFormat? = nil
@@ -2547,6 +2568,9 @@ final class PlayerBridge {
                 }
                 if self.audioQualityPreference == .high {
                     await self.evalWithTimeout(js: "window.musicBridge.setAudioPreference('high')")
+                }
+                if self.eqEnabled {
+                    await self.evalWithTimeout(js: "window.musicBridge.setEQ(\(Equalizer.jsArgument(enabled: true, gains: self.eqGains)))")
                 }
                 // Re-arm crossfade on every page (re)load. Cheap
                 // no-op when seconds == 0; idempotent otherwise.
@@ -2860,6 +2884,18 @@ final class PlayerBridge {
             // per-videoId sentinel so we don't re-warm on every
             // progress tick after the threshold.
             prefetchNextArtworkIfDue()
+        case .audioGraphFailed(let reason):
+            // The page is about to reload once to get un-routed audio
+            // back (QUEUE-DESIGN.md item 15). Turn both graph users off
+            // and persist it BEFORE that reload's `ready` re-pushes
+            // settings, so the new page plays straight through.
+            Log.bridge.error("audio graph failed: \(reason, privacy: .public) — effects off")
+            Audit.note("audioGraphFailed reason=\(reason)")
+            eqEnabled = false
+            UserDefaults.standard.set(false, forKey: Self.eqEnabledKey)
+            normalizationEnabled = false
+            UserDefaults.standard.set(false, forKey: Self.normalizationKey)
+            onNotice?("Equalizer and volume levelling were turned off — they stopped the sound on this page. Reloading the player.")
         case .audioFormat(let format):
             // Display-only. The JS reads "what's playing now" at report
             // time, so even a late report describes the current track.

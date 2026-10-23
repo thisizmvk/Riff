@@ -175,6 +175,8 @@ final class AppEnvironment {
     var isRecapSheetPresented: Bool = false
     /// "Your Taste" — the taste-model transparency sheet.
     var isTasteSheetPresented: Bool = false
+    /// 10-band equalizer sheet.
+    var isEqualizerSheetPresented: Bool = false
 
     /// Drives the "Create lyric card" sheet. Raised from the lyrics
     /// tab in NowPlayingView; consumed by a `.sheet` on RootView.
@@ -1187,6 +1189,9 @@ final class AppEnvironment {
         }
         self.player.onJumpFailed = { [weak self] item in
             self?.showToast("Couldn't jump to “\(item.title)” — try tapping it again")
+        }
+        self.player.onNotice = { [weak self] message in
+            self?.showToast(message)
         }
         self.player.onRemoveFailed = { [weak self] _ in
             self?.showToast("Couldn't remove that song from the queue — it's back in the list")

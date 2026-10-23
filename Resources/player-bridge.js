@@ -161,6 +161,11 @@
         // bitrate has had time to settle (and again later — ABR can step
         // up a few seconds in).
         onTrack() {
+            // Rebind the effects graph if YT swapped its <video> element.
+            setTimeout(() => {
+                const n = window.__riffNorm;
+                if (n && (n.ctx || n.eqGains)) n.init();
+            }, 300);
             setTimeout(() => this.apply(), 300);
             setTimeout(() => this.apply(), 1500);
             setTimeout(() => this.report(), 4000);
@@ -265,6 +270,11 @@
 
         // Re-post the current audio format (Now Playing opening, etc.).
         requestAudioFormat() { __riffAudio.report(); },
+
+        // 10-band equalizer, dB per band (32 Hz … 16 kHz), or null for flat.
+        setEQ(gains) {
+            if (window.__riffNorm) window.__riffNorm.setEQ(gains);
+        },
 
         setNormalizationEnabled(on) {
             if (!window.__riffNorm) return;
@@ -1894,8 +1904,26 @@
     //
     // Measurement window: skip 500ms (fade-in), sample 5s, then apply.
     // Gain clamp: [0.4, 2.5] to avoid clipping or excessive boost.
+    //
+    // The same graph hosts the 10-band equalizer: source → preamp → EQ
+    // filters → analyser → normalization gain → destination. The preamp
+    // pulls level down by the largest boost so boosted bands don't clip.
+    //
+    // Routing a media element into Web Audio is one-way — once
+    // createMediaElementSource runs, ALL its audio flows through the
+    // graph. Three guards keep that from ever costing the user sound:
+    //   - never route a cross-origin, non-MSE source (WebKit would feed
+    //     the graph zeros); YT's MSE `blob:` media is same-origin;
+    //   - resume the AudioContext on every `play` (WebKit can create it
+    //     suspended);
+    //   - a watchdog: if the graph is silent while the element is
+    //     audibly playing, report it and reload the page once — the only
+    //     way back to un-routed audio (Swift turns effects off first).
+    const EQ_FREQS = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
     const norm = {
         ctx: null, sourceNode: null, gainNode: null, analyser: null, timeData: null,
+        preampNode: null, eqFilters: [], eqGains: null, boundEl: null,
+        watchdogId: null,
         enabled: false, measuring: false, measureStart: 0, sumSquares: 0, sampleCount: 0,
         // Tick interval — only alive during the measurement window
         // (5.5s after a track change), otherwise null. Constant-rate
@@ -1906,25 +1934,131 @@
         tickIntervalId: null,
 
         init() {
-            if (this.ctx) return;
             const v = videoEl();
             if (!v) return;
+            if (this.ctx && this.boundEl === v) return;
+            // YT swapped its <video> element: the old graph is bound to a
+            // dead element. Rebuild on the live one.
+            if (this.ctx && this.boundEl !== v) {
+                try { this.ctx.close(); } catch (_) {}
+                this.ctx = null;
+            }
+            const src = v.currentSrc || v.src || "";
+            if (src && !src.startsWith("blob:") && !src.startsWith(location.origin)) {
+                postEvent({ event: "diagnostic", msg: "audio graph skipped: cross-origin media source" });
+                return;
+            }
             try {
                 const AC = window.AudioContext || window.webkitAudioContext;
-                this.ctx = new AC();
-                this.sourceNode = this.ctx.createMediaElementSource(v);
-                this.gainNode = this.ctx.createGain();
+                const ctx = new AC();
+                this.ctx = ctx;
+                this.sourceNode = ctx.createMediaElementSource(v);
+                this.preampNode = ctx.createGain();
+                this.eqFilters = EQ_FREQS.map((f, i) => {
+                    const b = ctx.createBiquadFilter();
+                    b.type = i === 0 ? "lowshelf" : (i === EQ_FREQS.length - 1 ? "highshelf" : "peaking");
+                    b.frequency.value = f;
+                    b.Q.value = 1.1;
+                    b.gain.value = 0;
+                    return b;
+                });
+                this.gainNode = ctx.createGain();
                 this.gainNode.gain.value = 1.0;
-                this.analyser = this.ctx.createAnalyser();
+                this.analyser = ctx.createAnalyser();
                 this.analyser.fftSize = 2048;
                 this.timeData = new Uint8Array(this.analyser.fftSize);
-                this.sourceNode.connect(this.analyser);
+                let node = this.sourceNode;
+                node.connect(this.preampNode); node = this.preampNode;
+                for (const f of this.eqFilters) { node.connect(f); node = f; }
+                node.connect(this.analyser);
                 this.analyser.connect(this.gainNode);
-                this.gainNode.connect(this.ctx.destination);
+                this.gainNode.connect(ctx.destination);
+                this.boundEl = v;
+                v.addEventListener("play", () => {
+                    if (norm.ctx && norm.ctx.state === "suspended") norm.ctx.resume().catch(() => {});
+                });
+                if (ctx.state === "suspended") ctx.resume().catch(() => {});
+                this.applyEQ();
+                this.startWatchdog();
             } catch (e) {
                 postEvent({ event: "diagnostic", msg: "norm init failed: " + (e && e.message ? e.message : e) });
                 this.ctx = null;
             }
+        },
+
+        // gains: 10 numbers in dB (±12), or null for flat. Flat with no
+        // graph yet builds nothing — the EQ costs nothing until used.
+        setEQ(gains) {
+            const ok = Array.isArray(gains) && gains.length === EQ_FREQS.length
+                && gains.every((g) => typeof g === "number" && isFinite(g));
+            this.eqGains = ok && gains.some((g) => g !== 0) ? gains.slice() : null;
+            if (!this.eqGains && !this.ctx) return;
+            this.init();
+            this.applyEQ();
+        },
+
+        applyEQ() {
+            if (!this.ctx || !this.eqFilters.length) return;
+            const g = this.eqGains || EQ_FREQS.map(() => 0);
+            const t = this.ctx.currentTime;
+            let maxBoost = 0;
+            this.eqFilters.forEach((f, i) => {
+                const db = Math.max(-12, Math.min(12, g[i]));
+                if (db > maxBoost) maxBoost = db;
+                f.gain.setTargetAtTime(db, t, 0.03);
+            });
+            if (this.preampNode) this.preampNode.gain.setTargetAtTime(Math.pow(10, -maxBoost / 20), t, 0.03);
+            if (this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
+        },
+
+        // Silence watchdog — runs for the first ~20 s after the graph is
+        // built. 8 consecutive seconds of EXACT digital zero out of the
+        // graph while the element is audibly playing (and advancing)
+        // means the graph is starving the user of sound.
+        startWatchdog() {
+            if (this.watchdogId !== null) return;
+            const v = this.boundEl;
+            const fdata = new Float32Array(2048);
+            let zeroRun = 0, ticks = 0, lastT = v ? v.currentTime : 0;
+            this.watchdogId = setInterval(() => {
+                ticks += 1;
+                const el = norm.boundEl;
+                if (!el || !norm.analyser || ticks > 20) { norm.stopWatchdog(); return; }
+                const audible = !el.paused && !el.muted && el.volume > 0.01 && el.currentTime > lastT;
+                lastT = el.currentTime;
+                if (!audible) { zeroRun = 0; return; }
+                if (norm.ctx && norm.ctx.state === "suspended") { norm.ctx.resume().catch(() => {}); }
+                let peak = 0;
+                if (typeof norm.analyser.getFloatTimeDomainData === "function") {
+                    norm.analyser.getFloatTimeDomainData(fdata);
+                    for (let i = 0; i < fdata.length; i++) { const a = Math.abs(fdata[i]); if (a > peak) peak = a; }
+                } else {
+                    norm.analyser.getByteTimeDomainData(norm.timeData);
+                    for (let i = 0; i < norm.timeData.length; i++) { const a = Math.abs(norm.timeData[i] - 128); if (a > peak) peak = a; }
+                }
+                zeroRun = peak === 0 ? zeroRun + 1 : 0;
+                if (zeroRun >= 8) {
+                    norm.stopWatchdog();
+                    norm.recoverFromSilentGraph(norm.ctx ? norm.ctx.state : "none");
+                }
+            }, 1000);
+        },
+
+        stopWatchdog() {
+            if (this.watchdogId !== null) { clearInterval(this.watchdogId); this.watchdogId = null; }
+        },
+
+        recoverFromSilentGraph(state) {
+            postEvent({ event: "audioGraphFailed", reason: "silent graph (ctx " + state + ")" });
+            // Once per page session: never loop on reloads.
+            let already = false;
+            try { already = sessionStorage.getItem("riffGraphRecovered") === "1"; } catch (_) {}
+            if (already) return;
+            try { sessionStorage.setItem("riffGraphRecovered", "1"); } catch (_) {}
+            // Swift has turned effects off (handling the event above), so
+            // the reloaded page plays un-routed. QUEUE-DESIGN.md, contract
+            // item 10 — the only reload that isn't a context start.
+            setTimeout(() => { location.reload(); }, 400);
         },
 
         setEnabled(on) {

@@ -125,8 +125,9 @@ sn=$(swift_code_count "$HARD_NAV_RE")
 [ "$sn" -eq 0 ] || say "Swift evaluates a raw page load (location.href= / assign / replace / reload) on $sn line(s) — route it through PlayerBridge.navigate(_:)"
 
 # 4c. The JS side's own hard navigations, invisible to the Swift counts:
-#       musicBridge.navigate() · the .ended pending-URL advance
-EXPECTED_JS_NAV=2
+#       musicBridge.navigate() · the .ended pending-URL advance ·
+#       the silent-audio-graph recovery reload (QUEUE-DESIGN.md item 15)
+EXPECTED_JS_NAV=3
 jn=$(code_count "$HARD_NAV_RE" "$JS")
 [ "$jn" -eq "$EXPECTED_JS_NAV" ] || say "player-bridge.js has $jn hard page loads (location.href= / assign / replace / reload; expected $EXPECTED_JS_NAV) — a reload path was added/removed; review against the single-authority contract"
 

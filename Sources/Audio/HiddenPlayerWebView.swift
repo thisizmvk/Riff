@@ -50,6 +50,10 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         /// The audio format the page's player is actually streaming, read
         /// from its own stats / player response (never extracted).
         case audioFormat(AudioFormat)
+        /// Riff's Web Audio effects graph went silent while the element
+        /// was audibly playing; the page reloads once after posting this
+        /// (QUEUE-DESIGN.md item 15). Swift must turn effects off.
+        case audioGraphFailed(reason: String)
     }
 
     /// What the page is streaming right now, plus the best audio format
@@ -375,6 +379,8 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
                 ok: (body["ok"] as? Bool) ?? false,
                 via: (body["via"] as? String) ?? ""
             )
+        case "audioGraphFailed":
+            return .audioGraphFailed(reason: (body["reason"] as? String) ?? "")
         case "audioFormat":
             func int(_ k: String) -> Int? { (body[k] as? NSNumber)?.intValue }
             func str(_ k: String) -> String? { (body[k] as? String).flatMap { $0.isEmpty ? nil : $0 } }

@@ -399,6 +399,29 @@ struct SettingsView: View {
             }
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
+                    Text("Equalizer")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                    Text(env.player.eqEnabled
+                         ? "On — \(Equalizer.matchingPreset(env.player.eqGains)?.name ?? "Custom"). Ten bands with presets; applies live."
+                         : "Off. Ten bands with presets (Bass Boost, Vocal, Late Night…); applies live.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.Text.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 16)
+                Button("Open…") {
+                    // Settings is itself a sheet on RootView, and SwiftUI
+                    // won't stack a second sheet there — close Settings,
+                    // then present the equalizer once it has gone.
+                    env.isSettingsSheetPresented = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        env.isEqualizerSheetPresented = true
+                    }
+                }
+            }
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
                     Text("Autoplay")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(.white)

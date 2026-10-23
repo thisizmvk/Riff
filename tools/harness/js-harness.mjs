@@ -1156,5 +1156,103 @@ let firstPageInfoGeneration = null;
   check(!posted.some((x) => x.event === "audioFormat"), "no player → no audioFormat event");
 }
 
+// ---- Equalizer graph + silence watchdog -----------------------------------
+{
+  const made = { ctx: 0, sources: 0 };
+  const edges = [];
+  let floatSample = 0.2;     // what the fake analyser reports
+  const param = (v) => ({ value: v, setTargetAtTime(x) { this.value = x; } });
+  const node = (kind, extra = {}) => Object.assign({ kind, connect(n) { edges.push([this, n]); return n; } }, extra);
+  class FakeCtx {
+    constructor() { made.ctx++; this.state = "running"; this.currentTime = 0; this.destination = node("dest"); }
+    createMediaElementSource(el) { made.sources++; return node("source", { mediaElement: el }); }
+    createGain() { return node("gain", { gain: param(1) }); }
+    createBiquadFilter() { return node("biquad", { type: "", frequency: param(0), Q: param(1), gain: param(0) }); }
+    createAnalyser() {
+      return node("analyser", {
+        fftSize: 2048,
+        getFloatTimeDomainData(a) { a.fill(floatSample); },
+        getByteTimeDomainData(a) { a.fill(128); },
+      });
+    }
+    resume() { this.state = "running"; return Promise.resolve(); }
+    close() { this.state = "closed"; }
+  }
+  global.AudioContext = FakeCtx; window.AudioContext = FakeCtx;
+  let reloads = 0;
+  location.reload = () => { reloads++; };
+  const store = new Map();
+  global.sessionStorage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v) };
+  const listeners = [];
+  const video = { currentSrc: "blob:https://music.youtube.com/x", paused: false, muted: false, volume: 1, currentTime: 10,
+                  videoHeight: 0, addEventListener: (t, f) => listeners.push([t, f]) };
+  elements.clear();
+  elements.set("video", video);
+
+  // Flat / null before any graph: builds nothing.
+  window.musicBridge.setEQ(null);
+  window.musicBridge.setEQ([0,0,0,0,0,0,0,0,0,0]);
+  check(made.ctx === 0, "flat EQ with no graph builds nothing");
+
+  // A real curve builds the graph once, in order.
+  window.musicBridge.setEQ([6,5,4,2,0,0,0,0,0,-3]);
+  check(made.ctx === 1 && made.sources === 1, "EQ builds exactly one graph");
+  const n = window.__riffNorm;
+  check(n.eqFilters.length === 10, "ten EQ filters");
+  check(n.eqFilters[0].type === "lowshelf" && n.eqFilters[9].type === "highshelf" && n.eqFilters[4].type === "peaking", "shelf / peaking filter types");
+  check(n.eqFilters[0].gain.value === 6 && n.eqFilters[9].gain.value === -3, "band gains applied");
+  check(Math.abs(n.preampNode.gain.value - Math.pow(10, -6 / 20)) < 1e-9, "preamp pulls down by the largest boost");
+  const kinds = edges.map(([a]) => a.kind);
+  check(kinds[0] === "source" && edges[0][1].kind === "gain", "chain starts source → preamp");
+  check(edges.some(([a, b]) => a.kind === "gain" && b.kind === "dest"), "chain ends at the destination");
+  check(listeners.some(([t]) => t === "play"), "context resume armed on play");
+
+  // Same element again: no rebuild. Swapped element: rebuild.
+  window.musicBridge.setEQ([1,0,0,0,0,0,0,0,0,0]);
+  check(made.ctx === 1, "same element does not rebuild the graph");
+  const video2 = Object.assign({}, video, { addEventListener: () => {} });
+  elements.set("video", video2);
+  n.init();
+  check(made.ctx === 2 && n.boundEl === video2, "a swapped <video> rebinds the graph");
+
+  // Watchdog: audible audio → no recovery.
+  const watch = () => [...intervals.entries()].find(([, v]) => v.ms === 1000);
+  let w = watch();
+  check(!!w, "silence watchdog started");
+  for (let i = 0; i < 9; i++) { video2.currentTime += 1; w[1].fn(); }
+  check(reloads === 0, "audible graph never triggers recovery");
+
+  // Silent graph while audibly playing → one event, one reload.
+  n.stopWatchdog(); n.startWatchdog();
+  w = watch();
+  floatSample = 0;
+  posted.length = 0;
+  for (let i = 0; i < 9; i++) { video2.currentTime += 1; w[1].fn(); }
+  check(posted.some((x) => x.event === "audioGraphFailed"), "silent graph posts audioGraphFailed");
+  // The harness runs sub-500 ms timers immediately, so the deferred
+  // reload has already fired once.
+  check(store.get("riffGraphRecovered") === "1", "recovery marks the session");
+  check(reloads === 1, "first silent-graph detection reloads exactly once");
+  n.recoverFromSilentGraph("running");
+  check(reloads === 1, "a second recovery in the same session never reloads again");
+
+  // Paused / muted silence is not a failure.
+  store.clear(); n.stopWatchdog(); n.startWatchdog(); w = watch(); posted.length = 0;
+  video2.paused = true;
+  for (let i = 0; i < 9; i++) w[1].fn();
+  check(!posted.some((x) => x.event === "audioGraphFailed"), "paused silence is not a failure");
+  video2.paused = false;
+
+  // Cross-origin, non-MSE source is never routed.
+  const made0 = made.ctx;
+  n.ctx = null; n.boundEl = null;
+  elements.set("video", Object.assign({}, video, { currentSrc: "https://rr1.googlevideo.com/videoplayback?x=1", addEventListener: () => {} }));
+  posted.length = 0;
+  n.init();
+  check(made.ctx === made0 && n.ctx === null, "cross-origin media is never routed into Web Audio");
+  check(posted.some((x) => x.event === "diagnostic" && x.msg.includes("cross-origin")), "the refusal is journaled");
+  n.stopWatchdog();
+}
+
 console.log(`\nJS RESULT: ${passes} passed, ${failures} failed`);
 process.exit(failures === 0 ? 1 - 1 : 1);

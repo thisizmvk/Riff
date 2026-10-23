@@ -979,6 +979,25 @@ do {
     check(legacyOK, "entries without listen depth decode as neutral listens")
 }
 
+// ── 21. Equalizer — bands, presets, JS payload ──────────────────────
+do {
+    check(Equalizer.frequencies.count == 10, "ten bands")
+    check(Equalizer.presets.allSatisfy { $0.gains.count == 10 }, "every preset has ten gains")
+    check(Equalizer.presets.allSatisfy { $0.gains.allSatisfy { Equalizer.range.contains($0) } }, "presets stay within ±12 dB")
+    check(Set(Equalizer.presets.map(\.name)).count == Equalizer.presets.count, "preset names are unique")
+
+    check(Equalizer.normalized([20, -30, 1.3, .nan]) == [12, -12, 1.5, 0, 0, 0, 0, 0, 0, 0],
+          "normalize clamps, snaps to 0.5 dB, pads to ten, and zeroes NaN")
+    check(Equalizer.matchingPreset([6, 5, 4, 2, 0, 0, 0, 0, 0, 0])?.name == "Bass Boost", "exact gains match their preset")
+    check(Equalizer.matchingPreset([6, 5, 4, 2, 0, 0, 0, 0, 0, 0.5]) == nil, "an edited preset reads as Custom")
+
+    check(Equalizer.jsArgument(enabled: false, gains: [6, 5, 4, 2, 0, 0, 0, 0, 0, 0]) == "null", "off sends null")
+    check(Equalizer.jsArgument(enabled: true, gains: Equalizer.flat.gains) == "null", "flat sends null (no graph built)")
+    check(Equalizer.jsArgument(enabled: true, gains: [6, 0, 0, 0, 0, 0, 0, 0, 0, -1.5])
+          == "[6.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,-1.5]", "on sends a ten-number array")
+    check(Equalizer.label(for: 32) == "32" && Equalizer.label(for: 16000) == "16K", "axis labels")
+}
+
 print("KNOWN BUGS (strict xfail, not counted as failures): \(knownBugs)")
 
 print("")

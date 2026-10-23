@@ -251,7 +251,9 @@ final class ScrobblerTests: XCTestCase {
         )
         // Paused observation: no now-playing.
         coord.observe(track: track, videoId: "v1", elapsed: 1, duration: 200, isPlaying: false)
-        await Task.yield()
+        // settle, not a single yield: a yield returns before a stray Task
+        // could land, so this assertion would pass even if the bug existed.
+        await settle()
         XCTAssertEqual(stub.nowPlayingCalls.count, 0)
     }
 
@@ -298,9 +300,9 @@ final class ScrobblerTests: XCTestCase {
             coord.observe(track: track, videoId: "v1", elapsed: Double(i) * 2, duration: 200,
                           isPlaying: true, now: t0.addingTimeInterval(Double(i) * 2))
         }
-        await Task.yield(); await Task.yield()
-        XCTAssertEqual(ready.nowPlayingCalls.count, 1)
-        XCTAssertEqual(ready.scrobbleCalls.count, 1)
+        let ok9 = await eventually { ready.nowPlayingCalls.count == 1 && ready.scrobbleCalls.count == 1 }
+        XCTAssertTrue(ok9, "the ready service gets now-playing + scrobble")
+        await settle()
         XCTAssertEqual(notReady.nowPlayingCalls.count, 0)
         XCTAssertEqual(notReady.scrobbleCalls.count, 0)
     }
