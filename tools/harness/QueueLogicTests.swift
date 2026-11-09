@@ -998,6 +998,70 @@ do {
     check(Equalizer.label(for: 32) == "32" && Equalizer.label(for: 16000) == "16K", "axis labels")
 }
 
+// ── 22. Listening extras — LRC lyrics + SponsorBlock skips ──────────
+do {
+    // LRC parsing.
+    let lrc = """
+    [ar:Hozier]
+    [00:07.65] A husband waits outside
+    [00:13.16]A crying child
+    [00:20.00][01:30.5] chorus line
+    [00:25.00]
+    untimed line
+    [99:99.99] garbage
+    """
+    let lines = LRC.parse(lrc)
+    check(lines.count == 5, "LRC: metadata, untimed and invalid lines dropped; multi-stamp expands (got \(lines.count))")
+    check(lines.first == LRC.Line(startMs: 7650, text: "A husband waits outside"), "LRC: first line timed to the ms")
+    check(lines.map(\.startMs) == lines.map(\.startMs).sorted(), "LRC: sorted by time")
+    check(lines.contains(LRC.Line(startMs: 90500, text: "chorus line")), "LRC: second timestamp on a line")
+    check(lines.contains(LRC.Line(startMs: 25000, text: "♪")), "LRC: empty lyric line becomes ♪")
+    check(LRC.parse("no timestamps here\njust text").isEmpty, "LRC: plain text yields nothing")
+
+    check(LRC.searchTitle("Aaya Sher (From \"The Paradise\") (Telugu)") == "Aaya Sher", "title cleanup strips parentheticals")
+    check(LRC.searchTitle("Song [Official Video]") == "Song", "title cleanup strips brackets")
+    check(LRC.searchTitle("(Interlude)") == "(Interlude)", "title made only of a parenthetical is kept")
+
+    // Duration-gated matching.
+    let c1 = LRC.Candidate(duration: 184, synced: "[00:01.00]x", instrumental: false)
+    let c2 = LRC.Candidate(duration: 222, synced: "[00:01.00]y", instrumental: false)
+    let c3 = LRC.Candidate(duration: 223, synced: nil, instrumental: false)
+    let c4 = LRC.Candidate(duration: 223, synced: "", instrumental: true)
+    check(LRC.bestMatch([c1, c2, c3, c4], duration: 223) == c2, "closest synced hit within ±3 s wins")
+    check(LRC.bestMatch([c1], duration: 223) == nil, "a different cut (39 s off) is rejected")
+    check(LRC.bestMatch([c3, c1], duration: nil) == c1, "unknown duration takes the first synced hit")
+    check(LRC.bestMatch([c4], duration: 223) == nil, "instrumental entries never match")
+
+    // SponsorBlock.
+    check(SponsorBlock.hashPrefix(videoId: "dQw4w9WgXcQ") == "5f6b", "hash prefix matches the live API bucket")
+    let bucket = """
+    [{"videoID":"other","segments":[{"category":"music_offtopic","actionType":"skip","segment":[0,30],"UUID":"x"}]},
+     {"videoID":"vid1","segments":[
+        {"category":"music_offtopic","actionType":"skip","segment":[180,200],"UUID":"outro","videoDuration":200},
+        {"category":"music_offtopic","actionType":"skip","segment":[0,21.3],"UUID":"intro","videoDuration":200},
+        {"category":"music_offtopic","actionType":"skip","segment":[50,51],"UUID":"sliver"},
+        {"category":"sponsor","actionType":"skip","segment":[60,90],"UUID":"sponsor"},
+        {"category":"music_offtopic","actionType":"mute","segment":[100,120],"UUID":"mute"}]}]
+    """
+    let segs = SponsorBlock.parse(Data(bucket.utf8), videoId: "vid1")
+    check(segs.map(\.uuid) == ["intro", "outro"], "only this video's skip-type music_offtopic segments ≥ 2 s, sorted (got \(segs.map(\.uuid)))")
+    check(SponsorBlock.parse(Data("not json".utf8), videoId: "vid1").isEmpty, "malformed response → no segments")
+
+    func skip(_ t: Double, playing: Double = 200, expected: Double? = 200, done: Set<String> = []) -> String? {
+        SponsorBlock.segmentToSkip(at: t, playingDuration: playing, expectedDuration: expected,
+                                   in: segs, alreadySkipped: done)?.uuid
+    }
+    check(skip(0.4) == "intro", "inside the intro → skip it")
+    check(skip(21.0) == nil, "in the last half-second of a segment → leave it")
+    check(skip(5, done: ["intro"]) == nil, "an already-skipped section can be replayed by seeking back")
+    check(skip(5, playing: 30, expected: nil) == nil, "a 30 s ad playing under the song id is never skipped inside")
+    check(skip(5, playing: 201, expected: nil) == "intro", "segment's own videoDuration validates when the track's is unknown")
+    check(skip(100) == nil, "between segments → nothing")
+    let outro = segs[1]
+    check(abs(SponsorBlock.landingTime(for: outro, playingDuration: 200) - 199.7) < 1e-9, "outro skip lands just before the end")
+    check(SponsorBlock.landingTime(for: segs[0], playingDuration: 200) == 21.3, "intro skip lands at the segment end")
+}
+
 print("KNOWN BUGS (strict xfail, not counted as failures): \(knownBugs)")
 
 print("")

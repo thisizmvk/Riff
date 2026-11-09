@@ -1066,6 +1066,7 @@ final class PlayerBridge {
                 }
                 self.lyricsBrowseId = response.lyricsBrowseId
                 self.relatedBrowseId = response.relatedBrowseId
+                self.markNextResolved(for: id)
                 // Scope the like flag to the track it was fetched FOR:
                 // this completion can land after playback advanced past
                 // `id`, and the heart binds to the shared flag — a
@@ -1093,6 +1094,7 @@ final class PlayerBridge {
                 self.lyricsTimed = false
                 self.lyricsLoading = false
                 self.lyricsUnavailable = false
+                self.lyricsSource = .youtube
                 self.related = []
                 self.relatedSections = []
                 // The injected-ids set is per-watch-context: a fresh
@@ -1129,6 +1131,7 @@ final class PlayerBridge {
         lyricsTimed = false
         lyricsLoading = false
         lyricsUnavailable = false
+        lyricsSource = .youtube
         related = []
         relatedSections = []
         lyricsBrowseId = nil
@@ -1167,6 +1170,7 @@ final class PlayerBridge {
                 self.onLikeChanged?(id, self.liked)
                 self.lyricsBrowseId = response.lyricsBrowseId
                 self.relatedBrowseId = response.relatedBrowseId
+                self.markNextResolved(for: id)
             }
         }
     }
@@ -1273,35 +1277,64 @@ final class PlayerBridge {
     /// Populates either `lyricsLines` (with `lyricsTimed=true`) for synced
     /// lyrics or just the plain `lyrics` text fallback.
     func loadLyricsIfNeeded() {
+        let videoId = currentTrack?.videoId
+        lyricsWantedForVideoId = videoId
         // `lyricsUnavailable` is terminal for this track (a completed
         // round-trip said there are none) — without it in the guard, a
         // lyric-less track would refetch on every tab open. A
         // transient failure leaves it false, so reopening retries.
-        guard lyrics == nil, lyricsLines.isEmpty, !lyricsLoading, !lyricsUnavailable,
-              let id = lyricsBrowseId else { return }
+        guard lyrics == nil, lyricsLines.isEmpty, !lyricsLoading, !lyricsUnavailable else { return }
+        let browseId = lyricsBrowseId
+        // No YouTube lyrics tab: only LRCLIB can help, and only once this
+        // track's /next has actually answered (before that, a nil browse
+        // id just means "not known yet"). markNextResolved re-runs us.
+        let nextAnswered = videoId != nil && nextResolvedForVideoId == videoId
+        guard browseId != nil || (lrclibEnabled && nextAnswered) else { return }
+
+        // LRCLIB query inputs, captured now (the track can change while
+        // the fetch is in flight; the identity checks below catch that).
+        let track = currentTrack
+        let lrcTitle = track?.title ?? ""
+        let lrcArtist = track.flatMap { PersonalizedShelves.extractArtistName(fromSubtitle: $0.subtitle) } ?? ""
+        let lrcDuration: Double? = duration > 0 ? duration : ((track?.duration ?? 0) > 0 ? track?.duration : nil)
+        let useLRCLib = lrclibEnabled && !lrcTitle.isEmpty && !lrcArtist.isEmpty
+
         lyricsLoading = true
         lyricsTask?.cancel()
         lyricsTask = Task { [innerTube, weak self] in
             do {
-                let result = try await innerTube.lyrics(browseId: id)
+                var result: InnerTubeClient.LyricsResult? = nil
+                if let browseId {
+                    result = try await innerTube.lyrics(browseId: browseId)
+                }
+                // Fallback: YouTube has nothing synced → try LRCLIB.
+                var source: LyricsSource = .youtube
+                if useLRCLib, result?.timed != true,
+                   let lrc = await ListeningExtrasClient.syncedLyrics(title: lrcTitle, artist: lrcArtist,
+                                                                      duration: lrcDuration) {
+                    result = InnerTubeClient.LyricsResult(
+                        lines: lrc.enumerated().map { InnerTubeClient.LyricLine(id: $0.offset, text: $0.element.text,
+                                                                                startMs: $0.element.startMs) },
+                        timed: true)
+                    source = .lrclib
+                }
                 if Task.isCancelled { return }
                 await MainActor.run {
                     guard let self else { return }
-                    // Identity check on the BROWSE id, not the videoId:
-                    // currentTrack flips to the new track before its
-                    // /next lands, but the browse id only changes when
-                    // the new metadata does — so this is the id the
-                    // fetch belongs to. A stale completion returns
-                    // WITHOUT touching `lyricsLoading`: if the new
-                    // track's own fetch is already in flight, clearing
-                    // the flag here would allow a duplicate request.
-                    guard self.lyricsBrowseId == id else { return }
+                    // Identity: the BROWSE id (it only changes when the
+                    // new track's metadata does) AND the video id (the
+                    // LRCLIB-only path has no browse id). A stale
+                    // completion returns WITHOUT touching
+                    // `lyricsLoading` — the new track's own fetch may
+                    // already be in flight.
+                    guard self.lyricsBrowseId == browseId, self.currentTrack?.videoId == videoId else { return }
                     if let result {
                         self.lyricsLines = result.lines
                         self.lyricsTimed = result.timed
                         self.lyrics = result.lines.map(\.text).joined(separator: "\n")
+                        self.lyricsSource = source
                     } else {
-                        // Completed round-trip, YT has no lyrics:
+                        // Completed round-trip(s), no lyrics anywhere:
                         // terminal for this track. The UI shows its own
                         // empty state — never store the copy in
                         // `lyrics`, where it read as real lyric text to
@@ -1314,13 +1347,23 @@ final class PlayerBridge {
                 if Task.isCancelled { return }
                 await MainActor.run {
                     guard let self else { return }
-                    guard self.lyricsBrowseId == id else { return }
+                    guard self.lyricsBrowseId == browseId, self.currentTrack?.videoId == videoId else { return }
                     // Transient failure (offline blip): leave `lyrics`
                     // nil and `lyricsUnavailable` false so reopening
                     // the tab retries.
                     self.lyricsLoading = false
                 }
             }
+        }
+    }
+
+    /// /next has answered for `videoId`: if the lyrics view already asked
+    /// for this track's lyrics (and was waiting on whether YouTube has a
+    /// lyrics tab), ask again now that it's known.
+    private func markNextResolved(for videoId: String) {
+        nextResolvedForVideoId = videoId
+        if lyricsWantedForVideoId == videoId, currentTrack?.videoId == videoId {
+            loadLyricsIfNeeded()
         }
     }
 
@@ -2382,6 +2425,63 @@ final class PlayerBridge {
     /// Plain-language notices for the UI (toast). Set by AppEnvironment.
     var onNotice: ((String) -> Void)? = nil
 
+    // MARK: Listening extras (opt-in, third-party)
+
+    /// Synced lyrics from LRCLIB when YouTube has none, or only unsynced
+    /// text. Off by default — it sends the track title/artist to lrclib.net.
+    private(set) var lrclibEnabled: Bool = UserDefaults.standard.bool(forKey: "lyrics.lrclibFallback")
+    func setLRCLibEnabled(_ on: Bool) {
+        lrclibEnabled = on
+        UserDefaults.standard.set(on, forKey: "lyrics.lrclibFallback")
+    }
+
+    /// Skip community-marked non-music sections of music videos
+    /// (SponsorBlock `music_offtopic`). Off by default; lookups use the
+    /// hash-prefix API so the server never learns the exact video.
+    private(set) var skipNonMusicEnabled: Bool = UserDefaults.standard.bool(forKey: "playback.skipNonMusic")
+    func setSkipNonMusicEnabled(_ on: Bool) {
+        skipNonMusicEnabled = on
+        UserDefaults.standard.set(on, forKey: "playback.skipNonMusic")
+        if on, let vid = currentTrack?.videoId { fetchNonMusicSegments(for: vid) }
+        if !on { nonMusicSegments = nil }
+    }
+
+    enum LyricsSource: Sendable { case youtube, lrclib }
+    /// Where the current lyrics came from — the UI credits LRCLIB.
+    private(set) var lyricsSource: LyricsSource = .youtube
+    @ObservationIgnored private var lyricsWantedForVideoId: String?
+    @ObservationIgnored private var nextResolvedForVideoId: String?
+    @ObservationIgnored private var nonMusicSegments: (videoId: String, segments: [SponsorBlock.Segment])?
+    @ObservationIgnored private var skippedSegmentIds: Set<String> = []
+
+    private func fetchNonMusicSegments(for videoId: String) {
+        guard skipNonMusicEnabled else { return }
+        nonMusicSegments = nil
+        skippedSegmentIds = []
+        Task { [weak self] in
+            let segs = await ListeningExtrasClient.nonMusicSegments(videoId: videoId)
+            await MainActor.run {
+                guard let self, self.currentTrack?.videoId == videoId else { return }
+                self.nonMusicSegments = (videoId, segs)
+            }
+        }
+    }
+
+    /// Called from the progress handler: skip a marked non-music section.
+    private func checkNonMusicSkip() {
+        guard skipNonMusicEnabled, let cur = currentTrack,
+              let entry = nonMusicSegments, entry.videoId == cur.videoId, !entry.segments.isEmpty,
+              let seg = SponsorBlock.segmentToSkip(at: elapsed, playingDuration: duration,
+                                                   expectedDuration: cur.duration > 0 ? cur.duration : nil,
+                                                   in: entry.segments, alreadySkipped: skippedSegmentIds),
+              duration > 0 else { return }
+        skippedSegmentIds.insert(seg.uuid)
+        let target = SponsorBlock.landingTime(for: seg, playingDuration: duration)
+        let skippedSeconds = Int((target - elapsed).rounded())
+        Task { await self.seek(to: target / self.duration) }
+        onNotice?("Skipped \(skippedSeconds)s of non-music")
+    }
+
     /// The audio format the page is streaming for the current track (nil
     /// until the page reports it, a few seconds into each track).
     private(set) var audioFormat: HiddenPlayerWebView.AudioFormat? = nil
@@ -2848,6 +2948,7 @@ final class PlayerBridge {
             if let vid = currentTrack?.videoId {
                 lastPosition = (vid, elapsed, duration)
             }
+            if !inGrace { checkNonMusicSkip() }
             if let vid = currentTrack?.videoId {
                 // Session-resume seek (armed by togglePlay). Checked
                 // INDEPENDENTLY of `durationWasUnknown`: on the resume
@@ -2904,7 +3005,10 @@ final class PlayerBridge {
             let sameVideoId = currentTrack?.videoId == id
             // A new track's format is unknown until the page reports it;
             // never show the previous track's quality on this one.
-            if !sameVideoId { audioFormat = nil }
+            if !sameVideoId {
+                audioFormat = nil
+                fetchNonMusicSegments(for: id)
+            }
             let titleChanged = currentTrack?.title != title
             let withinClickGrace = Date().timeIntervalSince(userClickedAt) < Self.userClickGraceSeconds
 

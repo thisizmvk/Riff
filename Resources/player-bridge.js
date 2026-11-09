@@ -1933,56 +1933,88 @@
         // of measurement.
         tickIntervalId: null,
 
+        // The <video> actually playing. YT Music keeps more than one
+        // element and can play the next track in a different one, so
+        // "first <video> in the DOM" is not good enough.
+        activeVideo() {
+            const all = Array.from(document.querySelectorAll("video") || []);
+            return all.find((v) => !v.paused && (v.currentSrc || v.src))
+                || all.find((v) => v.currentSrc || v.src)
+                || all[0] || videoEl();
+        },
+
+        // ONE shared chain (preamp → EQ → analyser → gain → out), built
+        // once per page. Each <video> is attached to it at most once and
+        // stays attached: a media element can only ever be routed into
+        // Web Audio once, so the old "close the context and rebuild on
+        // the new element" approach both missed the element YT switched
+        // to (EQ silently stopped on the next track — field report
+        // 2026-11-09) and would have silenced an element YT switched
+        // BACK to.
         init() {
-            const v = videoEl();
+            const v = this.activeVideo();
             if (!v) return;
-            if (this.ctx && this.boundEl === v) return;
-            // YT swapped its <video> element: the old graph is bound to a
-            // dead element. Rebuild on the live one.
-            if (this.ctx && this.boundEl !== v) {
-                try { this.ctx.close(); } catch (_) {}
-                this.ctx = null;
+            if (!this.ctx) {
+                try {
+                    const AC = window.AudioContext || window.webkitAudioContext;
+                    const ctx = new AC();
+                    this.ctx = ctx;
+                    this.sources = new WeakMap();
+                    this.preampNode = ctx.createGain();
+                    this.eqFilters = EQ_FREQS.map((f, i) => {
+                        const bq = ctx.createBiquadFilter();
+                        bq.type = i === 0 ? "lowshelf" : (i === EQ_FREQS.length - 1 ? "highshelf" : "peaking");
+                        bq.frequency.value = f;
+                        bq.Q.value = 1.1;
+                        bq.gain.value = 0;
+                        return bq;
+                    });
+                    this.gainNode = ctx.createGain();
+                    this.gainNode.gain.value = 1.0;
+                    this.analyser = ctx.createAnalyser();
+                    this.analyser.fftSize = 2048;
+                    this.timeData = new Uint8Array(this.analyser.fftSize);
+                    let node = this.preampNode;
+                    for (const f of this.eqFilters) { node.connect(f); node = f; }
+                    node.connect(this.analyser);
+                    this.analyser.connect(this.gainNode);
+                    this.gainNode.connect(ctx.destination);
+                    // Follow whichever <video> starts playing (capture:
+                    // media events don't bubble).
+                    document.addEventListener("play", (e) => {
+                        const t = e && e.target;
+                        if (t && t.tagName === "VIDEO") norm.attach(t);
+                    }, true);
+                } catch (e) {
+                    postEvent({ event: "diagnostic", msg: "norm init failed: " + (e && e.message ? e.message : e) });
+                    this.ctx = null;
+                    return;
+                }
             }
+            this.attach(v);
+            this.applyEQ();
+        },
+
+        // Route one element into the shared chain (idempotent).
+        attach(v) {
+            if (!this.ctx || !v) return;
+            if (this.ctx.state === "suspended") this.ctx.resume().catch(() => {});
+            if (this.sources.has(v)) { this.boundEl = v; return; }
             const src = v.currentSrc || v.src || "";
             if (src && !src.startsWith("blob:") && !src.startsWith(location.origin)) {
                 postEvent({ event: "diagnostic", msg: "audio graph skipped: cross-origin media source" });
                 return;
             }
             try {
-                const AC = window.AudioContext || window.webkitAudioContext;
-                const ctx = new AC();
-                this.ctx = ctx;
-                this.sourceNode = ctx.createMediaElementSource(v);
-                this.preampNode = ctx.createGain();
-                this.eqFilters = EQ_FREQS.map((f, i) => {
-                    const b = ctx.createBiquadFilter();
-                    b.type = i === 0 ? "lowshelf" : (i === EQ_FREQS.length - 1 ? "highshelf" : "peaking");
-                    b.frequency.value = f;
-                    b.Q.value = 1.1;
-                    b.gain.value = 0;
-                    return b;
-                });
-                this.gainNode = ctx.createGain();
-                this.gainNode.gain.value = 1.0;
-                this.analyser = ctx.createAnalyser();
-                this.analyser.fftSize = 2048;
-                this.timeData = new Uint8Array(this.analyser.fftSize);
-                let node = this.sourceNode;
-                node.connect(this.preampNode); node = this.preampNode;
-                for (const f of this.eqFilters) { node.connect(f); node = f; }
-                node.connect(this.analyser);
-                this.analyser.connect(this.gainNode);
-                this.gainNode.connect(ctx.destination);
+                const node = this.ctx.createMediaElementSource(v);
+                node.connect(this.preampNode);
+                this.sources.set(v, node);
+                this.sourceNode = node;
                 this.boundEl = v;
-                v.addEventListener("play", () => {
-                    if (norm.ctx && norm.ctx.state === "suspended") norm.ctx.resume().catch(() => {});
-                });
-                if (ctx.state === "suspended") ctx.resume().catch(() => {});
-                this.applyEQ();
+                this.stopWatchdog();
                 this.startWatchdog();
             } catch (e) {
-                postEvent({ event: "diagnostic", msg: "norm init failed: " + (e && e.message ? e.message : e) });
-                this.ctx = null;
+                postEvent({ event: "diagnostic", msg: "audio graph attach failed: " + (e && e.message ? e.message : e) });
             }
         },
 

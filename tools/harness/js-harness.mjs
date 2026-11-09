@@ -1184,6 +1184,8 @@ let firstPageInfoGeneration = null;
   const store = new Map();
   global.sessionStorage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, v) };
   const listeners = [];
+  const docListeners = [];
+  document.addEventListener = (t, f, cap) => docListeners.push([t, f, cap]);
   const video = { currentSrc: "blob:https://music.youtube.com/x", paused: false, muted: false, volume: 1, currentTime: 10,
                   videoHeight: 0, addEventListener: (t, f) => listeners.push([t, f]) };
   elements.clear();
@@ -1202,18 +1204,29 @@ let firstPageInfoGeneration = null;
   check(n.eqFilters[0].type === "lowshelf" && n.eqFilters[9].type === "highshelf" && n.eqFilters[4].type === "peaking", "shelf / peaking filter types");
   check(n.eqFilters[0].gain.value === 6 && n.eqFilters[9].gain.value === -3, "band gains applied");
   check(Math.abs(n.preampNode.gain.value - Math.pow(10, -6 / 20)) < 1e-9, "preamp pulls down by the largest boost");
-  const kinds = edges.map(([a]) => a.kind);
-  check(kinds[0] === "source" && edges[0][1].kind === "gain", "chain starts source → preamp");
+  check(edges.some(([a, b]) => a.kind === "source" && b === n.preampNode), "element routed into the preamp");
   check(edges.some(([a, b]) => a.kind === "gain" && b.kind === "dest"), "chain ends at the destination");
-  check(listeners.some(([t]) => t === "play"), "context resume armed on play");
+  check(docListeners.some(([t, , cap]) => t === "play" && cap === true), "capture-phase play listener follows the playing <video>");
 
-  // Same element again: no rebuild. Swapped element: rebuild.
+  // Same element again: nothing new.
   window.musicBridge.setEQ([1,0,0,0,0,0,0,0,0,0]);
-  check(made.ctx === 1, "same element does not rebuild the graph");
+  check(made.ctx === 1 && made.sources === 1, "same element is not re-routed");
+
+  // THE BUG (2026-11-09): YT plays the next track in a second <video>.
+  // It must join the SAME chain (EQ still applies), and switching back
+  // to the first element must not re-route or rebuild anything.
   const video2 = Object.assign({}, video, { addEventListener: () => {} });
-  elements.set("video", video2);
-  n.init();
-  check(made.ctx === 2 && n.boundEl === video2, "a swapped <video> rebinds the graph");
+  video.paused = true;
+  lists.set("video", [video, video2]);
+  docListeners.find(([t]) => t === "play")[1]({ target: Object.assign(video2, { tagName: "VIDEO" }) });
+  check(made.ctx === 1, "a second <video> joins the existing graph (no new context)");
+  check(made.sources === 2 && n.boundEl === video2, "the second element is routed once");
+  check(edges.filter(([a, b]) => a.kind === "source" && b === n.preampNode).length === 2, "both elements feed the one EQ chain");
+  check(n.eqFilters[0].gain.value === 1, "EQ gains survive the element switch");
+  docListeners.find(([t]) => t === "play")[1]({ target: Object.assign(video, { tagName: "VIDEO" }) });
+  check(made.sources === 2 && n.boundEl === video, "switching back reuses the first routing (never re-routes an element)");
+  video.paused = true; video2.paused = false;
+  n.boundEl = video2;   // the watchdog tests below drive video2
 
   // Watchdog: audible audio → no recovery.
   const watch = () => [...intervals.entries()].find(([, v]) => v.ms === 1000);
@@ -1244,12 +1257,11 @@ let firstPageInfoGeneration = null;
   video2.paused = false;
 
   // Cross-origin, non-MSE source is never routed.
-  const made0 = made.ctx;
-  n.ctx = null; n.boundEl = null;
-  elements.set("video", Object.assign({}, video, { currentSrc: "https://rr1.googlevideo.com/videoplayback?x=1", addEventListener: () => {} }));
+  const sources0 = made.sources;
+  const xo = Object.assign({}, video, { currentSrc: "https://rr1.googlevideo.com/videoplayback?x=1", addEventListener: () => {} });
   posted.length = 0;
-  n.init();
-  check(made.ctx === made0 && n.ctx === null, "cross-origin media is never routed into Web Audio");
+  n.attach(xo);
+  check(made.sources === sources0 && !n.sources.has(xo), "cross-origin media is never routed into Web Audio");
   check(posted.some((x) => x.event === "diagnostic" && x.msg.includes("cross-origin")), "the refusal is journaled");
   n.stopWatchdog();
 }

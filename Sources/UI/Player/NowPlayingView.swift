@@ -1441,6 +1441,14 @@ struct NowPlayingView: View {
                     .buttonStyle(.borderless)
                     .foregroundStyle(Theme.Text.secondary)
                 }
+                // Credit the community source when the lyrics came from
+                // the LRCLIB fallback rather than YouTube.
+                if env.player.lyricsSource == .lrclib {
+                    Text("Synced lyrics from LRCLIB")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(Theme.Text.tertiary)
+                        .help("YouTube had no synced lyrics for this song; these come from lrclib.net, a free community database.")
+                }
             }
             Group {
                 if env.player.lyricsLoading {

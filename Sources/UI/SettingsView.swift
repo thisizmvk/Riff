@@ -367,6 +367,25 @@ struct SettingsView: View {
         }
     }
 
+    /// Title + explanation + switch row (the Playback section's pattern).
+    private func extraToggle(title: String, detail: String, isOn: Binding<Bool>) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white)
+                Text(detail)
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.Text.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 16)
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .labelsHidden()
+        }
+    }
+
     private var playbackSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             sectionTitle("Playback")
@@ -420,6 +439,16 @@ struct SettingsView: View {
                     }
                 }
             }
+            extraToggle(
+                title: "Synced lyrics from LRCLIB",
+                detail: "When YouTube has no time-synced lyrics, look them up on lrclib.net (free, community-run). Sends the song title and artist; nothing else.",
+                isOn: Binding(get: { env.player.lrclibEnabled }, set: { env.player.setLRCLibEnabled($0) })
+            )
+            extraToggle(
+                title: "Skip non-music sections",
+                detail: "Skip intros, skits and outros in music videos, as marked by the SponsorBlock community. Lookups are anonymous — the server only sees a group of videos, never which one you're playing.",
+                isOn: Binding(get: { env.player.skipNonMusicEnabled }, set: { env.player.setSkipNonMusicEnabled($0) })
+            )
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Autoplay")
