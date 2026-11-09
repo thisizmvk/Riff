@@ -1241,13 +1241,11 @@ let firstPageInfoGeneration = null;
   floatSample = 0;
   posted.length = 0;
   for (let i = 0; i < 9; i++) { video2.currentTime += 1; w[1].fn(); }
-  check(posted.some((x) => x.event === "audioGraphFailed"), "silent graph posts audioGraphFailed");
-  // The harness runs sub-500 ms timers immediately, so the deferred
-  // reload has already fired once.
-  check(store.get("riffGraphRecovered") === "1", "recovery marks the session");
-  check(reloads === 1, "first silent-graph detection reloads exactly once");
-  n.recoverFromSilentGraph("running");
-  check(reloads === 1, "a second recovery in the same session never reloads again");
+  // Field report 2026-11-09: this measurement misfired on audible music.
+  // It must never act — no effects-off event, no reload — only journal.
+  check(!posted.some((x) => x.event === "audioGraphFailed"), "silence never turns effects off");
+  check(reloads === 0, "silence never reloads the page");
+  check(posted.some((x) => x.event === "diagnostic" && x.msg.includes("looked silent")), "silence is journaled as a diagnostic");
 
   // Paused / muted silence is not a failure.
   store.clear(); n.stopWatchdog(); n.startWatchdog(); w = watch(); posted.length = 0;

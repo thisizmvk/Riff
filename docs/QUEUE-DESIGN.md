@@ -179,15 +179,13 @@ this list, the policy, and its table row together — never one alone.
     `play(item:)` removes its row from the queue before setting the
     current track (the real arrival is same-id and would not consume
     it; the ghost row replayed later).
-15. **One audio-recovery reload, never a queue reload.** The equalizer
-    and loudness normalization route the page's `<video>` through Web
-    Audio, which is one-way. If that graph is ever silent while the
-    element is audibly playing (8 s of exact digital zero), the page
-    reports `audioGraphFailed`, Swift turns both effects off, and the
-    page reloads ONCE per session (`sessionStorage` flag) to get
-    un-routed audio back. It is the only JS hard load that isn't a
-    context start (guard.sh `EXPECTED_JS_NAV`). Losing the radio roll
-    on that rare path beats leaving the user with no sound.
+15. **Audio effects never reload the page.** The equalizer and loudness
+    normalization route the page's `<video>` through Web Audio. Silence
+    is prevented up front (never route cross-origin media; resume the
+    context on every `play`), not "recovered" after the fact: a
+    silence-watchdog reload shipped briefly and misfired on audible
+    music (2026-11-09), killing the EQ mid-song. The watchdog now only
+    journals a diagnostic.
 
 Run `./tools/harness/run.sh` before committing anything under
 `Sources/Audio/`, `Resources/player-bridge.js`, or `tools/harness/`

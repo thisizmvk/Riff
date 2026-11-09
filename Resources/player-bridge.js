@@ -2080,17 +2080,13 @@
             if (this.watchdogId !== null) { clearInterval(this.watchdogId); this.watchdogId = null; }
         },
 
+        // Diagnostic only. This used to turn effects off and reload the
+        // page, but the analyser read exact silence while music was
+        // audibly playing (field report 2026-11-09: Bass Boost switched
+        // itself off mid-song). A measurement that can lie must not take
+        // destructive action — it just journals what it saw.
         recoverFromSilentGraph(state) {
-            postEvent({ event: "audioGraphFailed", reason: "silent graph (ctx " + state + ")" });
-            // Once per page session: never loop on reloads.
-            let already = false;
-            try { already = sessionStorage.getItem("riffGraphRecovered") === "1"; } catch (_) {}
-            if (already) return;
-            try { sessionStorage.setItem("riffGraphRecovered", "1"); } catch (_) {}
-            // Swift has turned effects off (handling the event above), so
-            // the reloaded page plays un-routed. QUEUE-DESIGN.md, contract
-            // item 10 — the only reload that isn't a context start.
-            setTimeout(() => { location.reload(); }, 400);
+            postEvent({ event: "diagnostic", msg: "audio graph looked silent for 8s (ctx " + state + ") — no action taken" });
         },
 
         setEnabled(on) {
