@@ -68,6 +68,20 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
         let bestBitrate: Int?
         let bestCodec: String?
         let videoHeight: Int        // hidden video rendition (0 = audio-only)
+        /// Every audio format the page was offered, best first.
+        var offered: [Offered] = []
+
+        struct Offered: Equatable, Sendable {
+            let itag: Int?
+            let codec: String?
+            let bitrate: Int?
+            var label: String { AudioFormat.describe(codec: codec, bitrate: bitrate) ?? "itag \(itag ?? 0)" }
+        }
+
+        /// "AAC · 129 kbps, Opus · 131 kbps" — the whole offer, for the tooltip.
+        var offeredSummary: String? {
+            offered.isEmpty ? nil : offered.map(\.label).joined(separator: ", ")
+        }
 
         /// "Opus · 160 kbps" — nil when nothing is known.
         var label: String? {
@@ -388,7 +402,12 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
                 itag: int("itag"), codec: str("codec"), bitrate: int("bitrate"),
                 audioQuality: str("audioQuality"), bestItag: int("bestItag"),
                 bestBitrate: int("bestBitrate"), bestCodec: str("bestCodec"),
-                videoHeight: int("videoHeight") ?? 0
+                videoHeight: int("videoHeight") ?? 0,
+                offered: ((body["offered"] as? [[String: Any]]) ?? []).map { o in
+                    AudioFormat.Offered(itag: (o["itag"] as? NSNumber)?.intValue,
+                                        codec: o["codec"] as? String,
+                                        bitrate: (o["bitrate"] as? NSNumber)?.intValue)
+                }
             ))
         case "queueSnapshot":
             guard let raw = body["items"] as? [[String: Any]], !raw.isEmpty else { return nil }

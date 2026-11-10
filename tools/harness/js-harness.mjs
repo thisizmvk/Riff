@@ -1128,6 +1128,9 @@ let firstPageInfoGeneration = null;
   check(af && af.bitrate === 138000, "bitrate prefers averageBitrate from the matching format");
   check(af && af.bestItag === 141 && af.bestCodec === "aac" && af.bestBitrate === 255000, "best offered audio format found (AAC 256)");
   check(af && af.videoHeight === 1080, "hidden video rendition reported");
+  check(af && Array.isArray(af.offered) && af.offered.length === 3, "every offered audio format is listed (got " + JSON.stringify(af && af.offered) + ")");
+  check(af && af.offered[0].itag === 141 && af.offered[2].itag === 140, "offered formats are sorted best first");
+  check(af && af.offered.every((o) => o.codec === "aac" || o.codec === "opus"), "offered formats carry their codec");
 
   // Audio-only stats string (no video part).
   api.getStatsForNerds = () => ({ codecs: "opus (251)" });

@@ -957,6 +957,9 @@ struct NowPlayingView: View {
                 if env.player.audioQualityPreference == .high {
                     t += " Highest quality is on: hidden video is capped."
                 }
+                if let all = f.offeredSummary {
+                    t += "\nYouTube offered: \(all)."
+                }
                 return t
             }()
             HStack(spacing: 4) {

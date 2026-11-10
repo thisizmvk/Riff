@@ -125,7 +125,7 @@
                     }
                 }
             } catch (_) {}
-            let bitrate = null, audioQuality = null, best = null;
+            let bitrate = null, audioQuality = null, best = null, offered = [];
             try {
                 const pr = typeof p.getPlayerResponse === "function" ? p.getPlayerResponse() : null;
                 const fmts = (pr && pr.streamingData && pr.streamingData.adaptiveFormats) || [];
@@ -138,6 +138,11 @@
                     if (!codec) codec = this.codecFromMime(cur.mimeType);
                 }
                 for (const f of audios) if (!best || rate(f) > rate(best)) best = f;
+                // Every audio format the page was offered, best first, so the
+                // UI can show exactly what YouTube made available.
+                offered = audios
+                    .map((f) => ({ itag: f.itag, codec: this.codecFromMime(f.mimeType), bitrate: rate(f) || null }))
+                    .sort((x, y) => (y.bitrate || 0) - (x.bitrate || 0));
             } catch (_) {}
             const v = videoEl();
             return {
@@ -149,6 +154,7 @@
                 bestBitrate: best ? (best.averageBitrate || best.bitrate || null) : null,
                 bestCodec: best ? this.codecFromMime(best.mimeType) : null,
                 videoHeight: v ? (v.videoHeight || 0) : 0,
+                offered: offered,
             };
         },
         report() {
