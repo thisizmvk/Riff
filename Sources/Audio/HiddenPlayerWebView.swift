@@ -441,7 +441,10 @@ final class HiddenPlayerWebView: NSObject, WKScriptMessageHandler, WKNavigationD
             if let msg = body["msg"] as? String {
                 // Per-track loudness chatter ("norm …") is routine,
                 // not an error — keep the export/error stream clean.
-                if msg.hasPrefix("norm ") {
+                if msg.hasPrefix("audioProbe ") {
+                    // Read-only player survey: into the exportable journal.
+                    MainActor.assumeIsolated { Audit.note(msg) }
+                } else if msg.hasPrefix("norm ") {
                     Log.bridge.debug("JS diagnostic: \(msg, privacy: .public)")
                 } else {
                     Log.bridge.error("JS diagnostic: \(msg, privacy: .public)")

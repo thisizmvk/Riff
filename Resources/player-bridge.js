@@ -163,6 +163,65 @@
                 postEvent(Object.assign({ event: "audioFormat" }, f));
             }
         },
+        // One-shot, read-only survey of what the page's player exposes for
+        // audio quality — to find out why it streams AAC 128 (itag 140)
+        // while offering Opus 276 / AAC 258 (field report 2026-11-09).
+        // Journaled via the diagnostics export; changes nothing.
+        probed: false,
+        probe() {
+            if (this.probed) return;
+            const p = playerApi();
+            if (!p) return;
+            this.probed = true;
+            const out = [];
+            const rx = /audio|quality|format|stream|abr|track|bitrate|drc/i;
+            try {
+                const names = new Set();
+                for (let o = p; o && o !== Object.prototype; o = Object.getPrototypeOf(o)) {
+                    for (const k of Object.getOwnPropertyNames(o)) if (rx.test(k)) names.add(k);
+                }
+                out.push("methods=" + Array.from(names).sort().join(","));
+            } catch (e) { out.push("methods=err"); }
+            for (const g of ["getPlaybackQuality", "getAvailableQualityLevels", "getAudioTrack", "getAvailableAudioTracks"]) {
+                try {
+                    if (typeof p[g] === "function") {
+                        const r = p[g]();
+                        out.push(g + "=" + JSON.stringify(r && r.length !== undefined && typeof r !== "string" ? r.length + " items" : r).slice(0, 120));
+                    }
+                } catch (_) { out.push(g + "=err"); }
+            }
+            try {
+                const keys = [];
+                for (let i = 0; i < localStorage.length; i++) {
+                    const k = localStorage.key(i);
+                    if (rx.test(k)) keys.push(k + "=" + String(localStorage.getItem(k)).slice(0, 80));
+                }
+                out.push("localStorage=" + keys.join(" | "));
+            } catch (_) { out.push("localStorage=err"); }
+            try {
+                const flags = (window.ytcfg && typeof window.ytcfg.get === "function" && window.ytcfg.get("EXPERIMENT_FLAGS")) || {};
+                const hit = Object.keys(flags).filter((k) => /audio|opus|aac|hq_|high_quality|drc/i.test(k))
+                    .map((k) => k + "=" + flags[k]);
+                out.push("flags=" + hit.join(","));
+            } catch (_) { out.push("flags=err"); }
+            try {
+                const pr = typeof p.getPlayerResponse === "function" ? p.getPlayerResponse() : null;
+                const ac = pr && pr.playerConfig && pr.playerConfig.audioConfig;
+                out.push("audioConfig=" + JSON.stringify(ac || null).slice(0, 200));
+                const fm = ((pr && pr.streamingData && pr.streamingData.adaptiveFormats) || [])
+                    .filter((f) => (f.mimeType || "").startsWith("audio/"))
+                    .map((f) => f.itag + ":" + (f.audioQuality || "?") + (f.xtags ? ":" + f.xtags : "") + (f.isDrc ? ":drc" : ""));
+                out.push("formats=" + fm.join(","));
+                out.push("ua=" + navigator.userAgent.slice(0, 120));
+                const mse = window.MediaSource || window.ManagedMediaSource;
+                if (mse && mse.isTypeSupported) {
+                    out.push("mse opus=" + mse.isTypeSupported('audio/webm; codecs="opus"')
+                        + " aac=" + mse.isTypeSupported('audio/mp4; codecs="mp4a.40.2"'));
+                }
+            } catch (_) { out.push("response=err"); }
+            for (const line of out) postEvent({ event: "diagnostic", msg: "audioProbe " + line });
+        },
+
         // Called on every track change: steer, then report once adaptive
         // bitrate has had time to settle (and again later — ABR can step
         // up a few seconds in).
@@ -175,6 +234,7 @@
             setTimeout(() => this.apply(), 300);
             setTimeout(() => this.apply(), 1500);
             setTimeout(() => this.report(), 4000);
+            setTimeout(() => this.probe(), 6000);
             setTimeout(() => this.report(), 12000);
         },
     };
