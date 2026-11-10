@@ -54,6 +54,7 @@ struct NowPlayingView: View {
     /// the player with large, centered (synced) lyrics over the
     /// adaptive backdrop. Apple Music's dedicated lyrics view.
     @State private var lyricsFullscreen: Bool = false
+    @State private var formatsPopover: Bool = false
     /// Volume level to restore when the speaker icon un-mutes.
     @State private var preMuteVolume: Double = 1.0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -962,21 +963,54 @@ struct NowPlayingView: View {
                 }
                 return t
             }()
-            HStack(spacing: 4) {
-                Image(systemName: "waveform")
-                Text(label.uppercased())
-                if f.isBelowBestAvailable {
-                    Image(systemName: "arrow.up.circle")
+            Button { formatsPopover.toggle() } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "waveform")
+                    Text(label.uppercased())
+                    if f.isBelowBestAvailable {
+                        Image(systemName: "arrow.up.circle")
+                    }
                 }
+                .font(.system(size: 10, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(Theme.Text.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+                .contentShape(Capsule())
             }
-            .font(.system(size: 10, weight: .semibold))
-            .tracking(0.6)
-            .foregroundStyle(Theme.Text.secondary)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(Capsule().strokeBorder(Theme.Fill.strong, lineWidth: 1))
+            .buttonStyle(.plain)
             .help(tip)
             .accessibilityLabel(tip)
+            // Tooltips vanish in screenshots and are easy to miss — a
+            // click shows the full offer as a readable panel.
+            .popover(isPresented: $formatsPopover, arrowEdge: .bottom) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Audio formats for this song")
+                        .font(.system(size: 13, weight: .semibold))
+                    if f.offered.isEmpty {
+                        Text("The player didn't report its format list.")
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(f.offered.enumerated()), id: \.offset) { _, o in
+                            HStack {
+                                Text(o.label).font(.system(size: 12, design: .monospaced))
+                                Text("itag \(o.itag.map(String.init) ?? "?")")
+                                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                                Spacer(minLength: 12)
+                                if o.itag != nil, o.itag == f.itag {
+                                    Text("PLAYING").font(.system(size: 10, weight: .bold)).foregroundStyle(Theme.red)
+                                }
+                            }
+                        }
+                    }
+                    Text("Offered by YouTube to the web player; Riff plays through it and can't fetch other streams.")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(14)
+                .frame(width: 320)
+            }
         }
     }
 
